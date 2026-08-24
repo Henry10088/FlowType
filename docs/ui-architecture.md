@@ -4,7 +4,7 @@ The two clients use the same ownership rule: runtime/session state lives below t
 
 ## Android
 
-`FlowTypeApplication` is the single source of truth for binding, connection, input session, image transfer and history mutations. `MainActivity` is a lifecycle and navigation coordinator. It owns activity-result contracts, keyboard/window policy, pairing dialogs and input-session actions.
+`FlowTypeApplication` is the single source of truth for binding, connection, input session, image transfer, file batches and history mutations. `MainActivity` is a lifecycle and navigation coordinator. It owns activity-result contracts, keyboard/window policy, pairing dialogs and input-session actions.
 
 Page rendering is split into small classes under `android/app/src/main/java/app/flowtype/ui/`:
 
@@ -12,6 +12,7 @@ Page rendering is split into small classes under `android/app/src/main/java/app/
 - `ComputersScreen` renders the binding list and delegates mutations.
 - `SettingsScreen` binds persistent settings and delegates overlay permission flow.
 - `ImageScreen` owns preview/prepare work and keeps bitmap processing off the main thread.
+- `FileTransferScreen` owns multi-file/directory selection, batch progress and system directory picker results; stream and resume state remain in the application/network layer.
 - `Screen` is the navigation state; it is not a second copy of session state.
 
 The renderers receive callbacks instead of holding their own connection or session model. This prevents a page transition, floating window, or activity recreation from creating competing synchronization state.
@@ -24,6 +25,7 @@ The Win32 message loop and `UiContext` remain the lifecycle boundary. UI-only co
 - `ui_theme.rs`: palette constants used by every page.
 - `ui_paint.rs`: GDI fonts, text, shapes, icons, menus and UTF-16 helpers.
 - `ui.rs`: page composition, control ownership, Win32 lifecycle and state-driven layout.
+- The file transfer page owns file chooser and drag/drop actions; file enumeration, manifests, transfer state and recovery remain outside Win32 painting code.
 
 Network, pairing, persistence and injector code remain outside the UI modules. The UI reads `AppState::snapshot()` and posts commands back to the existing state methods; it does not mutate protocol state directly.
 
