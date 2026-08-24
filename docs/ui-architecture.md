@@ -1,0 +1,36 @@
+# UI Architecture
+
+The two clients use the same ownership rule: runtime/session state lives below the UI, while screens only render state and dispatch user actions.
+
+## Android
+
+`FlowTypeApplication` is the single source of truth for binding, connection, input session, image transfer and history mutations. `MainActivity` is a lifecycle and navigation coordinator. It owns activity-result contracts, keyboard/window policy, pairing dialogs and input-session actions.
+
+Page rendering is split into small classes under `android/app/src/main/java/app/flowtype/ui/`:
+
+- `HistoryScreen` renders history and detail views.
+- `ComputersScreen` renders the binding list and delegates mutations.
+- `SettingsScreen` binds persistent settings and delegates overlay permission flow.
+- `ImageScreen` owns preview/prepare work and keeps bitmap processing off the main thread.
+- `Screen` is the navigation state; it is not a second copy of session state.
+
+The renderers receive callbacks instead of holding their own connection or session model. This prevents a page transition, floating window, or activity recreation from creating competing synchronization state.
+
+## Windows
+
+The Win32 message loop and `UiContext` remain the lifecycle boundary. UI-only concerns are separated into:
+
+- `ui_commands.rs`: command IDs and conversion from `WM_COMMAND` IDs to typed actions.
+- `ui_theme.rs`: palette constants used by every page.
+- `ui_paint.rs`: GDI fonts, text, shapes, icons, menus and UTF-16 helpers.
+- `ui.rs`: page composition, control ownership, Win32 lifecycle and state-driven layout.
+
+Network, pairing, persistence and injector code remain outside the UI modules. The UI reads `AppState::snapshot()` and posts commands back to the existing state methods; it does not mutate protocol state directly.
+
+## Refactoring Rules
+
+1. Keep one authoritative runtime/session state per process.
+2. Keep network and injector behavior independent from screen rendering.
+3. Prefer typed commands and callbacks at UI boundaries.
+4. Keep platform-unsafe code localized to platform UI modules.
+5. Make a behavior-preserving split before changing product behavior, then add focused tests for the new boundary.

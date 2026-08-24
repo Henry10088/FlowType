@@ -1,0 +1,25 @@
+# Build outputs
+build/
+target/
+target-*/
+.gradle/
+.kotlin/
+local.properties
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+
+# Android packages and reports
+*.apk
+*.aab
+captures/
+
+# Windows build artifacts
+*.pdb
+*.ilk
+installer/output/
+
+# Local release signing material
+signing/

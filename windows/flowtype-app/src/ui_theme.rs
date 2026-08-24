@@ -1,0 +1,8 @@
+pub(super) const COLOR_WHITE: u32 = 0x00ff_ffff;
+pub(super) const COLOR_SIDEBAR: u32 = 0x00fb_fbfb;
+pub(super) const COLOR_TEXT: u32 = 0x001f_1f1f;
+pub(super) const COLOR_MUTED: u32 = 0x0070_7070;
+pub(super) const COLOR_LINE: u32 = 0x00df_dfdf;
+pub(super) const COLOR_TEAL: u32 = 0x00b8_ba00;
+pub(super) const COLOR_TEAL_PALE: u32 = 0x00f8_f9ea;
+pub(super) const COLOR_DANGER: u32 = 0x003f_3fd1;

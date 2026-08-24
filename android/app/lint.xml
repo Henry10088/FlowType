@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!-- Draft writes are synchronous so backgrounding cannot lose the latest full text. -->
+    <issue id="ApplySharedPref">
+        <ignore path="src/main/java/app/flowtype/security/SecureDraftStore.kt" />
+    </issue>
+
+    <!-- These versions are the tested API 36 toolchain baseline for V1. -->
+    <issue id="AndroidGradlePluginVersion" severity="ignore" />
+    <issue id="GradleDependency" severity="ignore" />
+
+    <!-- KTX substitutions are stylistic and do not justify adding churn or dependencies. -->
+    <issue id="UseKtx" severity="ignore" />
+
+    <!-- The history action row deliberately uses the confirmed custom dark button style. -->
+    <issue id="ButtonStyle">
+        <ignore path="src/main/res/layout/page_history_detail.xml" />
+    </issue>
+</lint>

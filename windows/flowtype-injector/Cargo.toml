@@ -1,0 +1,16 @@
+[package]
+name = "flowtype-injector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+autobins = false
+
+[[bin]]
+name = "flowtype-injector"
+path = "src/main.rs"
+
+[dependencies]
+flowtype-core = { path = "../flowtype-core" }
+windows.workspace = true
+windows-sys.workspace = true

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">说写输入验证</string>
+    <string name="title">输入法事件验证</string>
+    <string name="privacy_note">输入框会调用当前系统输入法。事件只保存在内存中；只有主动点击“复制报告”才会把测试正文写入剪贴板。</string>
+    <string name="input_hint">在这里开始语音或键盘输入</string>
+    <string name="clear">清空</string>
+    <string name="copy_report">复制报告</string>
+    <string name="report_copied">测试报告已复制</string>
+    <string name="empty_report">尚无文本变化</string>
+    <string name="event_summary">事件 %1$d · 最近：%2$s · 完整状态 %3$d UTF-16</string>
+</resources>
