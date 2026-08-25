@@ -19,13 +19,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::AppState;
 use crate::settings;
-use crate::ui::ui_paint::{draw_brand_mark, fill, wide};
+use crate::ui::ui_paint::{draw_brand_mark, fill, fill_ellipse, outline_ellipse, wide};
 use crate::ui::ui_theme::{COLOR_BALL_BLACK, COLOR_BALL_ORANGE, COLOR_TEAL};
 
 const CLASS_NAME: &str = "FlowTypeFloatingBall";
 const CLICK_TIMER: usize = 1;
 const BALL_SIZE: i32 = 56;
 const BALL_MARGIN: i32 = 24;
+const BALL_BORDER: u32 = 0x0038_3e42;
 
 struct BallContext {
     state: Arc<AppState>,
@@ -237,14 +238,27 @@ unsafe extern "system" fn window_proc(
                 bottom: context.size - 1,
             };
             fill(dc, &rect, ball_color(context));
+            outline_ellipse(dc, rect, BALL_BORDER, (context.size / 32).max(1));
             draw_brand_mark(
                 dc,
                 RECT {
-                    left: context.size * 13 / 56,
-                    top: context.size * 13 / 56,
-                    right: context.size * 43 / 56,
-                    bottom: context.size * 43 / 56,
+                    left: context.size * 8 / 56,
+                    top: context.size * 8 / 56,
+                    right: context.size * 48 / 56,
+                    bottom: context.size * 48 / 56,
                 },
+            );
+            let dot_margin = context.size * 6 / 56;
+            let dot_size = (context.size * 9 / 56).max(7);
+            fill_ellipse(
+                dc,
+                RECT {
+                    left: context.size - dot_margin - dot_size,
+                    top: context.size - dot_margin - dot_size,
+                    right: context.size - dot_margin,
+                    bottom: context.size - dot_margin,
+                },
+                COLOR_TEAL,
             );
             unsafe { EndPaint(hwnd, &paint) };
             0
