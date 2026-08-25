@@ -89,6 +89,12 @@ fn address_score(adapter_name: &str, address: Ipv4Addr) -> i32 {
     if name.contains("tailscale") {
         return 1_000;
     }
+    // ReachOps is useful as a fallback, but it is not a LAN route for phones
+    // on the same Wi-Fi network. Keep it in the QR candidates below physical
+    // adapters so the primary address remains reachable on a local network.
+    if name.contains("reachops") || name.contains("rreachcontrol") {
+        return 120;
+    }
     if name.contains("vEthernet")
         || name.contains("vethernet")
         || name.contains("hyper-v")
@@ -96,6 +102,13 @@ fn address_score(adapter_name: &str, address: Ipv4Addr) -> i32 {
         || name.contains("default switch")
     {
         return 10;
+    }
+    if name.contains("ethernet")
+        || name.contains("wi-fi")
+        || name.contains("wifi")
+        || name.contains("wlan")
+    {
+        return 300;
     }
     if address.is_private() { 200 } else { 100 }
 }
@@ -139,5 +152,13 @@ mod tests {
             ) < 100
         );
         assert!(address_score("Wi-Fi", Ipv4Addr::new(192, 168, 1, 20)) >= 100);
+    }
+
+    #[test]
+    fn prefers_physical_lan_over_reachops_overlay() {
+        let lan = address_score("Ethernet", Ipv4Addr::new(192, 168, 31, 212));
+        let reachops = address_score("ReachOps", Ipv4Addr::new(10, 80, 255, 227));
+        assert!(lan > reachops);
+        assert!(reachops >= 100);
     }
 }
