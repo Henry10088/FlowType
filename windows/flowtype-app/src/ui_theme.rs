@@ -6,3 +6,5 @@ pub(super) const COLOR_LINE: u32 = 0x00df_dfdf;
 pub(super) const COLOR_TEAL: u32 = 0x00b8_ba00;
 pub(super) const COLOR_TEAL_PALE: u32 = 0x00f8_f9ea;
 pub(super) const COLOR_DANGER: u32 = 0x003f_3fd1;
+pub(super) const COLOR_BALL_ORANGE: u32 = 0x0000_8cff;
+pub(super) const COLOR_BALL_BLACK: u32 = 0x0010_1214;

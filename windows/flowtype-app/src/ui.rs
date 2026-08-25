@@ -30,6 +30,8 @@ use crate::{AppState, PORT, WM_APP_STATE, settings};
 
 #[path = "ui_commands.rs"]
 mod ui_commands;
+#[path = "ui_floating.rs"]
+mod ui_floating;
 #[path = "ui_paint.rs"]
 mod ui_paint;
 #[path = "ui_theme.rs"]
@@ -78,6 +80,7 @@ struct UiContext {
     body_font: HFONT,
     icon_font: HFONT,
     auto_start_checked: bool,
+    ball_hwnd: HWND,
 }
 
 impl UiContext {
@@ -99,6 +102,7 @@ impl UiContext {
             body_font: null_mut(),
             icon_font: null_mut(),
             auto_start_checked: false,
+            ball_hwnd: null_mut(),
         }
     }
 
@@ -521,6 +525,7 @@ impl UiContext {
             self.page = Page::Status;
         }
         self.rebuild_page();
+        ui_floating::refresh(self.ball_hwnd);
     }
 
     fn update_tray(&self) {
@@ -1051,6 +1056,7 @@ unsafe extern "system" fn window_proc(
             ui.rebuild_fonts();
             ui.rebuild_page();
             ui.add_tray();
+            ui.ball_hwnd = ui_floating::create(ui.state.clone(), hwnd);
             0
         }
         WM_COMMAND => {
@@ -1155,6 +1161,10 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_DESTROY => {
+            if !ui.ball_hwnd.is_null() {
+                unsafe { DestroyWindow(ui.ball_hwnd) };
+                ui.ball_hwnd = null_mut();
+            }
             ui.remove_tray();
             ui.state.set_ui_hwnd(0);
             unsafe { PostQuitMessage(0) };

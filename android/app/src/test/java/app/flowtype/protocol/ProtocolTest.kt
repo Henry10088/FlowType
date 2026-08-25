@@ -69,4 +69,14 @@ class ProtocolTest {
         assertEquals(ProbeState.READY, message.value.targetState)
         assertEquals(42L, message.value.activityAgeMs)
     }
+
+    @Test
+    fun decodesSwitchToCurrentComputer() {
+        val message = ProtocolCodec.decodeServer(
+            """{"protocol_version":1,"type":"switch_computer","pc_id":"pc","pc_name":"办公室电脑"}""",
+        )
+        require(message is ServerMessage.SwitchComputer)
+        assertEquals("pc", message.value.pcId)
+        assertEquals("办公室电脑", message.value.pcName)
+    }
 }

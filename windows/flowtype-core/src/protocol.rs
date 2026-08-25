@@ -58,8 +58,16 @@ pub enum ClientSessionState {
 pub enum ServerMessage {
     Ack(Ack),
     Target(Target),
+    SwitchComputer(SwitchComputer),
     ProbeResult(ProbeResult),
     Error(ProtocolError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwitchComputer {
+    pub protocol_version: u16,
+    pub pc_id: String,
+    pub pc_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,7 +220,8 @@ impl Probe {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientMessage, ErrorCode, ProtocolError, ServerMessage, Snapshot, ValidationError,
+        ClientMessage, ErrorCode, ProtocolError, ServerMessage, Snapshot, SwitchComputer,
+        ValidationError,
     };
 
     #[test]
@@ -295,5 +304,18 @@ mod tests {
         let value = serde_json::to_value(result).unwrap();
         assert_eq!(value["type"], "probe_result");
         assert_eq!(value["activity_age_ms"], 42);
+    }
+
+    #[test]
+    fn serializes_switch_to_current_computer() {
+        let value = serde_json::to_value(ServerMessage::SwitchComputer(SwitchComputer {
+            protocol_version: 1,
+            pc_id: "pc".into(),
+            pc_name: "办公室电脑".into(),
+        }))
+        .unwrap();
+        assert_eq!(value["type"], "switch_computer");
+        assert_eq!(value["pc_id"], "pc");
+        assert_eq!(value["pc_name"], "办公室电脑");
     }
 }

@@ -1,3 +1,4 @@
+use std::fs;
 use std::io;
 use std::mem::size_of;
 
@@ -9,6 +10,7 @@ use windows_sys::Win32::System::Registry::{
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const VALUE_NAME: &str = "FlowType";
+const FLOATING_POSITION_FILE: &str = "floating-position-v1.txt";
 
 pub fn auto_start_enabled() -> bool {
     open_key(KEY_QUERY_VALUE)
@@ -57,6 +59,20 @@ pub fn set_auto_start(enabled: bool) -> io::Result<()> {
             check(result)
         }
     }
+}
+
+pub fn floating_position() -> Option<(i32, i32)> {
+    let path = crate::identity::data_dir()
+        .ok()?
+        .join(FLOATING_POSITION_FILE);
+    let value = fs::read_to_string(path).ok()?;
+    let mut parts = value.trim().split(',');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+pub fn set_floating_position(position: (i32, i32)) -> io::Result<()> {
+    let path = crate::identity::data_dir()?.join(FLOATING_POSITION_FILE);
+    fs::write(path, format!("{},{}", position.0, position.1))
 }
 
 struct RegistryKey(HKEY);

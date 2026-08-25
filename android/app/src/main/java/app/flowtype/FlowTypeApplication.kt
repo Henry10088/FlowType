@@ -8,6 +8,7 @@ import app.flowtype.data.HistoryStore
 import app.flowtype.data.SettingsStore
 import app.flowtype.network.SyncClient
 import app.flowtype.image.PreparedImage
+import app.flowtype.network.ControlClient
 import app.flowtype.network.ComputerDiscovery
 import app.flowtype.network.TargetSelector
 import app.flowtype.pairing.BindingStore
@@ -56,6 +57,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
     private lateinit var syncClient: SyncClient
     private lateinit var targetProbeClient: app.flowtype.network.TargetProbeClient
     private lateinit var discovery: ComputerDiscovery
+    private val controlClients = mutableMapOf<String, ControlClient>()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val observers = CopyOnWriteArraySet<(UiState) -> Unit>()
     private var currentBinding: ComputerBinding? = null
@@ -97,6 +99,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
             statusText = getString(R.string.status_connecting, it.pcName)
             syncClient.connect(it)
         }
+        refreshControlClients()
         discovery.start()
     }
 
@@ -288,6 +291,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
     fun renameComputer(pcId: String, name: String) {
         bindings.rename(pcId, name)
         currentBinding = bindings.load()
+        refreshControlClients()
         notifyChanged()
     }
 
@@ -300,20 +304,43 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
             currentBinding = bindings.load()
             connected = false
             currentBinding?.let(::connect) ?: run {
+                refreshControlClients()
                 statusText = getString(R.string.status_unpaired)
                 notifyChanged()
             }
         } else {
+            refreshControlClients()
             notifyChanged()
         }
     }
 
     fun ensureConnected() = syncClient.ensureConnected()
 
+    private fun refreshControlClients() {
+        val stored = bindings.list()
+            .filter { it.pairingToken == null }
+            .associateBy { it.pcId }
+        controlClients.keys.toList()
+            .filter { it !in stored }
+            .forEach { pcId ->
+                controlClients.remove(pcId)?.shutdown()
+            }
+        stored.values.forEach { binding ->
+            controlClients.getOrPut(binding.pcId) {
+                ControlClient(bindings.phoneId, PhoneIdentity(), object : ControlClient.Listener {
+                    override fun onSwitchComputer(pcId: String) = onMain {
+                        this@FlowTypeApplication.onSwitchComputer(pcId)
+                    }
+                })
+            }.update(binding)
+        }
+    }
+
     fun saveNow() = saveDraftNow()
 
     override fun onReady(binding: ComputerBinding) = onMain {
         currentBinding = bindings.markPaired(binding)
+        refreshControlClients()
         connected = true
         targetState = null
         showSyncFullText = manualStartPending || autoSelectionError != null || syncClient.requiresExplicitStart()
@@ -375,6 +402,16 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         notifyChanged()
     }
 
+    override fun onSwitchComputer(pcId: String) = onMain {
+        val binding = bindings.select(pcId) ?: return@onMain
+        if (currentBinding?.pcId == binding.pcId) {
+            ensureConnected()
+        } else {
+            switchToComputer(binding)
+        }
+        notifyChanged()
+    }
+
     override fun onDisconnected(binding: ComputerBinding) = onMain {
         connected = false
         targetState = null
@@ -409,6 +446,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         bindings.remove(binding.pcId)
         PhoneIdentity().delete(binding.pcId)
         currentBinding = bindings.load()
+        refreshControlClients()
         statusText = getString(R.string.status_binding_invalid)
         currentBinding?.let(::connect) ?: notifyChanged()
     }
@@ -425,6 +463,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
 
     private fun connect(binding: ComputerBinding) {
         currentBinding = binding
+        refreshControlClients()
         connected = false
         showSyncFullText = false
         statusText = getString(R.string.status_connecting, binding.pcName)
@@ -553,6 +592,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
                 }
             }
         }
+        refreshControlClients()
         notifyChanged()
     }
 

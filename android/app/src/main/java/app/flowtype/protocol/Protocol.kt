@@ -82,6 +82,12 @@ data class TargetMessage(
     val protocolVersion: Int = PROTOCOL_VERSION,
 )
 
+data class SwitchComputerMessage(
+    val pcId: String,
+    val pcName: String,
+    val protocolVersion: Int = PROTOCOL_VERSION,
+)
+
 enum class ProbeState(val wireName: String) {
     READY("ready"),
     UNSUPPORTED("unsupported"),
@@ -120,6 +126,7 @@ data class ErrorMessage(
 sealed interface ServerMessage {
     data class Ack(val value: AckMessage) : ServerMessage
     data class Target(val value: TargetMessage) : ServerMessage
+    data class SwitchComputer(val value: SwitchComputerMessage) : ServerMessage
     data class ProbeResult(val value: ProbeResultMessage) : ServerMessage
     data class Error(val value: ErrorMessage) : ServerMessage
 }
@@ -189,6 +196,13 @@ object ProtocolCodec {
                     sessionId = value.getString("session_id"),
                     targetState = enumByWireName(value.getString("target_state")),
                     targetName = value.optString("target_name").ifEmpty { null },
+                    protocolVersion = version,
+                ),
+            )
+            "switch_computer" -> ServerMessage.SwitchComputer(
+                SwitchComputerMessage(
+                    pcId = value.getString("pc_id"),
+                    pcName = value.getString("pc_name"),
                     protocolVersion = version,
                 ),
             )

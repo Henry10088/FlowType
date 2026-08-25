@@ -1,11 +1,11 @@
 use std::mem::zeroed;
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{HWND, RECT};
+use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateFontW, CreatePen, CreateSolidBrush, DEFAULT_CHARSET, DT_CALCRECT, DT_SINGLELINE,
     DeleteObject, DrawTextW, Ellipse, FillRect, GetStockObject, HDC, HFONT, HGDIOBJ, LineTo,
-    MoveToEx, PS_SOLID, RoundRect, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    MoveToEx, PS_SOLID, Polyline, RoundRect, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -59,6 +59,43 @@ pub(super) fn fill_ellipse(dc: HDC, rect: RECT, color: u32) {
         DeleteObject(brush);
         DeleteObject(pen);
     }
+}
+
+pub(super) fn draw_brand_mark(dc: HDC, rect: RECT) {
+    let width = (rect.right - rect.left).max(1);
+    let height = (rect.bottom - rect.top).max(1);
+    let point = |x: f32, y: f32| POINT {
+        x: rect.left + (x * width as f32 / 32.0).round() as i32,
+        y: rect.top + (y * height as f32 / 32.0).round() as i32,
+    };
+    let outline = [
+        point(9.0, 23.0),
+        point(10.5, 17.0),
+        point(21.0, 7.0),
+        point(26.0, 12.0),
+        point(15.0, 22.0),
+        point(9.0, 23.0),
+    ];
+    let inner = [point(19.0, 9.0), point(24.0, 14.0)];
+    let stroke = unsafe { CreatePen(PS_SOLID, (width / 16).max(2), 0x00f4_f6f7) };
+    let old_stroke = unsafe { SelectObject(dc, stroke as HGDIOBJ) };
+    unsafe {
+        Polyline(dc, outline.as_ptr(), outline.len() as i32);
+        MoveToEx(dc, inner[0].x, inner[0].y, std::ptr::null_mut());
+        LineTo(dc, inner[1].x, inner[1].y);
+        SelectObject(dc, old_stroke);
+        DeleteObject(stroke);
+    }
+    fill_ellipse(
+        dc,
+        RECT {
+            left: point(24.0, 19.0).x,
+            top: point(24.0, 19.0).y,
+            right: point(30.0, 25.0).x,
+            bottom: point(25.0, 30.0).y,
+        },
+        0x00b8_ba00,
+    );
 }
 
 pub(super) fn outline_round_rect(dc: HDC, rect: RECT, color: u32, radius: i32) {

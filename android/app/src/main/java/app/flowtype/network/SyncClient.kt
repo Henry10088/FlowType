@@ -49,6 +49,7 @@ class SyncClient(
         fun onReady(binding: ComputerBinding)
         fun onAck(ack: AckMessage)
         fun onTarget(target: TargetMessage)
+        fun onSwitchComputer(pcId: String)
         fun onDisconnected(binding: ComputerBinding)
         fun onFailure(binding: ComputerBinding)
         fun onServerError(binding: ComputerBinding, error: ErrorMessage)
@@ -325,6 +326,9 @@ class SyncClient(
                                 queue.requireExplicitStart()
                             }
                             listener.onTarget(message.value)
+                        }
+                        is ServerMessage.SwitchComputer -> {
+                            listener.onSwitchComputer(message.value.pcId)
                         }
                         is ServerMessage.Error -> {
                             if (message.value.sessionId?.let(queue::acceptsSession) == false) return

@@ -19,7 +19,7 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use flowtype_core::ipc::{InjectorRequest, InjectorResponse};
 use flowtype_core::protocol::{
     Ack, Cancel, ClientMessage, ClientSessionState, ErrorCode, ProbeResult, ProbeState,
-    ProtocolError, Resume, ServerMessage, ServerSessionState, Target, TargetState,
+    ProtocolError, Resume, ServerMessage, ServerSessionState, SwitchComputer, Target, TargetState,
 };
 use futures_util::{SinkExt, StreamExt};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
@@ -32,6 +32,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
@@ -67,6 +68,8 @@ struct AuthMessage {
     pairing_token: Option<String>,
     #[serde(default)]
     public_key_spki: Option<String>,
+    #[serde(default)]
+    connection_mode: Option<String>,
     signature: String,
 }
 
@@ -153,6 +156,23 @@ struct ActiveConnection {
     connection_id: u64,
 }
 
+struct OnlineConnection {
+    phone_id: String,
+    phone_name: String,
+    is_probe: bool,
+}
+
+#[derive(Clone)]
+struct SwitchRequest {
+    pc_id: String,
+    pc_name: String,
+}
+
+struct SwitchChannel {
+    sender: UnboundedSender<SwitchRequest>,
+    is_control: bool,
+}
+
 struct AppState {
     identity: PcIdentity,
     pc_name: Mutex<String>,
@@ -160,6 +180,8 @@ struct AppState {
     paired_phones: Mutex<HashMap<String, PairedPhone>>,
     injector: Mutex<Option<InjectorClient>>,
     active_connection: Mutex<Option<ActiveConnection>>,
+    online_connections: Mutex<HashMap<u64, OnlineConnection>>,
+    switch_channels: Mutex<HashMap<u64, SwitchChannel>>,
     runtime_status: Mutex<RuntimeStatus>,
     ui_hwnd: AtomicIsize,
     next_connection_id: AtomicU64,
@@ -210,6 +232,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         paired_phones: Mutex::new(paired_phones),
         injector: Mutex::new(injector),
         active_connection: Mutex::new(None),
+        online_connections: Mutex::new(HashMap::new()),
+        switch_channels: Mutex::new(HashMap::new()),
         runtime_status: Mutex::new(RuntimeStatus {
             summary: "等待手机连接".to_owned(),
             connected_phone: None,
@@ -339,6 +363,146 @@ impl AppState {
         let hwnd = self.ui_hwnd.load(Ordering::Acquire);
         if hwnd != 0 {
             unsafe { PostMessageW(hwnd as _, WM_APP_STATE, 0, 0) };
+        }
+    }
+
+    fn mark_online_connection(&self, phone_id: &str, phone_name: &str, connection_id: u64) {
+        if let Ok(mut online) = self.online_connections.lock() {
+            online.insert(
+                connection_id,
+                OnlineConnection {
+                    phone_id: phone_id.to_owned(),
+                    phone_name: phone_name.to_owned(),
+                    is_probe: false,
+                },
+            );
+        }
+        self.refresh_online_status();
+    }
+
+    fn mark_probe_connection(&self, connection_id: u64) {
+        let changed = self
+            .online_connections
+            .lock()
+            .map(|mut online| {
+                online
+                    .get_mut(&connection_id)
+                    .map(|connection| {
+                        if connection.is_probe {
+                            false
+                        } else {
+                            connection.is_probe = true;
+                            true
+                        }
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if changed {
+            self.refresh_online_status();
+        }
+    }
+
+    fn clear_online_connection(&self, connection_id: u64) {
+        let removed = self
+            .online_connections
+            .lock()
+            .map(|mut online| online.remove(&connection_id).is_some())
+            .unwrap_or(false);
+        if removed {
+            self.refresh_online_status();
+        }
+    }
+
+    fn refresh_online_status(&self) {
+        let online = self.online_connections.lock().ok().and_then(|connections| {
+            connections
+                .iter()
+                .filter(|(_, connection)| !connection.is_probe)
+                .max_by_key(|(connection_id, _)| *connection_id)
+                .or_else(|| {
+                    connections
+                        .iter()
+                        .max_by_key(|(connection_id, _)| *connection_id)
+                })
+                .map(|(_, connection)| (connection.phone_id.clone(), connection.phone_name.clone()))
+        });
+        self.update_status(|status| {
+            if let Some((_, phone_name)) = online {
+                status.connected_phone = Some(phone_name.clone());
+                status.summary = format!("已连接：{phone_name}");
+                status.last_error = None;
+            } else {
+                status.connected_phone = None;
+                status.target_name = None;
+                status.summary = "等待手机连接".to_owned();
+            }
+        });
+    }
+
+    fn request_switch_to_current(&self) {
+        let pc_name = self
+            .pc_name
+            .lock()
+            .map(|name| name.clone())
+            .unwrap_or_else(|_| self.identity.pc_name.clone());
+        let request = SwitchRequest {
+            pc_id: self.identity.pc_id.clone(),
+            pc_name,
+        };
+        let preferred_id = self
+            .active_connection
+            .lock()
+            .ok()
+            .and_then(|active| active.as_ref().map(|connection| connection.connection_id));
+        let mut channels = match self.switch_channels.lock() {
+            Ok(channels) => channels,
+            Err(_) => return,
+        };
+        let candidate_id = preferred_id
+            .filter(|id| channels.contains_key(id))
+            .or_else(|| {
+                channels
+                    .keys()
+                    .filter(|id| {
+                        channels.get(id).is_some_and(|channel| channel.is_control)
+                            || self
+                                .online_connections
+                                .lock()
+                                .ok()
+                                .and_then(|online| {
+                                    online.get(id).map(|connection| !connection.is_probe)
+                                })
+                                .unwrap_or(false)
+                    })
+                    .max()
+                    .copied()
+            });
+        let Some(candidate_id) = candidate_id else {
+            return;
+        };
+        if channels
+            .get(&candidate_id)
+            .is_some_and(|channel| channel.sender.send(request).is_err())
+        {
+            channels.remove(&candidate_id);
+        }
+    }
+
+    fn register_switch_channel(
+        &self,
+        connection_id: u64,
+        sender: UnboundedSender<SwitchRequest>,
+        is_control: bool,
+    ) {
+        if let Ok(mut channels) = self.switch_channels.lock() {
+            channels.insert(connection_id, SwitchChannel { sender, is_control });
+        }
+    }
+
+    fn clear_switch_channel(&self, connection_id: u64) {
+        if let Ok(mut channels) = self.switch_channels.lock() {
+            channels.remove(&connection_id);
         }
     }
 
@@ -489,12 +653,39 @@ async fn serve_connection(
         },
     )
     .await?;
+    let is_control = auth.connection_mode.as_deref() == Some("control");
+    let _online_lease = (!is_control).then(|| {
+        state.mark_online_connection(&auth.phone_id, &auth.phone_name, connection_id);
+        OnlineConnectionLease {
+            state: Arc::clone(&state),
+            connection_id,
+        }
+    });
+    let (switch_tx, mut switch_rx) = unbounded_channel();
+    state.register_switch_channel(connection_id, switch_tx, is_control);
+    let _switch_lease = SwitchChannelLease {
+        state: Arc::clone(&state),
+        connection_id,
+    };
     // Authentication is also used by short-lived target probes. Do not claim
     // the single input connection until the client sends a real input message.
     let mut active_lease: Option<ActiveConnectionLease> = None;
     let mut pending_image: Option<ImageStart> = None;
-    while let Some(message) = websocket.next().await {
-        match message? {
+    loop {
+        tokio::select! {
+            Some(request) = switch_rx.recv() => {
+                send_json(
+                    &mut websocket,
+                    &ServerMessage::SwitchComputer(SwitchComputer {
+                        protocol_version: flowtype_core::PROTOCOL_VERSION,
+                        pc_id: request.pc_id,
+                        pc_name: request.pc_name,
+                    }),
+                ).await?;
+            }
+            inbound = websocket.next() => {
+                let Some(message) = inbound else { break; };
+                match message? {
             Message::Text(text) => {
                 if text.len() > flowtype_core::MAX_MESSAGE_BYTES {
                     return Err("message too large".into());
@@ -502,6 +693,9 @@ async fn serve_connection(
                 let value: serde_json::Value = serde_json::from_str(&text)?;
                 let is_probe =
                     value.get("type").and_then(serde_json::Value::as_str) == Some("probe");
+                if is_probe {
+                    state.mark_probe_connection(connection_id);
+                }
                 if !is_probe && active_lease.is_none() {
                     active_lease = Some(claim_active_connection(
                         &state,
@@ -590,6 +784,8 @@ async fn serve_connection(
             Message::Ping(payload) => websocket.send(Message::Pong(payload)).await?,
             Message::Close(_) => break,
             _ => {}
+                }
+            }
         }
     }
     Ok(())
@@ -774,10 +970,34 @@ impl Drop for ActiveConnectionLease {
             *active = None;
             self.state.update_status(|status| {
                 status.summary = "等待手机连接".to_owned();
-                status.connected_phone = None;
+                if let Some(phone) = status.connected_phone.as_deref() {
+                    status.summary = format!("已连接：{phone}");
+                }
                 status.target_name = None;
             });
         }
+    }
+}
+
+struct SwitchChannelLease {
+    state: Arc<AppState>,
+    connection_id: u64,
+}
+
+struct OnlineConnectionLease {
+    state: Arc<AppState>,
+    connection_id: u64,
+}
+
+impl Drop for OnlineConnectionLease {
+    fn drop(&mut self) {
+        self.state.clear_online_connection(self.connection_id);
+    }
+}
+
+impl Drop for SwitchChannelLease {
+    fn drop(&mut self) {
+        self.state.clear_switch_channel(self.connection_id);
     }
 }
 
@@ -1270,6 +1490,7 @@ mod tests {
             phone_name: "test".to_owned(),
             pairing_token: None,
             public_key_spki: None,
+            connection_mode: None,
             signature: STANDARD.encode(signature.to_der()),
         };
         let point = signing_key.verifying_key().to_encoded_point(false);

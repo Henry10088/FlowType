@@ -14,7 +14,7 @@
 
 Android 的 `versionCode` 必须在每次发布时严格递增，即使 `versionName` 只增加补丁号。Windows、Android、安装包文件名和 Git 标签使用同一个 `versionName`，Git 标签格式为 `vMAJOR.MINOR.PATCH`。
 
-当前版本：`0.1.17`，Android `versionCode=18`。
+当前版本：`0.1.18`，Android `versionCode=19`。
 
 本次从旧工程标识迁移到 FlowType 会更换 Android applicationId、绑定 URI、认证前缀、mDNS 服务名和本地 IPC 名称；JSON 消息结构未变化，因此协议字段版本仍为 1。该迁移是 V1 内测阶段的兼容性断点，旧版本必须卸载并重新绑定，不承诺跨版本互通。
 
