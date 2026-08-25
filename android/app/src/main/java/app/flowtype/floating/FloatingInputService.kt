@@ -104,17 +104,11 @@ class FloatingInputService : Service() {
     private fun showBall() {
         if (ball != null || hiddenByActivity || !Settings.canDrawOverlays(this)) return
         val size = dp(56)
-        val ballState = controller.state()
-        val ballColor = when {
-            ballState.binding == null -> android.graphics.Color.BLACK
-            ballState.connected -> getColor(R.color.accent)
-            else -> getColor(R.color.status_warning)
-        }
         val view = FrameLayout(this).apply {
             alpha = 0.58f
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(ballColor)
+                setColor(getColor(R.color.surface))
                 setStroke(dp(1), getColor(R.color.divider))
             }
             addView(ImageView(context).apply {
