@@ -159,8 +159,11 @@ fn handle_request(
     match request {
         InjectorRequest::BeginSession { session_id } => {
             if session.is_some() {
-                diagnostics::log("begin rejected=session_busy");
-                return InjectorResponse::InvalidRequest;
+                // A new START is the recovery boundary after a lost socket or
+                // a rejected resume. Do not let an orphaned injector session
+                // make every later attempt fail with session_busy.
+                diagnostics::log("begin replacing=stale_session");
+                end_failed_session(session, tips);
             }
             let Some(target) = TargetWindow::capture_foreground() else {
                 diagnostics::log("begin rejected=target_invalid");
@@ -303,6 +306,12 @@ fn apply_state(
         return if full_text == active.text {
             InjectorResponse::Applied { sequence }
         } else {
+            diagnostics::log(format!(
+                "update pid={} seq={} rejected=sequence_conflict",
+                active.target.process_id(),
+                sequence
+            ));
+            end_failed_session(session, tips);
             InjectorResponse::InvalidRequest
         };
     }
@@ -379,6 +388,10 @@ fn apply_state(
             InjectorResponse::TargetModified
         }
         Ok(TipResponse::SessionMismatch | TipResponse::SequenceConflict) => {
+            // The TIP and injector no longer agree on the active snapshot.
+            // Retaining the local session would make the next START collide
+            // with the same stale state, so force both layers back to idle.
+            end_failed_session(session, tips);
             InjectorResponse::InvalidRequest
         }
         _ => {
@@ -435,6 +448,7 @@ fn finish_session(
             InjectorResponse::Finished { sequence }
         }
         Ok(TipResponse::SessionMismatch | TipResponse::SequenceConflict) => {
+            end_failed_session(session, tips);
             InjectorResponse::InvalidRequest
         }
         _ => {
