@@ -1,6 +1,6 @@
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -336,41 +336,17 @@ fn render_surface(context: &mut BallContext) {
     );
 
     // Match the Android drawable's 48x48 view box rather than the old 56px ball.
-    let icon_scale = context.ball_size as f32 / 48.0;
-    let icon_origin = (center - 25.5 * icon_scale, center - 22.0 * icon_scale);
-    let icon = |x: f32, y: f32| {
-        (
-            icon_origin.0 + x * icon_scale,
-            icon_origin.1 + y * icon_scale,
-        )
-    };
-    let pen = [
-        (icon(13.0, 34.0), icon(15.0, 26.0)),
-        (icon(15.0, 26.0), icon(31.0, 10.0)),
-        (icon(31.0, 10.0), icon(38.0, 17.0)),
-        (icon(38.0, 17.0), icon(22.0, 33.0)),
-        (icon(22.0, 33.0), icon(13.0, 34.0)),
-        (icon(28.0, 13.0), icon(35.0, 20.0)),
-    ];
-    for (start, end) in pen {
-        draw_antialiased_line(
-            pixels,
-            context.size as usize,
-            start,
-            end,
-            3.0 * icon_scale,
-            (244, 246, 247),
-            0.98,
-        );
-    }
+    let icon_size = (context.ball_size * 28 / 56).max(1);
+    draw_android_edit_icon(pixels, context.size as usize, center, icon_size);
 
+    let dot_scale = context.ball_size as f32 / 56.0;
     let dot_center = (center + radius - 10.5, center + radius - 10.5);
     draw_circle(
         pixels,
         context.size as usize,
         dot_center.0,
         dot_center.1,
-        4.7 * icon_scale,
+        4.7 * dot_scale,
         Paint {
             color: status_dot_color(context),
             alpha: 1.0,
@@ -381,7 +357,7 @@ fn render_surface(context: &mut BallContext) {
         context.size as usize,
         dot_center.0,
         dot_center.1,
-        5.2 * icon_scale,
+        5.2 * dot_scale,
         1.3,
         Paint {
             color: (15, 28, 30),
@@ -523,38 +499,30 @@ fn draw_ring(
     }
 }
 
-fn draw_antialiased_line(
-    pixels: &mut [u8],
-    width: usize,
-    start: (f32, f32),
-    end: (f32, f32),
-    thickness: f32,
-    color: (u8, u8, u8),
-    alpha: f32,
-) {
-    let padding = thickness + 1.5;
-    let min_x = (start.0.min(end.0) - padding).floor() as i32;
-    let max_x = (start.0.max(end.0) + padding).ceil() as i32;
-    let min_y = (start.1.min(end.1) - padding).floor() as i32;
-    let max_y = (start.1.max(end.1) + padding).ceil() as i32;
-    let dx = end.0 - start.0;
-    let dy = end.1 - start.1;
-    let length_squared = dx * dx + dy * dy;
-    for y in min_y..=max_y {
-        for x in min_x..=max_x {
-            let px = x as f32 + 0.5;
-            let py = y as f32 + 0.5;
-            let projection = if length_squared > 0.0 {
-                ((px - start.0) * dx + (py - start.1) * dy) / length_squared
-            } else {
-                0.0
-            };
-            let t = projection.clamp(0.0, 1.0);
-            let nearest_x = start.0 + dx * t;
-            let nearest_y = start.1 + dy * t;
-            let distance = ((px - nearest_x).powi(2) + (py - nearest_y).powi(2)).sqrt();
-            let coverage = (thickness / 2.0 + 0.65 - distance).clamp(0.0, 1.0);
-            blend_pixel(pixels, width, x, y, color, alpha * coverage);
+fn draw_android_edit_icon(pixels: &mut [u8], width: usize, center: f32, size: i32) {
+    const SOURCE_SIZE: usize = 32;
+    static ICON_PIXELS: OnceLock<Vec<u8>> = OnceLock::new();
+    let source = ICON_PIXELS.get_or_init(|| {
+        image::load_from_memory(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/ic_menu_edit.png"
+        )))
+        .expect("embedded Android edit icon must decode")
+        .to_rgba8()
+        .into_raw()
+    });
+    let left = (center - size as f32 / 2.0).floor() as i32;
+    let top = (center - size as f32 / 2.0).floor() as i32;
+    for y in 0..size {
+        for x in 0..size {
+            let source_x = (((x as f32 + 0.5) * SOURCE_SIZE as f32 / size as f32) - 0.5)
+                .round()
+                .clamp(0.0, (SOURCE_SIZE - 1) as f32) as usize;
+            let source_y = (((y as f32 + 0.5) * SOURCE_SIZE as f32 / size as f32) - 0.5)
+                .round()
+                .clamp(0.0, (SOURCE_SIZE - 1) as f32) as usize;
+            let alpha = source[(source_y * SOURCE_SIZE + source_x) * 4 + 3] as f32 / 255.0;
+            blend_pixel(pixels, width, left + x, top + y, (244, 246, 247), alpha);
         }
     }
 }
