@@ -22,12 +22,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use crate::AppState;
 use crate::settings;
 use crate::ui::ui_paint::wide;
-use crate::ui::ui_theme::{COLOR_BALL_BLACK, COLOR_BALL_ORANGE, COLOR_TEAL};
+use crate::ui::ui_theme::{COLOR_BALL_BLACK, COLOR_BALL_ORANGE};
 
 const CLASS_NAME: &str = "FlowTypeFloatingBall";
 const CLICK_TIMER: usize = 1;
-const BALL_SIZE: i32 = 56;
-const SHADOW_MARGIN: i32 = 8;
+const BALL_SIZE: i32 = 48;
+const SHADOW_MARGIN: i32 = 7;
 const BALL_MARGIN: i32 = 24;
 const BALL_BORDER: (u8, u8, u8) = (255, 255, 255);
 
@@ -227,10 +227,12 @@ fn create_tooltip(context: &mut BallContext) {
 
 fn ball_color(context: &BallContext) -> (u8, u8, u8) {
     let snapshot = context.state.snapshot();
+    if snapshot.status.connected_phone.is_some() {
+        // A lighter green keeps the translucent ball readable over bright windows.
+        return (54, 201, 198);
+    };
     let color = if snapshot.phones.is_empty() {
         COLOR_BALL_BLACK
-    } else if snapshot.status.connected_phone.is_some() {
-        COLOR_TEAL
     } else {
         COLOR_BALL_ORANGE
     };
