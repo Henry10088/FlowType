@@ -63,13 +63,16 @@ tasks.register("packageFlowTypeRelease") {
     dependsOn("assembleRelease")
     doLast {
         val releaseDir = layout.buildDirectory.dir("outputs/apk/release").get().asFile
-        val source = sequenceOf(
-            releaseDir.resolve("app-release.apk"),
-            releaseDir.resolve("app-release-unsigned.apk"),
-        ).firstOrNull { it.isFile } ?: error("Release APK was not generated")
+        val signed = releaseDir.resolve("app-release.apk")
+        val unsigned = releaseDir.resolve("app-release-unsigned.apk")
+        val source = if (hasReleaseSigning) signed else unsigned
+        check(source.isFile) { "Expected ${source.name} was not generated" }
         val version = android.defaultConfig.versionName ?: "dev"
+        val suffix = if (source == signed) "" else "-unsigned"
+        releaseDir.resolve("FlowType-${version}-android-release.apk").delete()
+        releaseDir.resolve("FlowType-${version}-android-release-unsigned.apk").delete()
         source.copyTo(
-            releaseDir.resolve("FlowType-${version}-android-release.apk"),
+            releaseDir.resolve("FlowType-${version}-android-release${suffix}.apk"),
             overwrite = true,
         )
     }

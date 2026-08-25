@@ -77,7 +77,7 @@ cd android
 .\gradlew.bat packageFlowTypeRelease
 ```
 
-输出位于 `android/app/build/outputs/apk/release/FlowType-<version>-android-release.apk`。没有配置签名环境时，文件名仍保持正式命名，但 APK 是 unsigned 内部测试包。
+输出位于 `android/app/build/outputs/apk/release/FlowType-<version>-android-release.apk`。如果没有配置签名环境，任务会明确输出 `FlowType-<version>-android-release-unsigned.apk`；该文件只用于内部验证，不能直接作为正式安装包分发。
 
 配置正式签名时需要同时设置以下环境变量：
 
