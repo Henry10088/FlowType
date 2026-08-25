@@ -473,18 +473,6 @@ async fn serve_connection(
         return Err("authentication failed".into());
     }
     let connection_id = state.next_connection_id.fetch_add(1, Ordering::Relaxed);
-    *state
-        .active_connection
-        .lock()
-        .map_err(|_| "connection state unavailable")? = Some(ActiveConnection {
-        phone_id: auth.phone_id.clone(),
-        connection_id,
-    });
-    let _lease = ActiveConnectionLease {
-        state: Arc::clone(&state),
-        phone_id: auth.phone_id.clone(),
-        connection_id,
-    };
     let pc_name = state
         .pc_name
         .lock()
@@ -501,23 +489,32 @@ async fn serve_connection(
         },
     )
     .await?;
-    state.update_status(|status| {
-        status.summary = format!("已连接：{}", auth.phone_name);
-        status.connected_phone = Some(auth.phone_name.clone());
-        status.target_name = None;
-        status.last_error = None;
-    });
+    // Authentication is also used by short-lived target probes. Do not claim
+    // the single input connection until the client sends a real input message.
+    let mut active_lease: Option<ActiveConnectionLease> = None;
     let mut pending_image: Option<ImageStart> = None;
     while let Some(message) = websocket.next().await {
-        if !is_active_connection(&state, &auth.phone_id, connection_id) {
-            return Err("connection superseded".into());
-        }
         match message? {
             Message::Text(text) => {
                 if text.len() > flowtype_core::MAX_MESSAGE_BYTES {
                     return Err("message too large".into());
                 }
                 let value: serde_json::Value = serde_json::from_str(&text)?;
+                let is_probe =
+                    value.get("type").and_then(serde_json::Value::as_str) == Some("probe");
+                if !is_probe && active_lease.is_none() {
+                    active_lease = Some(claim_active_connection(
+                        &state,
+                        &auth.phone_id,
+                        &auth.phone_name,
+                        connection_id,
+                    )?);
+                }
+                if active_lease.is_some()
+                    && !is_active_connection(&state, &auth.phone_id, connection_id)
+                {
+                    return Err("connection superseded".into());
+                }
                 if value.get("type").and_then(serde_json::Value::as_str) == Some("image_start") {
                     let image: ImageStart = serde_json::from_value(value)?;
                     image.validate(&auth.phone_id)?;
@@ -538,6 +535,17 @@ async fn serve_connection(
                 }
             }
             Message::Binary(bytes) => {
+                if active_lease.is_none() {
+                    active_lease = Some(claim_active_connection(
+                        &state,
+                        &auth.phone_id,
+                        &auth.phone_name,
+                        connection_id,
+                    )?);
+                }
+                if !is_active_connection(&state, &auth.phone_id, connection_id) {
+                    return Err("connection superseded".into());
+                }
                 let Some(image) = pending_image.take() else {
                     continue;
                 };
@@ -692,6 +700,32 @@ fn is_active_connection(state: &AppState, phone_id: &str, connection_id: u64) ->
                 .map(|active| active.phone_id == phone_id && active.connection_id == connection_id)
         })
         .unwrap_or(false)
+}
+
+fn claim_active_connection(
+    state: &Arc<AppState>,
+    phone_id: &str,
+    phone_name: &str,
+    connection_id: u64,
+) -> Result<ActiveConnectionLease, &'static str> {
+    *state
+        .active_connection
+        .lock()
+        .map_err(|_| "connection state unavailable")? = Some(ActiveConnection {
+        phone_id: phone_id.to_owned(),
+        connection_id,
+    });
+    state.update_status(|status| {
+        status.summary = format!("已连接：{phone_name}");
+        status.connected_phone = Some(phone_name.to_owned());
+        status.target_name = None;
+        status.last_error = None;
+    });
+    Ok(ActiveConnectionLease {
+        state: Arc::clone(state),
+        phone_id: phone_id.to_owned(),
+        connection_id,
+    })
 }
 
 struct ActiveConnectionLease {
