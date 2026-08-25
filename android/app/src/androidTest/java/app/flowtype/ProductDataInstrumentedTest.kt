@@ -57,10 +57,6 @@ class ProductDataInstrumentedTest {
             assertEquals(second.pcId, store.load()?.pcId)
             assertEquals(first.pcId, store.select(first.pcId)?.pcId)
             assertEquals(first.pcId, store.load()?.pcId)
-            assertTrue(store.isAutoSelected(first.pcId))
-            store.setAutoSelected(first.pcId, false)
-            assertFalse(store.isAutoSelected(first.pcId))
-            store.setAutoSelected(first.pcId, true)
         } finally {
             database.close()
             context.deleteDatabase(databaseName)

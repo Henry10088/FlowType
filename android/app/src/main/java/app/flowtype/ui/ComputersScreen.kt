@@ -3,7 +3,6 @@ package app.flowtype.ui
 import android.graphics.Typeface
 import android.view.View
 import android.widget.LinearLayout
-import android.widget.Switch
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import app.flowtype.R
@@ -49,24 +48,14 @@ class ComputersScreen(
                     setTypeface(typeface, Typeface.BOLD)
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 })
-                addView(Switch(activity).apply {
-                    text = activity.getString(R.string.auto_select_label)
-                    textSize = 13f
-                    setTextColor(activity.getColor(R.color.text_secondary))
-                    isChecked = controller.isComputerAutoSelected(binding.pcId)
-                    isEnabled = !state.activeSession
-                    setOnClickListener {
-                        controller.setComputerAutoSelected(binding.pcId, isChecked)
-                    }
-                })
             })
             row.addView(TextView(activity).apply {
                 text = when {
-                    selected && state.connected -> activity.getString(R.string.current_computer) + " · 在线"
+                    selected && state.connected -> "在线 · 已选择"
                     binding.pcId in state.onlinePcIds -> "在线"
-                    else -> "离线"
+                    else -> "未连接"
                 }
-                setTextColor(activity.getColor(if ((selected && state.connected) || binding.pcId in state.onlinePcIds) R.color.accent else R.color.text_secondary))
+                setTextColor(activity.getColor(if ((selected && state.connected) || binding.pcId in state.onlinePcIds) R.color.accent else R.color.status_warning))
                 textSize = 13f
                 setPadding(0, activity.dp(4), 0, activity.dp(8))
             })

@@ -4,9 +4,12 @@ import android.Manifest
 import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
@@ -17,6 +20,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageButton
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -42,15 +46,14 @@ class MainActivity : ComponentActivity() {
     private var suppressTextChange = false
     private var scanLaunched = false
     private var waitingForOverlayPermission = false
+    private var imeWasVisible = false
+    private var ignoreImeDismissUntil = 0L
     private lateinit var input: EditText
-    private lateinit var finish: Button
-    private lateinit var abandonFinish: Button
-    private lateinit var syncCurrentCursor: Button
-    private lateinit var syncCurrentCursorFinishing: Button
+    private lateinit var sync: Button
+    private lateinit var newSession: Button
     private lateinit var pair: Button
-    private lateinit var syncFullText: Button
-    private lateinit var resetSession: ImageButton
     private lateinit var status: TextView
+    private lateinit var syncStatus: TextView
     private lateinit var computerName: TextView
     private var cameraImage: Uri? = null
     private val imageScreen by lazy {
@@ -58,8 +61,8 @@ class MainActivity : ComponentActivity() {
             activity = this,
             controller = controller,
             applyInsets = ::applySystemInsets,
-            onBack = { showInput(focus = false) },
-            onCompleted = { showInput(focus = false) },
+            onBack = { showInput() },
+            onCompleted = { showInput() },
             isVisible = { page == Screen.IMAGE },
         )
     }
@@ -115,12 +118,12 @@ class MainActivity : ComponentActivity() {
         result.contents?.let(::acceptPairingValue)
     }
     private val gallery = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        uri?.let(::showImagePreview)
+        if (uri != null) showImagePreview(uri) else if (page == Screen.INPUT) showKeyboard()
     }
     private val camera = registerForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
         val uri = cameraImage
         cameraImage = null
-        if (saved && uri != null) showImagePreview(uri)
+        if (saved && uri != null) showImagePreview(uri) else showKeyboard()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -176,7 +179,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus && page == Screen.INPUT && ::input.isInitialized && input.isEnabled) showKeyboard()
     }
 
     @Suppress("DEPRECATION")
@@ -189,14 +191,11 @@ class MainActivity : ComponentActivity() {
                 WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE,
         )
         input = findViewById(R.id.input)
-        finish = findViewById(R.id.finish)
-        abandonFinish = findViewById(R.id.abandonFinish)
-        syncCurrentCursor = findViewById(R.id.syncCurrentCursor)
-        syncCurrentCursorFinishing = findViewById(R.id.syncCurrentCursorFinishing)
+        sync = findViewById(R.id.sync)
+        newSession = findViewById(R.id.newSession)
         pair = findViewById(R.id.pair)
-        syncFullText = findViewById(R.id.syncFullText)
-        resetSession = findViewById(R.id.resetSession)
         status = findViewById(R.id.status)
+        syncStatus = findViewById(R.id.syncStatus)
         computerName = findViewById(R.id.computerName)
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(value: CharSequence?, start: Int, count: Int, after: Int) = Unit
@@ -205,13 +204,9 @@ class MainActivity : ComponentActivity() {
                 if (!suppressTextChange) controller.textChanged(value?.toString().orEmpty())
             }
         })
-        finish.setOnClickListener { controller.finish() }
-        abandonFinish.setOnClickListener { confirmAbandonSync() }
-        syncCurrentCursor.setOnClickListener { controller.syncToCurrentCursor() }
-        syncCurrentCursorFinishing.setOnClickListener { controller.syncToCurrentCursor() }
+        sync.setOnClickListener { controller.sync() }
+        newSession.setOnClickListener { controller.startNewSession() }
         pair.setOnClickListener { launchScanner() }
-        syncFullText.setOnClickListener { controller.syncFullText() }
-        resetSession.setOnClickListener { confirmResetSession() }
         findViewById<ImageButton>(R.id.openHistory).setOnClickListener { showHistory() }
         findViewById<ImageButton>(R.id.openComputers).setOnClickListener { showComputers() }
         findViewById<ImageButton>(R.id.toggleDim).setOnClickListener {
@@ -232,7 +227,7 @@ class MainActivity : ComponentActivity() {
             .setItems(arrayOf(getString(R.string.take_photo), getString(R.string.choose_from_gallery))) { _, which ->
                 if (which == 0) launchCamera() else gallery.launch("image/*")
             }
-            .setNegativeButton(R.string.cancel, null)
+            .setNegativeButton(R.string.cancel) { _, _ -> showKeyboard() }
             .show()
     }
 
@@ -254,6 +249,7 @@ class MainActivity : ComponentActivity() {
     private fun renderInput(state: FlowTypeApplication.UiState) {
         computerName.text = state.binding?.pcName ?: getString(R.string.default_computer)
         status.text = state.status
+        syncStatus.text = state.syncState
         if (input.text.toString() != state.text) {
             suppressTextChange = true
             input.setText(state.text)
@@ -262,22 +258,69 @@ class MainActivity : ComponentActivity() {
         }
         val paired = state.binding != null
         input.isEnabled = paired && !state.finishing
-        finish.isEnabled = state.activeSession && !state.finishing
-        finish.text = if (state.finishing) getString(R.string.finish_waiting) else getString(R.string.finish)
-        findViewById<View>(R.id.primaryActions).visibility = if (state.finishing) View.GONE else View.VISIBLE
-        findViewById<View>(R.id.finishingActions).visibility = if (state.finishing) View.VISIBLE else View.GONE
-        // Keep the action's slot stable while a session is active. Voice
-        // recognition can alternate acknowledged and pending snapshots many
-        // times per second; visibility must not follow that transient state.
-        syncCurrentCursor.visibility = if (!state.finishing && state.activeSession) View.VISIBLE else View.GONE
-        syncCurrentCursor.isEnabled = state.syncCurrentCursorAvailable
-        syncCurrentCursorFinishing.visibility = if (state.finishing) View.VISIBLE else View.GONE
-        syncCurrentCursorFinishing.isEnabled = state.syncCurrentCursorAvailable
-        resetSession.isEnabled = state.activeSession || state.text.isNotEmpty()
+        sync.isEnabled = state.syncAvailable
+        newSession.isEnabled = state.activeSession || state.text.isNotEmpty()
         pair.visibility = if (paired) View.GONE else View.VISIBLE
-        syncFullText.visibility = if (paired && state.showSyncFullText && !state.finishing) View.VISIBLE else View.GONE
         findViewById<ImageButton>(R.id.openImage).isEnabled =
             paired && state.imageTransfer != FlowTypeApplication.ImageTransferState.SENDING
+        status.setTextColor(getColor(
+            when {
+                state.binding == null -> R.color.status_neutral
+                state.connected -> R.color.accent
+                else -> R.color.status_warning
+            },
+        ))
+        renderComputerChooser(state)
+    }
+
+    private fun renderComputerChooser(state: FlowTypeApplication.UiState) {
+        val chooser = findViewById<LinearLayout>(R.id.computerChooser) ?: return
+        chooser.removeAllViews()
+        controller.bindings.list().forEach { binding ->
+            val selected = binding.pcId == state.binding?.pcId
+            val online = binding.pcId in state.onlinePcIds || (selected && state.connected)
+            val active = binding.pcId == state.recentActivityPcId
+            val chip = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(dp(12), 0, dp(12), 0)
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(6).toFloat()
+                    setColor(getColor(R.color.surface))
+                    setStroke(dp(if (selected) 2 else 1), getColor(if (selected) R.color.accent else R.color.divider))
+                }
+                contentDescription = buildString {
+                    append(binding.pcName)
+                    append(if (selected) "，已选择" else "")
+                    append(if (active) "，最近有鼠标活动" else "")
+                    append(if (online) "，已连接" else "，未连接")
+                }
+                setOnClickListener { controller.selectComputer(binding.pcId) }
+            }
+            chip.addView(View(this).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(getColor(if (online) R.color.accent else R.color.status_warning))
+                }
+            }, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) })
+            chip.addView(TextView(this).apply {
+                text = binding.pcName
+                setTextColor(getColor(R.color.text_primary))
+                textSize = 14f
+                setTypeface(typeface, if (selected) Typeface.BOLD else Typeface.NORMAL)
+            })
+            if (active) {
+                chip.addView(TextView(this).apply {
+                    text = "  •"
+                    setTextColor(getColor(R.color.status_activity))
+                    textSize = 16f
+                    contentDescription = "最近鼠标活动"
+                })
+            }
+            chooser.addView(chip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40)).apply {
+                marginEnd = dp(8)
+            })
+        }
     }
 
     private fun showHistory() {
@@ -315,31 +358,13 @@ class MainActivity : ComponentActivity() {
 
     private fun confirmUnbind(pcId: String, name: String) {
         if (controller.state().activeSession && controller.state().binding?.pcId == pcId) {
-            Toast.makeText(this, R.string.switch_after_finish, Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, R.string.operation_requires_new_session, Toast.LENGTH_SHORT).show()
             return
         }
         AlertDialog.Builder(this)
             .setMessage(getString(R.string.confirm_unbind, name))
             .setNegativeButton(R.string.cancel, null)
             .setPositiveButton(R.string.unbind) { _, _ -> controller.unbindComputer(pcId); showComputers() }
-            .show()
-    }
-
-    private fun confirmAbandonSync() {
-        AlertDialog.Builder(this)
-            .setTitle(R.string.abandon_sync_title)
-            .setMessage(R.string.abandon_sync_message)
-            .setNegativeButton(R.string.continue_waiting, null)
-            .setPositiveButton(R.string.abandon_sync) { _, _ -> controller.abandonSyncAndFinish() }
-            .show()
-    }
-
-    private fun confirmResetSession() {
-        AlertDialog.Builder(this)
-            .setTitle(R.string.reset_session_title)
-            .setMessage(R.string.reset_session_message)
-            .setNegativeButton(R.string.cancel, null)
-            .setPositiveButton(R.string.reset_session) { _, _ -> controller.resetSession() }
             .show()
     }
 
@@ -406,12 +431,14 @@ class MainActivity : ComponentActivity() {
 
     private fun showKeyboard() {
         input.requestFocus()
+        imeWasVisible = false
         input.postDelayed({
             getSystemService(InputMethodManager::class.java).showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
         }, 250)
     }
 
     private fun hideKeyboard() {
+        ignoreImeDismissUntil = SystemClock.uptimeMillis() + 1_000L
         currentFocus?.let { getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(it.windowToken, 0) }
     }
 
@@ -424,12 +451,31 @@ class MainActivity : ComponentActivity() {
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
+            if (page == Screen.INPUT && imeWasVisible && !imeVisible &&
+                SystemClock.uptimeMillis() > ignoreImeDismissUntil
+            ) {
+                exitInputSurface()
+            }
+            imeWasVisible = imeVisible
             val bottomInset = maxOf(bars.bottom, ime.bottom)
             view.setPaddingRelative(start + bars.left, top + bars.top, end + bars.right, bottom + bottomInset)
             insets
         }
         ViewCompat.requestApplyInsets(root)
     }
+
+    private fun exitInputSurface() {
+        if (page != Screen.INPUT || isFinishing || isChangingConfigurations) return
+        controller.saveNow()
+        clearInputWindowSettings()
+        if (controller.settings.floatingInput && Settings.canDrawOverlays(this)) {
+            FloatingInputService.show(this)
+        }
+        finish()
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     companion object {
         const val ACTION_OPEN_IMAGE = "app.flowtype.OPEN_IMAGE"

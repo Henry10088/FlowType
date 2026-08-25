@@ -54,14 +54,13 @@ class BindingStore(context: Context, private val database: AppDatabase = AppData
 
     fun save(binding: ComputerBinding) {
         val db = database.writableDatabase
-        val autoSelect = getAutoSelected(binding.pcId) ?: true
         db.beginTransaction()
         try {
             db.update("computers", ContentValues().apply { put("selected", 0) }, null, null)
             db.insertWithOnConflict(
                 "computers",
                 null,
-                values(binding, selected = true, autoSelect = autoSelect),
+                values(binding, selected = true),
                 SQLiteDatabase.CONFLICT_REPLACE,
             )
             db.setTransactionSuccessful()
@@ -95,31 +94,6 @@ class BindingStore(context: Context, private val database: AppDatabase = AppData
                 put("endpoint", updated.endpoint)
                 put("endpoint_candidates", JSONArray(updated.endpoints).toString())
             },
-            "pc_id = ?",
-            arrayOf(pcId),
-        )
-    }
-
-    fun isAutoSelected(pcId: String): Boolean = getAutoSelected(pcId) ?: false
-
-    fun autoSelectedIds(): Set<String> = database.readableDatabase.query(
-        "computers",
-        arrayOf("pc_id"),
-        "auto_select = 1",
-        null,
-        null,
-        null,
-        null,
-    ).use { cursor ->
-        buildSet {
-            while (cursor.moveToNext()) add(cursor.getString(0))
-        }
-    }
-
-    fun setAutoSelected(pcId: String, selected: Boolean) {
-        database.writableDatabase.update(
-            "computers",
-            ContentValues().apply { put("auto_select", if (selected) 1 else 0) },
             "pc_id = ?",
             arrayOf(pcId),
         )
@@ -166,7 +140,7 @@ class BindingStore(context: Context, private val database: AppDatabase = AppData
             }
         }
 
-    private fun values(binding: ComputerBinding, selected: Boolean, autoSelect: Boolean) = ContentValues().apply {
+    private fun values(binding: ComputerBinding, selected: Boolean) = ContentValues().apply {
         put("pc_id", binding.pcId)
         put("pc_name", binding.pcName)
         put("endpoint", binding.endpoint)
@@ -174,20 +148,9 @@ class BindingStore(context: Context, private val database: AppDatabase = AppData
         put("tls_spki_sha256", binding.tlsSpkiSha256)
         binding.pairingToken?.let { put("pairing_token", it) } ?: putNull("pairing_token")
         put("selected", if (selected) 1 else 0)
-        put("auto_select", if (autoSelect) 1 else 0)
+        // Kept at the default for databases upgraded from the old per-PC setting.
+        put("auto_select", 1)
         put("added_at", System.currentTimeMillis())
-    }
-
-    private fun getAutoSelected(pcId: String): Boolean? = database.readableDatabase.query(
-        "computers",
-        arrayOf("auto_select"),
-        "pc_id = ?",
-        arrayOf(pcId),
-        null,
-        null,
-        null,
-    ).use { cursor ->
-        if (cursor.moveToFirst()) cursor.getInt(0) != 0 else null
     }
 
     private fun migrateLegacyBinding() {

@@ -59,6 +59,19 @@ class HistoryStore(private val database: AppDatabase) {
         database.writableDatabase.delete("history", "id = ?", arrayOf(id.toString()))
     }
 
+    fun delete(ids: Set<Long>) {
+        if (ids.isEmpty()) return
+        val db = database.writableDatabase
+        val placeholders = ids.joinToString(",") { "?" }
+        db.beginTransaction()
+        try {
+            db.delete("history", "id IN ($placeholders)", ids.map(Long::toString).toTypedArray())
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     fun clear() {
         database.writableDatabase.delete("history", null, null)
         cipher.destroyKey()

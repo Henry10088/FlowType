@@ -28,13 +28,6 @@ class SettingsScreen(
             isEnabled = !controller.state().activeSession
             setOnCheckedChangeListener { _, checked -> controller.setAutoSelectComputer(checked) }
         }
-        activity.findViewById<View>(R.id.autoSelectScope).apply {
-            contentDescription = activity.getString(
-                R.string.auto_select_scope,
-                controller.bindings.autoSelectedIds().size,
-            )
-            setOnClickListener { onOpenComputers() }
-        }
         activity.findViewById<Switch>(R.id.keepScreenOn).apply {
             isChecked = controller.settings.keepScreenOn
             setOnCheckedChangeListener { _, checked -> controller.settings.keepScreenOn = checked }

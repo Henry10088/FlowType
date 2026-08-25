@@ -35,10 +35,12 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         val activeSession: Boolean,
         val binding: ComputerBinding?,
         val status: String,
+        val syncState: String,
         val connected: Boolean,
         val showSyncFullText: Boolean,
-        val syncCurrentCursorAvailable: Boolean,
+        val syncAvailable: Boolean,
         val onlinePcIds: Set<String>,
+        val recentActivityPcId: String?,
         val imageTransfer: ImageTransferState,
         val autoSelecting: Boolean,
     )
@@ -66,6 +68,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
     private var showSyncFullText = false
     private var targetState: TargetState? = null
     private val onlinePcIds = mutableSetOf<String>()
+    private var recentActivityPcId: String? = null
     private val saveDraft = Runnable { saveDraftNow() }
     private var imageTransfer = ImageTransferState.IDLE
     private var autoSelecting = false
@@ -101,6 +104,9 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         }
         refreshControlClients()
         discovery.start()
+        if (settings.autoSelectComputer && session.sessionId == null) {
+            mainHandler.post { beginAutoSelection() }
+        }
     }
 
     fun observe(observer: (UiState) -> Unit) {
@@ -121,9 +127,20 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         connected = connected,
         showSyncFullText = showSyncFullText ||
             (session.sessionId == null && session.currentText.isNotEmpty()),
-        syncCurrentCursorAvailable = session.sessionId != null && connected &&
-            (session.acknowledgedSequence < session.latestSequence || targetState == TargetState.NOT_FOREGROUND),
+        syncAvailable = !autoSelecting && session.currentText.isNotEmpty() && (
+            session.sessionId == null || manualStartPending || syncClient.requiresExplicitStart() ||
+                targetState == TargetState.NOT_FOREGROUND || targetState == TargetState.INVALID
+            ),
+        syncState = when {
+            session.currentText.isEmpty() -> ""
+            autoSelecting -> getString(R.string.status_auto_selecting)
+            session.sessionId == null || manualStartPending || syncClient.requiresExplicitStart() ||
+                targetState == TargetState.NOT_FOREGROUND -> getString(R.string.sync_status_pending)
+            session.acknowledgedSequence >= session.latestSequence -> getString(R.string.sync_status_synced)
+            else -> getString(R.string.sync_status_syncing)
+        },
         onlinePcIds = onlinePcIds.toSet(),
+        recentActivityPcId = recentActivityPcId,
         imageTransfer = imageTransfer,
         autoSelecting = autoSelecting,
     )
@@ -147,9 +164,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         }
         if (session.sessionId == null && text.isNotEmpty()) targetState = null
         session.onTextChanged(text)?.let { snapshot ->
-            if (settings.autoSelectComputer && !manualStartPending && snapshot.type == SnapshotType.START) {
-                beginAutoSelection(snapshot)
-            } else if (autoSelecting || pendingAutoStart != null) {
+            if (autoSelecting || pendingAutoStart != null) {
                 pendingAutoLatest = snapshot
             } else {
                 if (snapshot.type == SnapshotType.START) manualStartPending = false
@@ -160,9 +175,18 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         notifyChanged()
     }
 
+    /** One user-visible command for initial, recovered, or retargeted full sync. */
+    fun sync() {
+        if (session.currentText.isEmpty()) return
+        when {
+            session.sessionId == null || manualStartPending || syncClient.requiresExplicitStart() -> syncFullText()
+            targetState == TargetState.NOT_FOREGROUND -> syncToCurrentCursor()
+        }
+    }
+
     fun finish() {
         session.finish()?.let {
-            statusText = getString(R.string.finish_waiting)
+            statusText = getString(R.string.sync_status_syncing)
             saveDraftNow()
             if (autoSelecting || pendingAutoStart != null) pendingAutoLatest = it else syncClient.send(it)
             notifyChanged()
@@ -184,10 +208,11 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
             if (connected) getString(R.string.status_connected, it.pcName)
             else getString(R.string.status_reconnecting, it.pcName)
         } ?: getString(R.string.status_unpaired)
+        if (settings.autoSelectComputer) beginAutoSelection()
         notifyChanged()
     }
 
-    fun resetSession() {
+    fun startNewSession() {
         val sessionId = session.sessionId
         val text = session.currentText
         clearAutoSelection()
@@ -201,6 +226,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
             if (connected) getString(R.string.status_connected, it.pcName)
             else getString(R.string.status_reconnecting, it.pcName)
         } ?: getString(R.string.status_unpaired)
+        if (settings.autoSelectComputer) beginAutoSelection()
         notifyChanged()
     }
 
@@ -215,7 +241,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
                 ?: getString(R.string.status_unpaired)
         } else {
             snapshots.forEach(syncClient::send)
-            statusText = getString(R.string.status_syncing_current_cursor)
+            statusText = getString(R.string.sync_status_syncing)
             saveDraftNow()
         }
         notifyChanged()
@@ -224,17 +250,6 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
     fun syncFullText() {
         if (session.sessionId != null && syncClient.requiresExplicitStart()) {
             resetFailedSession()
-        }
-        if (settings.autoSelectComputer && !manualStartPending) {
-            val localStart = session.startLocalDraft()
-            if (localStart != null) {
-                clearAutoSelection()
-                beginAutoSelection(localStart)
-                showSyncFullText = false
-                scheduleDraftSave()
-                notifyChanged()
-            }
-            return
         }
         targetState = null
         val localStart = session.startLocalDraft()
@@ -267,7 +282,9 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
     fun setAutoSelectComputer(enabled: Boolean) {
         if (session.sessionId != null) return
         settings.autoSelectComputer = enabled
-        if (!enabled) {
+        if (enabled) {
+            beginAutoSelection()
+        } else {
             clearAutoSelection()
             manualStartPending = session.currentText.isNotEmpty()
             showSyncFullText = manualStartPending
@@ -275,15 +292,13 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         notifyChanged()
     }
 
-    fun isComputerAutoSelected(pcId: String): Boolean = bindings.isAutoSelected(pcId)
-
-    fun setComputerAutoSelected(pcId: String, selected: Boolean) {
-        bindings.setAutoSelected(pcId, selected)
-        notifyChanged()
-    }
-
     fun selectComputer(pcId: String): Boolean {
         val binding = bindings.select(pcId) ?: return false
+        if (currentBinding?.pcId == binding.pcId) {
+            ensureConnected()
+            notifyChanged()
+            return true
+        }
         switchToComputer(binding)
         return true
     }
@@ -349,7 +364,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         } else {
             getString(R.string.status_connected, binding.pcName)
         }
-        if (pendingAutoStart != null && autoSelectionTargetPcId == binding.pcId) {
+        if (autoSelecting && autoSelectionTargetPcId == binding.pcId) {
             val start = pendingAutoStart
             val latest = pendingAutoLatest
             pendingAutoStart = null
@@ -404,6 +419,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
 
     override fun onSwitchComputer(pcId: String) = onMain {
         val binding = bindings.select(pcId) ?: return@onMain
+        recentActivityPcId = pcId
         if (currentBinding?.pcId == binding.pcId) {
             ensureConnected()
         } else {
@@ -504,12 +520,12 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         showSyncFullText = text.isNotEmpty()
     }
 
-    private fun beginAutoSelection(initial: SnapshotMessage) {
+    private fun beginAutoSelection(initial: SnapshotMessage? = null) {
         if (autoSelecting) {
-            pendingAutoLatest = initial
+            initial?.let { pendingAutoLatest = it }
             return
         }
-        val candidates = bindings.list().filter { bindings.isAutoSelected(it.pcId) }
+        val candidates = bindings.list().filter { it.pairingToken == null }
         if (candidates.isEmpty()) {
             failAutoSelection(getString(R.string.status_auto_no_computer), currentBinding)
             return
@@ -526,7 +542,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         // Closing the socket alone leaves the old Windows injector session
         // active. Release it before selecting the next target so a later
         // automatic switch can start a clean session.
-        syncClient.abandonSession(initial.sessionId)
+        initial?.let { syncClient.abandonSession(it.sessionId) }
         syncClient.resetForTargetSelection()
         if (candidates.size == 1) {
             // With one selected computer there is no ambiguity to resolve.
@@ -534,6 +550,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
             // even though the normal input connection can still find the
             // external editor behind it.
             autoSelectionTargetPcId = candidates.single().pcId
+            recentActivityPcId = candidates.single().pcId
             connect(candidates.single())
             return
         }
@@ -545,6 +562,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
                     failAutoSelection(getString(R.string.status_auto_ambiguous), fallback)
                 } else {
                     autoSelectionTargetPcId = winner.binding.pcId
+                    recentActivityPcId = winner.binding.pcId
                     connect(winner.binding)
                 }
             }

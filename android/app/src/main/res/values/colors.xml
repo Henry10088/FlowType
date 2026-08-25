@@ -5,6 +5,9 @@
     <color name="text_primary">#F4F6F7</color>
     <color name="text_secondary">#8E969D</color>
     <color name="accent">#00BAB8</color>
+    <color name="status_warning">#F59E0B</color>
+    <color name="status_activity">#3B82F6</color>
+    <color name="status_neutral">#7A848C</color>
     <color name="divider">#24282B</color>
     <color name="danger">#FF6B6B</color>
 </resources>

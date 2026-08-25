@@ -8,7 +8,6 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
-import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -28,10 +27,13 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.ImageView
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import app.flowtype.MainActivity
 import app.flowtype.R
 import app.flowtype.FlowTypeApplication
@@ -48,14 +50,13 @@ class FloatingInputService : Service() {
     private var suppressTextChange = false
     private var panelInput: EditText? = null
     private var panelStatus: TextView? = null
+    private var panelSyncStatus: TextView? = null
     private var panelComputer: TextView? = null
-    private var panelFinish: Button? = null
-    private var panelSyncCurrent: Button? = null
-    private var panelSyncCurrentFinishing: Button? = null
+    private var panelSync: Button? = null
+    private var panelNewSession: Button? = null
     private var panelOpenImage: ImageButton? = null
-    private var panelPrimaryActions: View? = null
-    private var panelFinishingActions: View? = null
-    private var closePanelWhenFinished = false
+    private var panelChooser: HorizontalScrollView? = null
+    private var panelImeVisible = false
     private val observer: (FlowTypeApplication.UiState) -> Unit = { render(it) }
 
     override fun onCreate() {
@@ -103,11 +104,17 @@ class FloatingInputService : Service() {
     private fun showBall() {
         if (ball != null || hiddenByActivity || !Settings.canDrawOverlays(this)) return
         val size = dp(56)
+        val ballState = controller.state()
+        val ballColor = when {
+            ballState.binding == null -> android.graphics.Color.BLACK
+            ballState.connected -> getColor(R.color.accent)
+            else -> getColor(R.color.status_warning)
+        }
         val view = FrameLayout(this).apply {
             alpha = 0.58f
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(getColor(R.color.surface))
+                setColor(ballColor)
                 setStroke(dp(1), getColor(R.color.divider))
             }
             addView(ImageView(context).apply {
@@ -237,17 +244,10 @@ class FloatingInputService : Service() {
             setTextColor(getColor(R.color.text_primary)); textSize = 18f; setTypeface(typeface, Typeface.BOLD)
         }
         panelStatus = TextView(this).apply { text = state.status; setTextColor(getColor(R.color.text_secondary)); textSize = 13f }
+        panelSyncStatus = TextView(this).apply { text = state.syncState; setTextColor(getColor(R.color.text_secondary)); textSize = 12f }
         labels.addView(panelComputer); labels.addView(panelStatus)
+        labels.addView(panelSyncStatus)
         heading.addView(labels, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        heading.addView(ImageButton(this).apply {
-            setImageResource(R.drawable.icon_reset)
-            contentDescription = getString(R.string.reset_session)
-            val selectable = TypedValue()
-            theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, selectable, true)
-            setBackgroundResource(selectable.resourceId)
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            setOnClickListener { controller.resetSession() }
-        }, LinearLayout.LayoutParams(dp(48), dp(48)))
         heading.addView(ImageButton(this).apply {
             setImageResource(R.drawable.icon_collapse)
             contentDescription = getString(R.string.collapse)
@@ -258,6 +258,16 @@ class FloatingInputService : Service() {
             setOnClickListener { collapsePanel() }
         }, LinearLayout.LayoutParams(dp(48), dp(48)))
         root.addView(heading)
+        panelChooser = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(LinearLayout(this@FloatingInputService).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        }
+        root.addView(panelChooser, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)))
+        renderPanelChooser(state)
         panelInput = EditText(this).apply {
             setText(state.text); setSelection(state.text.length)
             gravity = Gravity.TOP or Gravity.START
@@ -270,10 +280,7 @@ class FloatingInputService : Service() {
             })
         }
         root.addView(panelInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
-        val primaryActions = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            visibility = if (state.finishing) View.GONE else View.VISIBLE
-        }
+        val primaryActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         panelOpenImage = ImageButton(this).apply {
             setImageResource(R.drawable.icon_image)
             contentDescription = getString(R.string.image)
@@ -286,69 +293,37 @@ class FloatingInputService : Service() {
             panelOpenImage,
             LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginEnd = dp(8) },
         )
-        panelSyncCurrent = Button(this).apply {
-            setText(R.string.sync_current_cursor)
+        panelSync = Button(this).apply {
+            setText(R.string.sync)
             isAllCaps = false
             textSize = 14f
             setTextColor(getColor(R.color.text_primary))
             background = getDrawable(R.drawable.button_secondary)
-            isEnabled = state.syncCurrentCursorAvailable
-            visibility = if (state.activeSession && !state.finishing) View.VISIBLE else View.GONE
-            setOnClickListener { controller.syncToCurrentCursor() }
+            isEnabled = state.syncAvailable
+            setOnClickListener { controller.sync() }
         }
         primaryActions.addView(
-            panelSyncCurrent,
+            panelSync,
             LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(8) },
         )
-        panelFinish = Button(this).apply {
-            setText(R.string.finish); isAllCaps = false; setTextColor(Color.BLACK); background = getDrawable(R.drawable.button_primary)
-            isEnabled = state.activeSession && !state.finishing
-            setOnClickListener {
-                closePanelWhenFinished = true
-                controller.finish()
-            }
+        panelNewSession = Button(this).apply {
+            setText(R.string.new_session); isAllCaps = false; setTextColor(getColor(R.color.button_primary_text)); background = getDrawable(R.drawable.button_primary)
+            isEnabled = state.activeSession || state.text.isNotEmpty()
+            setOnClickListener { controller.startNewSession() }
         }
-        primaryActions.addView(panelFinish, LinearLayout.LayoutParams(0, dp(48), 1f))
-        panelPrimaryActions = primaryActions
+        primaryActions.addView(panelNewSession, LinearLayout.LayoutParams(0, dp(48), 1f))
         root.addView(primaryActions, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
-        val finishingActions = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            visibility = if (state.finishing) View.VISIBLE else View.GONE
-        }
-        panelSyncCurrentFinishing = Button(this).apply {
-            setText(R.string.sync_current_cursor)
-            isAllCaps = false
-            textSize = 14f
-            setTextColor(Color.BLACK)
-            background = getDrawable(R.drawable.button_primary)
-            visibility = if (state.finishing) View.VISIBLE else View.GONE
-            setOnClickListener { controller.syncToCurrentCursor() }
-        }
-        finishingActions.addView(
-            panelSyncCurrentFinishing,
-            LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(8) },
-        )
-        val abandon = Button(this).apply {
-            setText(R.string.abandon_sync)
-            isAllCaps = false
-            textSize = 14f
-            setTextColor(getColor(R.color.danger))
-            background = getDrawable(R.drawable.button_secondary)
-            setOnClickListener {
-                closePanelWhenFinished = false
-                controller.abandonSyncAndFinish()
-                collapsePanel()
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
+            val visible = insets.isVisible(WindowInsetsCompat.Type.ime())
+            if (panelImeVisible && !visible) {
+                view.post { if (panel === view) collapsePanel() }
             }
+            panelImeVisible = visible
+            insets
         }
-        finishingActions.addView(
-            abandon,
-            LinearLayout.LayoutParams(0, dp(48), 1f),
-        )
-        panelFinishingActions = finishingActions
-        root.addView(finishingActions, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
-            dp(220),
+            dp(270),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT,
@@ -367,14 +342,67 @@ class FloatingInputService : Service() {
         }.onFailure { showBall() }
     }
 
-    private fun render(state: FlowTypeApplication.UiState) {
-        if (closePanelWhenFinished && !state.activeSession && !state.finishing) {
-            closePanelWhenFinished = false
-            if (panel != null) collapsePanel()
-            return
+    private fun renderPanelChooser(state: FlowTypeApplication.UiState) {
+        val chooser = panelChooser?.getChildAt(0) as? LinearLayout ?: return
+        chooser.removeAllViews()
+        controller.bindings.list().forEach { binding ->
+            val selected = binding.pcId == state.binding?.pcId
+            val online = binding.pcId in state.onlinePcIds || (selected && state.connected)
+            val active = binding.pcId == state.recentActivityPcId
+            val chip = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(10), 0, dp(10), 0)
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(6).toFloat()
+                    setColor(getColor(R.color.surface))
+                    setStroke(dp(if (selected) 2 else 1), getColor(if (selected) R.color.accent else R.color.divider))
+                }
+                contentDescription = buildString {
+                    append(binding.pcName)
+                    append(if (selected) "，已选择" else "")
+                    append(if (active) "，最近有鼠标活动" else "")
+                    append(if (online) "，已连接" else "，未连接")
+                }
+                setOnClickListener { controller.selectComputer(binding.pcId) }
+            }
+            chip.addView(View(this).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(getColor(if (online) R.color.accent else R.color.status_warning))
+                }
+            }, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(6) })
+            chip.addView(TextView(this).apply {
+                text = binding.pcName
+                setTextColor(getColor(R.color.text_primary))
+                textSize = 13f
+                setTypeface(typeface, if (selected) Typeface.BOLD else Typeface.NORMAL)
+            })
+            if (active) {
+                chip.addView(TextView(this).apply {
+                    text = " •"
+                    setTextColor(getColor(R.color.status_activity))
+                    textSize = 16f
+                })
+            }
+            chooser.addView(chip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(36)).apply {
+                marginEnd = dp(6)
+            })
         }
+    }
+
+    private fun render(state: FlowTypeApplication.UiState) {
         panelComputer?.text = state.binding?.pcName ?: getString(R.string.default_computer)
         panelStatus?.text = state.status
+        panelStatus?.setTextColor(getColor(
+            when {
+                state.binding == null -> R.color.status_neutral
+                state.connected -> R.color.accent
+                else -> R.color.status_warning
+            },
+        ))
+        panelSyncStatus?.text = state.syncState
+        renderPanelChooser(state)
         panelInput?.let {
             if (it.text.toString() != state.text) {
                 suppressTextChange = true
@@ -384,26 +412,14 @@ class FloatingInputService : Service() {
             it.isEnabled = state.binding != null && !state.finishing
         }
         panelOpenImage?.isEnabled = state.binding != null && state.imageTransfer != FlowTypeApplication.ImageTransferState.SENDING
-        panelFinish?.apply {
-            isEnabled = state.activeSession && !state.finishing
-            text = if (state.finishing) getString(R.string.finish_waiting) else getString(R.string.finish)
-        }
-        panelSyncCurrent?.apply {
-            isEnabled = state.syncCurrentCursorAvailable
-            visibility = if (!state.finishing && state.activeSession) View.VISIBLE else View.GONE
-        }
-        panelSyncCurrentFinishing?.apply {
-            isEnabled = state.syncCurrentCursorAvailable
-            visibility = if (state.finishing) View.VISIBLE else View.GONE
-        }
-        panelPrimaryActions?.visibility = if (state.finishing) View.GONE else View.VISIBLE
-        panelFinishingActions?.visibility = if (state.finishing) View.VISIBLE else View.GONE
+        panelSync?.isEnabled = state.syncAvailable
+        panelNewSession?.isEnabled = state.activeSession || state.text.isNotEmpty()
     }
 
     private fun collapsePanel() {
         panelInput?.let { getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(it.windowToken, 0) }
         panel?.let { windowManager.removeView(it) }
-        panel = null; panelInput = null; panelStatus = null; panelComputer = null; panelFinish = null; panelSyncCurrent = null; panelSyncCurrentFinishing = null; panelOpenImage = null; panelPrimaryActions = null; panelFinishingActions = null
+        panel = null; panelInput = null; panelStatus = null; panelSyncStatus = null; panelComputer = null; panelSync = null; panelNewSession = null; panelOpenImage = null; panelChooser = null; panelImeVisible = false
         showBall()
     }
 
@@ -441,7 +457,7 @@ class FloatingInputService : Service() {
     private fun removeOverlays() {
         removeBall()
         panel?.let { windowManager.removeView(it) }
-        panel = null; panelInput = null; panelStatus = null; panelComputer = null; panelFinish = null; panelSyncCurrent = null; panelSyncCurrentFinishing = null; panelOpenImage = null; panelPrimaryActions = null; panelFinishingActions = null
+        panel = null; panelInput = null; panelStatus = null; panelSyncStatus = null; panelComputer = null; panelSync = null; panelNewSession = null; panelOpenImage = null; panelChooser = null; panelImeVisible = false
         removeCloseTarget()
     }
 

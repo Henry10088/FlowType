@@ -2,9 +2,11 @@ package app.flowtype.ui
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.app.AlertDialog
 import android.graphics.Typeface
 import android.view.Gravity
 import android.view.View
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -32,7 +34,53 @@ class HistoryScreen(
         val entries = controller.history.list()
         activity.findViewById<View>(R.id.empty).visibility =
             if (entries.isEmpty()) View.VISIBLE else View.GONE
-        entries.forEach { list.addView(historyRow(it)) }
+        val selected = linkedSetOf<Long>()
+        val selectedCount = activity.findViewById<TextView>(R.id.selectedCount)
+        val selectAll = activity.findViewById<View>(R.id.selectAll)
+        val deleteSelected = activity.findViewById<View>(R.id.deleteSelected)
+        val selectButton = activity.findViewById<View>(R.id.selectHistory)
+        var selecting = false
+
+        fun renderRows() {
+            list.removeAllViews()
+            entries.forEach { entry ->
+                list.addView(historyRow(entry, selecting, selected.contains(entry.id)) {
+                    if (selected.contains(entry.id)) selected.remove(entry.id) else selected.add(entry.id)
+                    renderRows()
+                })
+            }
+            selectedCount.visibility = if (selecting) View.VISIBLE else View.GONE
+            selectedCount.text = activity.getString(R.string.selected_count, selected.size)
+            selectAll.visibility = if (selecting && entries.isNotEmpty()) View.VISIBLE else View.GONE
+            deleteSelected.visibility = if (selecting) View.VISIBLE else View.GONE
+            deleteSelected.isEnabled = selected.isNotEmpty()
+            selectButton.contentDescription = activity.getString(
+                if (selecting) R.string.cancel else R.string.select_history,
+            )
+        }
+
+        selectButton.setOnClickListener {
+            selecting = !selecting
+            selected.clear()
+            renderRows()
+        }
+        selectAll.setOnClickListener {
+            selected.clear()
+            selected += entries.map { it.id }
+            renderRows()
+        }
+        deleteSelected.setOnClickListener {
+            if (selected.isEmpty()) return@setOnClickListener
+            AlertDialog.Builder(activity)
+                .setMessage(activity.getString(R.string.confirm_delete_history, selected.size))
+                .setNegativeButton(R.string.cancel, null)
+                .setPositiveButton(R.string.delete) { _, _ ->
+                    controller.history.delete(selected)
+                    show()
+                }
+                .show()
+        }
+        renderRows()
     }
 
     fun showDetail(id: Long) {
@@ -51,7 +99,7 @@ class HistoryScreen(
         }
         activity.findViewById<View>(R.id.useAsNew).setOnClickListener {
             if (controller.replaceWithHistory(entry.text)) onOpenInput(true) else {
-                Toast.makeText(activity, R.string.switch_after_finish, Toast.LENGTH_SHORT).show()
+                Toast.makeText(activity, R.string.operation_requires_new_session, Toast.LENGTH_SHORT).show()
             }
         }
         activity.findViewById<View>(R.id.delete).setOnClickListener {
@@ -60,30 +108,47 @@ class HistoryScreen(
         }
     }
 
-    private fun historyRow(entry: HistoryEntry): View = LinearLayout(activity).apply {
-        orientation = LinearLayout.VERTICAL
+    private fun historyRow(
+        entry: HistoryEntry,
+        selecting: Boolean,
+        checked: Boolean,
+        onToggle: () -> Unit,
+    ): View = LinearLayout(activity).apply {
+        orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        setPadding(0, activity.dp(16), 0, activity.dp(16))
+        setPadding(0, activity.dp(10), 0, activity.dp(10))
         background = activity.getDrawable(R.drawable.row_background)
-        addView(TextView(context).apply {
-            text = entry.pcName
-            setTextColor(activity.getColor(R.color.text_primary))
-            textSize = 18f
-            setTypeface(typeface, Typeface.BOLD)
-        })
-        addView(TextView(context).apply {
-            text = activity.formatTime(entry.completedAt)
-            setTextColor(activity.getColor(R.color.accent))
-            textSize = 13f
-            setPadding(0, activity.dp(4), 0, activity.dp(6))
-        })
-        addView(TextView(context).apply {
-            text = entry.text
-            maxLines = 2
-            setTextColor(activity.getColor(R.color.text_secondary))
-            textSize = 16f
-        })
-        addView(activity.divider())
-        setOnClickListener { onOpenDetail(entry.id) }
+        val checkbox = CheckBox(activity).apply {
+            isChecked = checked
+            visibility = if (selecting) View.VISIBLE else View.GONE
+            contentDescription = entry.pcName
+            setOnClickListener { onToggle() }
+        }
+        addView(checkbox, LinearLayout.LayoutParams(activity.dp(48), activity.dp(56)))
+        val body = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(activity.dp(4), activity.dp(6), 0, activity.dp(6))
+            addView(TextView(activity).apply {
+                text = entry.pcName
+                setTextColor(activity.getColor(R.color.text_primary))
+                textSize = 18f
+                setTypeface(typeface, Typeface.BOLD)
+            })
+            addView(TextView(activity).apply {
+                text = activity.formatTime(entry.completedAt)
+                setTextColor(activity.getColor(R.color.accent))
+                textSize = 13f
+                setPadding(0, activity.dp(4), 0, activity.dp(6))
+            })
+            addView(TextView(activity).apply {
+                text = entry.text
+                maxLines = 2
+                setTextColor(activity.getColor(R.color.text_secondary))
+                textSize = 16f
+            })
+        }
+        addView(body, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        setOnClickListener { if (selecting) onToggle() else onOpenDetail(entry.id) }
     }
 }
