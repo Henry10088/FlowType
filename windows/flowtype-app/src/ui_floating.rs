@@ -29,7 +29,7 @@ const CLICK_TIMER: usize = 1;
 const BALL_SIZE: i32 = 56;
 const SHADOW_MARGIN: i32 = 8;
 const BALL_MARGIN: i32 = 24;
-const BALL_BORDER: (u8, u8, u8) = (12, 16, 18);
+const BALL_BORDER: (u8, u8, u8) = (255, 255, 255);
 
 #[derive(Clone, Copy)]
 struct Paint {
@@ -241,6 +241,17 @@ fn ball_color(context: &BallContext) -> (u8, u8, u8) {
     )
 }
 
+fn status_dot_color(context: &BallContext) -> (u8, u8, u8) {
+    let snapshot = context.state.snapshot();
+    if snapshot.phones.is_empty() {
+        (145, 154, 159)
+    } else if snapshot.status.connected_phone.is_some() {
+        (244, 246, 247)
+    } else {
+        (255, 199, 111)
+    }
+}
+
 fn create_surface(size: i32) -> Option<LayeredSurface> {
     let dc = unsafe { CreateCompatibleDC(null_mut()) };
     if dc.is_null() {
@@ -287,14 +298,13 @@ fn render_surface(context: &mut BallContext) {
 
     let center = context.size as f32 / 2.0;
     let radius = context.ball_size as f32 / 2.0;
-    let shadow_radius = radius + context.shadow_margin as f32 * 0.7;
     draw_soft_circle(
         pixels,
         context.size as usize,
         center,
         center + 1.4,
-        shadow_radius,
-        context.shadow_margin as f32 * 1.6,
+        radius,
+        context.shadow_margin as f32 * 1.5,
         Paint {
             color: (0, 0, 0),
             alpha: 0.42,
@@ -308,7 +318,7 @@ fn render_surface(context: &mut BallContext) {
         center,
         center,
         radius,
-        Paint { color, alpha: 0.82 },
+        Paint { color, alpha: 0.58 },
     );
     draw_ring(
         pixels,
@@ -319,13 +329,18 @@ fn render_surface(context: &mut BallContext) {
         1.1,
         Paint {
             color: BALL_BORDER,
-            alpha: 0.58,
+            alpha: 0.2,
         },
     );
 
     let icon_scale = context.ball_size as f32 / 56.0;
-    let icon_origin = center - 21.0 * icon_scale;
-    let icon = |x: f32, y: f32| (icon_origin + x * icon_scale, icon_origin + y * icon_scale);
+    let icon_origin = (center - 25.5 * icon_scale, center - 22.0 * icon_scale);
+    let icon = |x: f32, y: f32| {
+        (
+            icon_origin.0 + x * icon_scale,
+            icon_origin.1 + y * icon_scale,
+        )
+    };
     let pen = [
         (icon(13.0, 34.0), icon(15.0, 26.0)),
         (icon(15.0, 26.0), icon(31.0, 10.0)),
@@ -354,7 +369,7 @@ fn render_surface(context: &mut BallContext) {
         dot_center.1,
         4.7 * icon_scale,
         Paint {
-            color: (0, 186, 184),
+            color: status_dot_color(context),
             alpha: 1.0,
         },
     );
@@ -367,7 +382,7 @@ fn render_surface(context: &mut BallContext) {
         1.3,
         Paint {
             color: (15, 28, 30),
-            alpha: 0.75,
+            alpha: 0.45,
         },
     );
 }
@@ -464,11 +479,10 @@ fn draw_soft_circle(
     for y in min_y..=max_y {
         for x in min_x..=max_x {
             let distance = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
-            let coverage = if distance <= radius {
-                1.0
-            } else {
-                (1.0 - (distance - radius) / blur).max(0.0).powi(2)
-            };
+            if distance <= radius {
+                continue;
+            }
+            let coverage = (1.0 - (distance - radius) / blur).max(0.0).powi(2);
             blend_pixel(pixels, width, x, y, paint.color, paint.alpha * coverage);
         }
     }
