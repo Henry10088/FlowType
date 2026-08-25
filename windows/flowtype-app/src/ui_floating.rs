@@ -320,7 +320,7 @@ fn render_surface(context: &mut BallContext) {
         center,
         center,
         radius,
-        Paint { color, alpha: 0.58 },
+        Paint { color, alpha: 0.45 },
     );
     draw_ring(
         pixels,
@@ -335,7 +335,8 @@ fn render_surface(context: &mut BallContext) {
         },
     );
 
-    let icon_scale = context.ball_size as f32 / 56.0;
+    // Match the Android drawable's 48x48 view box rather than the old 56px ball.
+    let icon_scale = context.ball_size as f32 / 48.0;
     let icon_origin = (center - 25.5 * icon_scale, center - 22.0 * icon_scale);
     let icon = |x: f32, y: f32| {
         (
@@ -357,7 +358,7 @@ fn render_surface(context: &mut BallContext) {
             context.size as usize,
             start,
             end,
-            2.7 * icon_scale,
+            3.0 * icon_scale,
             (244, 246, 247),
             0.98,
         );
