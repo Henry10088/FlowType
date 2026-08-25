@@ -19,6 +19,14 @@ $installerVersion = Read-RequiredMatch "installer/flowtype.iss" '^#define AppVer
 $readmeVersion = Read-RequiredMatch "README.md" '^.*?([0-9]+\.[0-9]+\.[0-9]+)' "README version"
 $releaseDocVersion = Read-RequiredMatch "docs/release-versioning.md" '^.{0,10}([0-9]+\.[0-9]+\.[0-9]+).*Android' "release document version"
 
+$latestTag = (& git -C $root tag --list 'v[0-9]*' --sort=-version:refname | Select-Object -First 1).Trim()
+$exactTag = ""
+try {
+    $exactTag = (& git -C $root describe --tags --exact-match HEAD 2>$null).Trim()
+} catch {
+    # An untagged development commit is the normal state before publishing.
+}
+
 $versions = @{
     "Cargo" = $cargoVersion
     "Android" = $androidVersion
@@ -35,6 +43,13 @@ if ($mismatches) {
 
 if ([int]$androidCode -lt 1) {
     throw "Android versionCode must be positive"
+}
+
+if ($latestTag -and $exactTag -ne $latestTag -and $latestTag -match '^v(\d+\.\d+\.\d+)$') {
+    $latestReleasedVersion = [Version]$Matches[1]
+    if ([Version]$cargoVersion -le $latestReleasedVersion) {
+        throw "Version $cargoVersion must be greater than latest released version $latestTag before building a new distributable."
+    }
 }
 
 Write-Output "FlowType version $cargoVersion is consistent; Android versionCode=$androidCode."

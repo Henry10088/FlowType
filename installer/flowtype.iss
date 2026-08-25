@@ -1,13 +1,13 @@
 #define AppName "FlowType"
-#define AppVersion "0.1.13"
+#define AppVersion "0.1.14"
 #define AppPublisher "FlowType"
 #ifndef BuildDir
 #define BuildDir "..\windows\target\release"
 #endif
 #define AppExeName "flowtype.exe"
 #define InjectorExeName "flowtype-injector.exe"
-#define TipDllName "flowtype_tip_0_1_13.dll"
-#define TipDllX86Name "flowtype_tip_x86_0_1_13.dll"
+#define TipDllName "flowtype_tip_0_1_14.dll"
+#define TipDllX86Name "flowtype_tip_x86_0_1_14.dll"
 #define TaskName "FlowType Injector"
 #define FirewallRule "FlowType Local Network"
 
