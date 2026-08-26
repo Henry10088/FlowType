@@ -307,25 +307,35 @@ class FloatingInputService : Service() {
         }
         primaryActions.addView(panelNewSession, LinearLayout.LayoutParams(0, dp(48), 1f))
         root.addView(primaryActions, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
+        val screenWidth = resources.displayMetrics.widthPixels
+        val edgeGestureMargin = dp(32)
+        val params = WindowManager.LayoutParams(
+            (screenWidth - edgeGestureMargin * 2).coerceAtLeast(dp(280)),
+            dp(270),
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+            y = dp(8)
+        }
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val visible = insets.isVisible(WindowInsetsCompat.Type.ime())
             if (panelImeVisible && !visible) {
                 view.post { if (panel === view) collapsePanel() }
             }
             panelImeVisible = visible
+            val systemGestures = insets.getInsets(WindowInsetsCompat.Type.systemGestures())
+            val navigationBars = insets.getInsets(WindowInsetsCompat.Type.navigationBars())
+            val safeBottom = maxOf(systemGestures.bottom, navigationBars.bottom) + dp(8)
+            if (params.y != safeBottom) {
+                params.y = safeBottom
+                if (view.isAttachedToWindow) windowManager.updateViewLayout(view, params)
+            }
             insets
-        }
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            dp(270),
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-            PixelFormat.TRANSLUCENT,
-        ).apply {
-            gravity = Gravity.BOTTOM
-            flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
-            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
         }
         runCatching { windowManager.addView(root, params) }.onSuccess {
             panel = root
@@ -333,7 +343,9 @@ class FloatingInputService : Service() {
             panelInput?.postDelayed({
                 getSystemService(InputMethodManager::class.java).showSoftInput(panelInput, InputMethodManager.SHOW_IMPLICIT)
             }, 250)
-        }.onFailure { showBall() }
+        }.onFailure {
+            showBall()
+        }
     }
 
     private fun renderPanelChooser(state: FlowTypeApplication.UiState) {
