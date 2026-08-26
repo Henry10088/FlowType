@@ -22,6 +22,15 @@ Android 的 `versionCode` 必须在每次发布时严格递增，即使 `version
 
 网络协议版本独立于应用版本。只有改变协议兼容性时才提升协议版本；普通 UI、输入法、图片和稳定性改动不修改协议版本。
 
+## 本地提交与远程发布
+
+- 本地开发阶段允许多次提交、反复构建和验证；本地提交不会自动推送到远程仓库。
+- 未收到项目所有者明确的“push 到远程”或等价指令时，不执行 `git push`，不创建或推送远程标签，不触发远程构建和 Release。
+- 多次本地提交可以在一次明确授权的 push 中统一同步；一次 push 作为一个远程构建节点，不要求为了打包强行压缩本地提交历史。只有明确要求整理提交历史时才执行 squash 或 rebase。
+- 远程版本号只在明确准备远程发布时更新。普通本地修复、临时验证和测试构建不得为了触发打包而修改正式版本号。
+- 远程正式发布必须同时满足：版本号已递增、版本检查通过、用户明确授权 push，并按本规范创建对应的 `vX.Y.Z` 标签。测试标签只能用于内部验证，不得替代正式版本。
+- 远程构建完成后保留本地工作区和远程 Release 的对应关系；除非用户明确要求，不删除测试标签、Release 或构建资产。
+
 ## 发布检查
 
 1. 确定递增后的版本号并同步 `windows/Cargo.toml`、`android/app/build.gradle.kts` 和 `installer/flowtype.iss`；不要修改历史验证文档中的版本证据。
@@ -29,4 +38,4 @@ Android 的 `versionCode` 必须在每次发布时严格递增，即使 `version
 3. 更新 Android `versionCode`，运行 Android 测试、Lint 和 Release 构建。
 4. 运行 Windows workspace 测试、Clippy 和 Release 构建，并编译安装包。
 5. 使用签名材料生成两端发布包，记录 SHA-256。
-6. 提交代码后创建 `vX.Y.Z` 标签，再上传 GitHub Release。
+6. 确认已获得明确的远程 push 授权；提交代码后创建 `vX.Y.Z` 标签，再上传 GitHub Release。
