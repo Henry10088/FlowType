@@ -76,7 +76,7 @@ jobs:
       - name: Verify Android signature and checksum
         shell: bash
         run: |
-          apk="$(find build/outputs/apk/release -maxdepth 1 -type f -name 'FlowType-*-android-release.apk' -print -quit)"
+          apk="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name 'FlowType-*-android-release.apk' -print -quit)"
           test -n "$apk"
           apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
           test -n "$apksigner"
