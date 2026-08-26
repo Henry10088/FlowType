@@ -6,7 +6,11 @@
 #endif
 #define AppExeName "flowtype.exe"
 #define InjectorExeName "flowtype-injector.exe"
-#define TipDllName "flowtype_tip.dll"
+#ifndef TipDllHash
+#define TipDllHash "dev"
+#endif
+#define TipDllSourceName "flowtype_tip.dll"
+#define TipDllName "flowtype_tip-" + TipDllHash + ".dll"
 #define TaskName "FlowType Injector"
 #define FirewallRule "FlowType Local Network"
 
@@ -34,7 +38,7 @@ DisableProgramGroupPage=yes
 [Files]
 Source: "{#BuildDir}\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\{#InjectorExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#BuildDir}\{#TipDllName}"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+Source: "{#BuildDir}\{#TipDllSourceName}"; DestDir: "{app}"; DestName: "{#TipDllName}"; Flags: ignoreversion onlyifdoesntexist
 
 [InstallDelete]
 Type: files; Name: "{app}\flowtype-app.exe"
@@ -59,6 +63,28 @@ Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /F /TN ""{#TaskName}"""; Fl
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FirewallRule}"""; Flags: runhidden waituntilterminated; RunOnceId: "DeleteFirewallRule"
 
 [Code]
+procedure CleanupObsoleteTipDlls();
+var
+  FindRec: TFindRec;
+  Candidate: String;
+begin
+  { A TSF host may still have an older TIP DLL loaded. Never schedule a reboot
+    for cleanup; an occupied file is harmless and will be retried next update. }
+  if FindFirst(ExpandConstant('{app}\flowtype_tip-*.dll'), FindRec) then
+  begin
+    try
+      repeat
+        Candidate := AddBackslash(ExpandConstant('{app}')) + FindRec.Name;
+        if CompareText(FindRec.Name, '{#TipDllName}') <> 0 then
+          DeleteFile(Candidate);
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+  DeleteFile(ExpandConstant('{app}\flowtype_tip.dll'));
+end;
+
 function InitializeSetup(): Boolean;
 var
   ResultCode: Integer;
@@ -72,6 +98,12 @@ begin
   Result := True;
 end;
 
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    CleanupObsoleteTipDlls();
+end;
+
 function InitializeUninstall(): Boolean;
 var
   ResultCode: Integer;
@@ -83,4 +115,25 @@ begin
   RegDeleteValue(HKEY_CURRENT_USER,
     'Software\Microsoft\Windows\CurrentVersion\Run', 'FlowType');
   Result := True;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  FindRec: TFindRec;
+  Candidate: String;
+begin
+  if CurUninstallStep <> usPostUninstall then
+    Exit;
+  if FindFirst(AddBackslash(ExpandConstant('{app}')) + 'flowtype_tip-*.dll', FindRec) then
+  begin
+    try
+      repeat
+        Candidate := AddBackslash(ExpandConstant('{app}')) + FindRec.Name;
+        DeleteFile(Candidate);
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+  DeleteFile(ExpandConstant('{app}\flowtype_tip.dll'));
 end;

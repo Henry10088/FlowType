@@ -113,8 +113,10 @@ flowtype_tip.dll
 安装 Inno Setup 6 后，在 `windows/` 目录完成 Release 构建，然后从仓库根目录执行：
 
 ```powershell
+$tipHash = (Get-FileHash .\windows\target\release\flowtype_tip.dll -Algorithm SHA256).Hash.ToLowerInvariant()
 & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" `
   /DBuildDir="..\windows\target\release" `
+  /DTipDllHash=$tipHash `
   installer/flowtype.iss
 ```
 

@@ -156,8 +156,11 @@ jobs:
           if (-not (Test-Path -LiteralPath $iscc)) { throw "ISCC.exe was not found" }
           $buildDir = Join-Path $env:GITHUB_WORKSPACE "windows\target\release"
           $outputDir = Join-Path $env:GITHUB_WORKSPACE "installer\output"
+          $tipDll = Join-Path $buildDir "flowtype_tip.dll"
+          $tipHash = (Get-FileHash -LiteralPath $tipDll -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($tipHash -notmatch '^[0-9a-f]{64}$') { throw "Invalid TIP DLL SHA-256 hash: $tipHash" }
           New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
-          & $iscc "/DBuildDir=$buildDir" "/O$outputDir" (Join-Path $env:GITHUB_WORKSPACE "installer\flowtype.iss")
+          & $iscc "/DBuildDir=$buildDir" "/DTipDllHash=$tipHash" "/O$outputDir" (Join-Path $env:GITHUB_WORKSPACE "installer\flowtype.iss")
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
 
       - name: Sign installer and verify signatures
