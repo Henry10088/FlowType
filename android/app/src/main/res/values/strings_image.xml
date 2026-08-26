@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="image">图片</string>
-    <string name="choose_image_source">选择图片来源</string>
-    <string name="take_photo">拍照</string>
-    <string name="choose_from_gallery">从相册选择</string>
-    <string name="image_preview">图片预览</string>
-    <string name="original_image">原图</string>
-    <string name="send_to_computer">复制到电脑剪贴板</string>
-    <string name="image_processing">正在准备图片…</string>
-    <string name="image_transferring">正在传输…</string>
-    <string name="image_sent">已复制到电脑剪贴板</string>
-    <string name="image_failed">发送失败，请重试</string>
-    <string name="image_too_large">图片过大，请取消原图后重试</string>
-    <string name="computer_not_connected">电脑尚未连接</string>
+    <string name="image">Image</string>
+    <string name="choose_image_source">Choose image source</string>
+    <string name="take_photo">Take photo</string>
+    <string name="choose_from_gallery">Choose from gallery</string>
+    <string name="image_preview">Image preview</string>
+    <string name="original_image">Original quality</string>
+    <string name="send_to_computer">Copy to computer clipboard</string>
+    <string name="image_processing">Preparing image…</string>
+    <string name="image_transferring">Transferring…</string>
+    <string name="image_sent">Copied to computer clipboard</string>
+    <string name="image_failed">Transfer failed. Try again.</string>
+    <string name="image_too_large">Image is too large. Turn off original quality and try again.</string>
+    <string name="computer_not_connected">Computer not connected</string>
 </resources>

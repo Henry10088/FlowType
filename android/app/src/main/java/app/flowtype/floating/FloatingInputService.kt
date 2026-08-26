@@ -366,9 +366,9 @@ class FloatingInputService : Service() {
                 }
                 contentDescription = buildString {
                     append(binding.pcName)
-                    append(if (selected) "，已选择" else "")
-                    append(if (active) "，最近有鼠标活动" else "")
-                    append(if (online) "，已连接" else "，未连接")
+                    if (selected) append(getString(R.string.a11y_selected))
+                    if (active) append(getString(R.string.a11y_recently_used))
+                    append(getString(if (online) R.string.a11y_connected else R.string.a11y_disconnected))
                 }
                 setOnClickListener { controller.selectComputer(binding.pcId) }
             }

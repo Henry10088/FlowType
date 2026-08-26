@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Environment
 import android.provider.Settings
 import androidx.core.content.FileProvider
+import app.flowtype.R
 import okhttp3.CacheControl
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -101,9 +102,9 @@ class UpdateManager(
 
     /** Returns an installer intent only after repeating every local package check. */
     fun prepareInstall(): Result<Intent> {
-        if (installationBusy()) return Result.failure(IllegalStateException("请先完成当前输入或图片传输"))
+        if (installationBusy()) return Result.failure(IllegalStateException(context.getString(R.string.update_finish_work_first)))
         val manifest = available ?: loadPersistedManifest()
-            ?: return Result.failure(IllegalStateException("更新清单不可用"))
+            ?: return Result.failure(IllegalStateException(context.getString(R.string.update_manifest_unavailable)))
         val file = updateFile(manifest)
         return runCatching {
             verifyApk(file, manifest.android)
@@ -112,7 +113,9 @@ class UpdateManager(
                 setDataAndType(uri, "application/vnd.android.package-archive")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-        }.onFailure { setFailure(manifest, "更新校验失败：${it.message ?: "未知错误"}") }
+        }.recoverCatching {
+            throw IllegalStateException(context.getString(R.string.update_verification_failed), it)
+        }.onFailure { setFailure(manifest, it.message ?: context.getString(R.string.update_verification_failed)) }
     }
 
     fun canRequestPackageInstalls(): Boolean = context.packageManager.canRequestPackageInstalls()
@@ -131,11 +134,11 @@ class UpdateManager(
     private fun check(manual: Boolean) {
         if (!manual && !shouldAutoCheck()) return
         if (!checking.compareAndSet(false, true)) return
-        setState(State("正在检查更新…", Action.NONE, ""))
+        setState(State(context.getString(R.string.update_checking), Action.NONE, ""))
         try {
             val manifest = fetchVerifiedManifest()
             val highest = preferences.getLong(HIGHEST_VERSION_CODE, 0)
-            require(manifest.versionCode >= highest) { "服务器返回了旧版更新清单" }
+            require(manifest.versionCode >= highest) { "update manifest rolled back" }
             preferences.edit()
                 .putLong(LAST_SUCCESSFUL_CHECK, System.currentTimeMillis())
                 .putLong(HIGHEST_VERSION_CODE, maxOf(highest, manifest.versionCode))
@@ -158,9 +161,9 @@ class UpdateManager(
             } else {
                 available = null
                 setState(State(
-                    message = "已是最新版本",
+                    message = context.getString(R.string.update_latest),
                     action = Action.CHECK,
-                    actionLabel = "再次检查",
+                    actionLabel = context.getString(R.string.update_check_again),
                     releaseUrl = manifest.releaseUrl,
                 ))
             }
@@ -169,17 +172,17 @@ class UpdateManager(
             if (cached != null && cached.versionCode > currentVersionCode) {
                 available = cached
                 setState(State(
-                    message = "检查失败，仍可下载已验证的 ${cached.version}",
+                    message = context.getString(R.string.update_cached_available, cached.version),
                     action = Action.DOWNLOAD,
-                    actionLabel = "下载更新",
+                    actionLabel = context.getString(R.string.update_download),
                     releaseUrl = cached.releaseUrl,
                     version = cached.version,
                 ))
             } else {
                 setState(State(
-                    message = "检查更新失败：${friendlyError(error)}",
+                    message = context.getString(R.string.update_check_failed, friendlyError(error)),
                     action = Action.CHECK,
-                    actionLabel = "重试",
+                    actionLabel = context.getString(R.string.retry),
                     releaseUrl = RELEASES_URL,
                 ))
             }
@@ -191,7 +194,7 @@ class UpdateManager(
     private fun fetchVerifiedManifest(): Manifest {
         val bytes = get(MANIFEST_URL, MAX_MANIFEST_BYTES)
         val untrustedVersion = JSONObject(bytes.toString(Charsets.UTF_8)).optString("version")
-        require(parseVersion(untrustedVersion) != null) { "更新版本格式无效" }
+        require(parseVersion(untrustedVersion) != null) { "invalid update version" }
         val signatureUrl = "$RELEASE_DOWNLOAD_PREFIX/v$untrustedVersion/flowtype-update.json.sig"
         val signature = get(signatureUrl, MAX_SIGNATURE_BYTES)
         return verifyManifest(bytes, signature)
@@ -204,17 +207,17 @@ class UpdateManager(
             .header("Accept", "application/octet-stream, application/json")
             .build()
         client.newCall(request).execute().use { response ->
-            require(response.isSuccessful) { "服务器返回 ${response.code}" }
-            val body = response.body ?: error("服务器响应为空")
+            require(response.isSuccessful) { context.getString(R.string.update_server_error, response.code) }
+            val body = response.body ?: error(context.getString(R.string.update_invalid_response))
             val declared = body.contentLength()
-            require(declared < 0 || declared <= limit) { "服务器响应过大" }
+            require(declared < 0 || declared <= limit) { context.getString(R.string.update_invalid_response) }
             val bytes = body.byteStream().use { input ->
                 val output = java.io.ByteArrayOutputStream(minOf(limit, 8192))
                 val buffer = ByteArray(8192)
                 while (true) {
                     val read = input.read(buffer)
                     if (read < 0) break
-                    require(output.size() + read <= limit) { "服务器响应过大" }
+                    require(output.size() + read <= limit) { context.getString(R.string.update_invalid_response) }
                     output.write(buffer, 0, read)
                 }
                 output.toByteArray()
@@ -231,8 +234,8 @@ class UpdateManager(
             file.parentFile?.mkdirs()
             file.delete()
             val request = DownloadManager.Request(Uri.parse(manifest.android.url))
-                .setTitle("说写 ${manifest.version}")
-                .setDescription("正在下载更新")
+                .setTitle(context.getString(R.string.update_download_title, manifest.version))
+                .setDescription(context.getString(R.string.update_downloading))
                 .setMimeType("application/vnd.android.package-archive")
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                 .setAllowedOverMetered(true)
@@ -241,10 +244,10 @@ class UpdateManager(
             val id = downloads.enqueue(request)
             preferences.edit().putLong(DOWNLOAD_ID, id).apply()
             persistManifest(manifest)
-            setDownloading(manifest, 0, manifest.android.size, "正在准备下载…")
+            setDownloading(manifest, 0, manifest.android.size, context.getString(R.string.update_preparing_download))
             beginPolling(id, manifest)
         } catch (error: Exception) {
-            setFailure(manifest, "无法开始下载：${friendlyError(error)}")
+            setFailure(manifest, context.getString(R.string.update_start_failed, friendlyError(error)))
         }
     }
 
@@ -261,7 +264,7 @@ class UpdateManager(
             if (!cursor.moveToFirst()) {
                 polling?.cancel(false)
                 preferences.edit().remove(DOWNLOAD_ID).apply()
-                setFailure(manifest, "下载任务已不存在")
+                setFailure(manifest, context.getString(R.string.update_task_missing))
                 return
             }
             val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
@@ -272,7 +275,7 @@ class UpdateManager(
             when (status) {
                 DownloadManager.STATUS_SUCCESSFUL -> {
                     polling?.cancel(false)
-                    setState(State("正在校验更新…", Action.NONE, "", releaseUrl = manifest.releaseUrl, version = manifest.version))
+                    setState(State(context.getString(R.string.update_verifying), Action.NONE, "", releaseUrl = manifest.releaseUrl, version = manifest.version))
                     runCatching { verifyApk(updateFile(manifest), manifest.android) }
                         .onSuccess {
                             preferences.edit().remove(DOWNLOAD_ID).putBoolean(DOWNLOAD_VERIFIED, true).apply()
@@ -282,15 +285,15 @@ class UpdateManager(
                         .onFailure {
                             updateFile(manifest).delete()
                             preferences.edit().remove(DOWNLOAD_ID).putBoolean(DOWNLOAD_VERIFIED, false).apply()
-                            setFailure(manifest, "更新校验失败：${it.message ?: "未知错误"}")
+                            setFailure(manifest, context.getString(R.string.update_verification_failed))
                         }
                 }
                 DownloadManager.STATUS_FAILED -> {
                     polling?.cancel(false)
                     preferences.edit().remove(DOWNLOAD_ID).apply()
-                    setFailure(manifest, "下载失败，请重试")
+                    setFailure(manifest, context.getString(R.string.update_download_failed))
                 }
-                DownloadManager.STATUS_PAUSED -> setDownloading(manifest, downloaded, total, "等待网络，恢复后继续下载")
+                DownloadManager.STATUS_PAUSED -> setDownloading(manifest, downloaded, total, context.getString(R.string.update_waiting_network))
                 else -> setDownloading(manifest, downloaded, total, formatProgress(downloaded, total))
             }
         }
@@ -325,7 +328,7 @@ class UpdateManager(
     }
 
     private fun verifyApk(file: File, asset: Asset) {
-        require(file.isFile && file.length() == asset.size) { "安装包大小不匹配" }
+        require(file.isFile && file.length() == asset.size) { context.getString(R.string.update_verification_failed) }
         val digest = file.inputStream().use { input ->
             val hash = MessageDigest.getInstance("SHA-256")
             val buffer = ByteArray(64 * 1024)
@@ -336,25 +339,25 @@ class UpdateManager(
             }
             hash.digest().joinToString("") { "%02x".format(it) }
         }
-        require(MessageDigest.isEqual(digest.toByteArray(), asset.sha256.toByteArray())) { "安装包摘要不匹配" }
+        require(MessageDigest.isEqual(digest.toByteArray(), asset.sha256.toByteArray())) { context.getString(R.string.update_verification_failed) }
         val archive = context.packageManager.getPackageArchiveInfo(
             file.absolutePath,
             PackageManager.GET_SIGNING_CERTIFICATES,
-        ) ?: error("无法读取安装包")
-        require(archive.packageName == context.packageName) { "安装包应用标识不匹配" }
+        ) ?: error(context.getString(R.string.update_verification_failed))
+        require(archive.packageName == context.packageName) { context.getString(R.string.update_verification_failed) }
         val current = context.packageManager.getPackageInfo(
             context.packageName,
             PackageManager.GET_SIGNING_CERTIFICATES,
         )
         val archiveSigners = archive.signingInfo?.apkContentsSigners?.map { it.toByteArray() } ?: emptyList()
         val currentSigners = current.signingInfo?.apkContentsSigners?.map { it.toByteArray() } ?: emptyList()
-        require(sameCertificates(archiveSigners, currentSigners)) { "安装包签名证书不匹配" }
+        require(sameCertificates(archiveSigners, currentSigners)) { context.getString(R.string.update_verification_failed) }
     }
 
     private fun setAvailable(manifest: Manifest) = setState(State(
-        message = "发现新版本 ${manifest.version}",
+        message = context.getString(R.string.update_found, manifest.version),
         action = Action.DOWNLOAD,
-        actionLabel = "下载更新",
+        actionLabel = context.getString(R.string.update_download),
         releaseUrl = manifest.releaseUrl,
         version = manifest.version,
     ))
@@ -363,9 +366,9 @@ class UpdateManager(
         val manifest = available ?: loadPersistedManifest() ?: return
         val busy = installationBusy()
         setState(State(
-            message = if (busy) "更新已下载，输入结束后可安装" else "更新已下载",
+            message = context.getString(if (busy) R.string.update_downloaded_busy else R.string.update_downloaded),
             action = if (busy) Action.NONE else Action.INSTALL,
-            actionLabel = if (busy) "" else "安装更新",
+            actionLabel = if (busy) "" else context.getString(R.string.update_install),
             releaseUrl = manifest.releaseUrl,
             version = version,
         ))
@@ -374,7 +377,7 @@ class UpdateManager(
     private fun setDownloading(manifest: Manifest, downloaded: Long, total: Long, message: String) = setState(State(
         message = message,
         action = Action.CANCEL,
-        actionLabel = "取消",
+        actionLabel = context.getString(R.string.cancel),
         downloaded = downloaded,
         total = total,
         releaseUrl = manifest.releaseUrl,
@@ -384,7 +387,7 @@ class UpdateManager(
     private fun setFailure(manifest: Manifest, message: String) = setState(State(
         message = message,
         action = Action.DOWNLOAD,
-        actionLabel = "重试",
+        actionLabel = context.getString(R.string.retry),
         releaseUrl = manifest.releaseUrl,
         version = manifest.version,
     ))
@@ -395,9 +398,9 @@ class UpdateManager(
     }
 
     private fun idleState() = State(
-        message = "当前版本 $currentVersionName",
+        message = context.getString(R.string.update_current_version, currentVersionName),
         action = Action.CHECK,
-        actionLabel = "检查更新",
+        actionLabel = context.getString(R.string.check_updates),
     )
 
     private fun shouldAutoCheck(): Boolean =
@@ -427,6 +430,27 @@ class UpdateManager(
         return File(File(root, "updates"), "FlowType-${manifest.version}-android-release.apk")
     }
 
+    private fun formatProgress(downloaded: Long, total: Long): String {
+        if (total <= 0) return context.getString(R.string.update_downloaded_amount, formatBytes(downloaded))
+        val percent = (downloaded * 100 / total).coerceIn(0, 100)
+        return context.getString(
+            R.string.update_download_progress,
+            percent,
+            formatBytes(downloaded),
+            formatBytes(total),
+        )
+    }
+
+    private fun friendlyError(error: Exception): String {
+        if (error is java.net.SocketTimeoutException) return context.getString(R.string.error_timeout)
+        if (error is java.net.UnknownHostException || error is java.io.IOException) {
+            return context.getString(R.string.error_network_unavailable)
+        }
+        val serverPrefix = context.getString(R.string.update_server_error, 0).substringBefore('0')
+        return error.message?.takeIf { it.startsWith(serverPrefix) }
+            ?: context.getString(R.string.update_invalid_response)
+    }
+
     companion object {
         private const val MANIFEST_URL = "https://github.com/Henry10088/FlowType/releases/latest/download/flowtype-update.json"
         private const val RELEASE_DOWNLOAD_PREFIX = "https://github.com/Henry10088/FlowType/releases/download"
@@ -448,7 +472,7 @@ class UpdateManager(
         private const val MANIFEST_SIGNATURE = "manifest-signature"
 
         internal fun verifyManifest(bytes: ByteArray, signatureText: ByteArray): Manifest {
-            require(bytes.size <= MAX_MANIFEST_BYTES && signatureText.size <= MAX_SIGNATURE_BYTES) { "更新清单过大" }
+            require(bytes.size <= MAX_MANIFEST_BYTES && signatureText.size <= MAX_SIGNATURE_BYTES) { "update manifest too large" }
             val publicKey = KeyFactory.getInstance("EC").generatePublic(
                 X509EncodedKeySpec(Base64.getDecoder().decode(PUBLIC_KEY)),
             )
@@ -456,32 +480,32 @@ class UpdateManager(
             verifier.initVerify(publicKey)
             verifier.update(bytes)
             val signature = Base64.getDecoder().decode(signatureText.toString(Charsets.UTF_8).trim())
-            require(verifier.verify(signature)) { "更新清单签名不匹配" }
+            require(verifier.verify(signature)) { "update manifest signature mismatch" }
             return parseAndValidateManifest(bytes).copy(signature = signatureText.copyOf())
         }
 
         internal fun parseAndValidateManifest(bytes: ByteArray): Manifest {
-            require(bytes.size <= MAX_MANIFEST_BYTES) { "更新清单过大" }
+            require(bytes.size <= MAX_MANIFEST_BYTES) { "update manifest too large" }
             val root = JSONObject(bytes.toString(Charsets.UTF_8))
-            require(root.getInt("schema") == 1 && root.getString("key_id") == KEY_ID) { "不支持的更新清单版本或密钥" }
+            require(root.getInt("schema") == 1 && root.getString("key_id") == KEY_ID) { "unsupported update manifest" }
             val version = root.getString("version")
-            require(parseVersion(version) != null) { "更新版本格式无效" }
-            require(root.optString("published_at").length <= 40) { "更新清单字段过长" }
+            require(parseVersion(version) != null) { "invalid update version" }
+            require(root.optString("published_at").length <= 40) { "update manifest field too long" }
             val notes = root.optString("notes_zh_cn")
-            require(notes.length <= 8192) { "更新清单字段过长" }
+            require(notes.length <= 8192) { "update manifest field too long" }
             val releaseUrl = root.getString("release_url")
-            require(releaseUrl == "${RELEASE_TAG_PREFIX}v$version") { "更新发布地址无效" }
+            require(releaseUrl == "${RELEASE_TAG_PREFIX}v$version") { "invalid release URL" }
             val android = root.getJSONObject("android")
             val versionCode = android.getLong("version_code")
-            require(versionCode > 0) { "Android versionCode 无效" }
+            require(versionCode > 0) { "invalid Android versionCode" }
             val asset = Asset(
                 url = android.getString("url"),
                 sha256 = android.getString("sha256"),
                 size = android.getLong("size"),
             )
-            require(asset.url.startsWith("$RELEASE_DOWNLOAD_PREFIX/v$version/") && asset.url.length <= 2048) { "更新资产地址无效" }
-            require(asset.size in 1..MAX_APK_BYTES) { "更新资产大小无效" }
-            require(asset.sha256.matches(Regex("[0-9a-f]{64}"))) { "更新资产摘要无效" }
+            require(asset.url.startsWith("$RELEASE_DOWNLOAD_PREFIX/v$version/") && asset.url.length <= 2048) { "invalid update asset URL" }
+            require(asset.size in 1..MAX_APK_BYTES) { "invalid update asset size" }
+            require(asset.sha256.matches(Regex("[0-9a-f]{64}"))) { "invalid update asset digest" }
             return Manifest(bytes.copyOf(), byteArrayOf(), version, versionCode, releaseUrl, notes, asset)
         }
 
@@ -498,22 +522,10 @@ class UpdateManager(
             return normalize(left) == normalize(right)
         }
 
-        private fun formatProgress(downloaded: Long, total: Long): String {
-            if (total <= 0) return "已下载 ${formatBytes(downloaded)}"
-            val percent = (downloaded * 100 / total).coerceIn(0, 100)
-            return "正在下载 $percent% · ${formatBytes(downloaded)}/${formatBytes(total)}"
-        }
-
         private fun formatBytes(bytes: Long): String = when {
             bytes >= 1024 * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
             bytes >= 1024 -> "%.1f KB".format(bytes / 1024.0)
             else -> "$bytes B"
-        }
-
-        private fun friendlyError(error: Exception): String = when (error) {
-            is java.net.SocketTimeoutException -> "连接超时"
-            is java.net.UnknownHostException -> "网络不可用"
-            else -> error.message ?: "未知错误"
         }
     }
 }

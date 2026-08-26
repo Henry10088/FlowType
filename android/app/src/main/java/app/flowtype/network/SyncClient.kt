@@ -201,7 +201,7 @@ class SyncClient(
             .put("protocol_version", PROTOCOL_VERSION)
             .put("type", if (current.pairingToken == null) "authenticate" else "pair")
             .put("phone_id", phoneId)
-            .put("phone_name", Build.MODEL.ifBlank { "Android 手机" })
+            .put("phone_name", Build.MODEL.ifBlank { "Android" })
             .put(
                 "signature",
                 Base64.encodeToString(phoneIdentity.sign(current.pcId, payload), Base64.NO_WRAP),

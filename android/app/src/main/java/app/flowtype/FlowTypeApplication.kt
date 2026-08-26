@@ -66,7 +66,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val observers = CopyOnWriteArraySet<(UiState) -> Unit>()
     private var currentBinding: ComputerBinding? = null
-    private var statusText = "尚未绑定电脑"
+    private var statusText = ""
     private var connected = false
     private var showSyncFullText = false
     private var targetState: TargetState? = null
@@ -84,6 +84,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
 
     override fun onCreate() {
         super.onCreate()
+        statusText = getString(R.string.status_unpaired)
         database = AppDatabase(this)
         bindings = BindingStore(this, database)
         history = HistoryStore(database)
