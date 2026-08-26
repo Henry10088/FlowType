@@ -76,5 +76,5 @@
     <string name="update_finish_work_first">请先完成当前输入或图片传输</string>
     <string name="update_install_permission_title">允许安装说写更新</string>
     <string name="update_install_permission_message">Android 需要允许说写安装由项目发布并已验证签名的更新包。此权限只用于你主动安装更新。</string>
-    <string name="update_privacy_summary">检查更新时会连接 GitHub，并向 GitHub 暴露常规网络信息（如 IP 地址）。不会上传输入内容、历史记录或绑定信息。</string>
+    <string name="update_privacy_summary">检查更新时会连接 GitHub。</string>
 </resources>

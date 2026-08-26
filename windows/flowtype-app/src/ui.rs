@@ -353,7 +353,7 @@ impl UiContext {
             ButtonKind::Secondary,
         );
         self.muted_text(
-            "检查更新会连接 GitHub；不会上传输入内容、历史记录或绑定信息。",
+            "检查更新会连接 GitHub。",
             220,
             518,
             500,
