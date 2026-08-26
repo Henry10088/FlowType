@@ -6,7 +6,7 @@ on:
       release_tag:
         description: "Release tag to create or publish"
         required: true
-        default: "v0.1.18-test.1"
+        default: "v0.2.0"
   push:
     tags:
       - "v*"
