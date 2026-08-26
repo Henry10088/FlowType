@@ -13,8 +13,8 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
-    DRAWITEMSTRUCT, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, ODS_FOCUS,
-    ODS_SELECTED,
+    DRAWITEMSTRUCT, ICC_PROGRESS_CLASS, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX,
+    InitCommonControlsEx, ODS_FOCUS, ODS_SELECTED, PBM_SETPOS, PBM_SETRANGE32, PBS_SMOOTH,
 };
 use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
@@ -26,7 +26,7 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::{AppState, PORT, WM_APP_STATE, settings};
+use crate::{AppState, PORT, WM_APP_STATE, settings, update};
 
 #[path = "ui_commands.rs"]
 mod ui_commands;
@@ -83,6 +83,10 @@ struct UiContext {
     name_edit: HWND,
     auto_start: HWND,
     show_floating: HWND,
+    update_status: HWND,
+    update_progress: HWND,
+    update_action: HWND,
+    update_release: HWND,
     title_font: HFONT,
     heading_font: HFONT,
     body_font: HFONT,
@@ -108,6 +112,10 @@ impl UiContext {
             name_edit: null_mut(),
             auto_start: null_mut(),
             show_floating: null_mut(),
+            update_status: null_mut(),
+            update_progress: null_mut(),
+            update_action: null_mut(),
+            update_release: null_mut(),
             title_font: null_mut(),
             heading_font: null_mut(),
             body_font: null_mut(),
@@ -153,6 +161,10 @@ impl UiContext {
         self.name_edit = null_mut();
         self.auto_start = null_mut();
         self.show_floating = null_mut();
+        self.update_status = null_mut();
+        self.update_progress = null_mut();
+        self.update_action = null_mut();
+        self.update_release = null_mut();
         create_navigation(self);
         match self.page {
             Page::Status => self.build_status(),
@@ -187,11 +199,7 @@ impl UiContext {
         self.label_value("输入状态", "等待手机输入", 151);
         self.label_value(
             "输入位置",
-            snapshot
-                .status
-                .target_name
-                .as_deref()
-                .unwrap_or("尚未选择"),
+            snapshot.status.target_name.as_deref().unwrap_or("尚未选择"),
             205,
         );
         self.label_value("连接地址", &format!("{}:{PORT}", self.host), 259);
@@ -212,15 +220,7 @@ impl UiContext {
     fn build_phones(&mut self) {
         let snapshot = self.state.snapshot();
         self.title("已绑定手机");
-        self.owner_button(
-            "绑定手机",
-            ID_PAIR,
-            590,
-            28,
-            132,
-            42,
-            ButtonKind::Secondary,
-        );
+        self.owner_button("绑定手机", ID_PAIR, 590, 28, 132, 42, ButtonKind::Secondary);
         if snapshot.phones.is_empty() {
             self.muted_text("还没有绑定手机", 220, 112, 420, 30, self.body_font);
         }
@@ -297,26 +297,70 @@ impl UiContext {
             ButtonKind::Secondary,
         );
 
-        self.text("输入服务", 220, 290, 120, 26, self.heading_font);
+        self.text("输入服务", 220, 272, 120, 26, self.heading_font);
         let service = if snapshot.injector_ready {
             "正常运行"
         } else {
             "输入服务不可用"
         };
-        self.text(service, 246, 332, 100, 28, self.body_font);
+        self.text(service, 246, 308, 180, 28, self.body_font);
         self.owner_button(
             "修复输入服务",
             ID_REPAIR,
             610,
-            322,
+            298,
             112,
             38,
             ButtonKind::Secondary,
         );
-        self.text("关于", 220, 408, 120, 26, self.heading_font);
-        self.text("版本", 220, 450, 80, 26, self.body_font);
-        self.text(env!("CARGO_PKG_VERSION"), 320, 450, 120, 26, self.body_font);
-        self.muted_text("Windows x64", 320, 480, 180, 26, self.body_font);
+        self.text("版本与更新", 220, 370, 160, 26, self.heading_font);
+        self.text(
+            &format!("当前版本 {} · Windows x64", env!("CARGO_PKG_VERSION")),
+            220,
+            406,
+            350,
+            24,
+            self.body_font,
+        );
+        self.update_status = self.muted_text("", 220, 434, 360, 24, self.body_font);
+        self.update_progress = self.control(
+            "msctls_progress32",
+            "",
+            WS_CHILD | PBS_SMOOTH,
+            0,
+            220,
+            462,
+            360,
+            6,
+            self.body_font,
+        );
+        self.update_release = self.owner_button(
+            "查看说明",
+            ID_UPDATE_RELEASE,
+            500,
+            476,
+            94,
+            32,
+            ButtonKind::Text,
+        );
+        self.update_action = self.owner_button(
+            "检查更新",
+            ID_UPDATE_ACTION,
+            610,
+            474,
+            112,
+            34,
+            ButtonKind::Secondary,
+        );
+        self.muted_text(
+            "检查更新会连接 GitHub；不会上传输入内容、历史记录或绑定信息。",
+            220,
+            518,
+            500,
+            34,
+            self.body_font,
+        );
+        self.refresh_update_controls();
     }
 
     fn build_pairing(&mut self) {
@@ -570,6 +614,74 @@ impl UiContext {
         ui_floating::refresh(self.ball_hwnd);
     }
 
+    fn refresh_update_controls(&mut self) {
+        if self.page != Page::Settings || self.update_status.is_null() {
+            self.update_tray();
+            return;
+        }
+        let snapshot = self.state.snapshot().update;
+        let status = if snapshot.action == update::UpdateAction::Install
+            && self.state.update_install_blocked()
+        {
+            "输入结束后可安装".to_owned()
+        } else {
+            snapshot.message.clone()
+        };
+        unsafe {
+            SetWindowTextW(self.update_status, wide(&status).as_ptr());
+            SetWindowTextW(self.update_action, wide(&snapshot.action_label).as_ptr());
+            ShowWindow(
+                self.update_action,
+                if snapshot.action == update::UpdateAction::None {
+                    SW_HIDE
+                } else {
+                    SW_SHOW
+                },
+            );
+            ShowWindow(
+                self.update_release,
+                if snapshot.release_url.is_some() {
+                    SW_SHOW
+                } else {
+                    SW_HIDE
+                },
+            );
+            if let Some((transferred, total)) = snapshot.progress {
+                let position = if total == 0 {
+                    0
+                } else {
+                    transferred
+                        .saturating_mul(1000)
+                        .saturating_div(total)
+                        .min(1000) as isize
+                };
+                SendMessageW(self.update_progress, PBM_SETRANGE32, 0, 1000);
+                SendMessageW(self.update_progress, PBM_SETPOS, position as usize, 0);
+                ShowWindow(self.update_progress, SW_SHOW);
+            } else {
+                ShowWindow(self.update_progress, SW_HIDE);
+            }
+            InvalidateRect(self.update_action, null(), 1);
+            InvalidateRect(self.update_release, null(), 1);
+        }
+        self.update_tray();
+    }
+
+    fn handle_update_action(&mut self) {
+        let action = self.state.snapshot().update.action;
+        if action == update::UpdateAction::Install {
+            if self.state.update_install_blocked() {
+                self.show_save_notice(false, "请先完成当前输入，再安装更新");
+                return;
+            }
+            if self.state.install_update().is_ok() {
+                unsafe { DestroyWindow(self.hwnd) };
+            }
+        } else {
+            self.state.perform_update_action(action);
+        }
+    }
+
     fn update_tray(&self) {
         let mut data = self.tray_data();
         data.uFlags = NIF_TIP;
@@ -610,6 +722,9 @@ impl UiContext {
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
             append_menu(menu, ID_TRAY_OPEN, "打开说写");
             append_menu(menu, ID_TRAY_PAIR, "绑定手机...");
+            if let Some(label) = self.state.snapshot().update.tray_label() {
+                append_menu(menu, ID_TRAY_UPDATE, &label);
+            }
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
             append_menu(menu, ID_TRAY_EXIT, "退出说写");
             let mut point: POINT = zeroed();
@@ -1056,7 +1171,7 @@ pub fn run(
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let controls = INITCOMMONCONTROLSEX {
         dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-        dwICC: ICC_STANDARD_CLASSES,
+        dwICC: ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS,
     };
     unsafe { InitCommonControlsEx(&controls) };
     let instance = unsafe { GetModuleHandleW(null()) };
@@ -1084,7 +1199,7 @@ pub fn run(
     let title = wide("说写");
     let system_dpi = unsafe { GetDpiForSystem() }.max(96) as i32;
     let initial_width = 760 * system_dpi / 96;
-    let initial_height = 520 * system_dpi / 96;
+    let initial_height = 600 * system_dpi / 96;
     let hwnd = unsafe {
         CreateWindowExW(
             0,
@@ -1174,6 +1289,10 @@ unsafe extern "system" fn window_proc(
                     unsafe { InvalidateRect(ui.show_floating, null(), 1) };
                 }
                 Some(UiCommand::RepairInjector) => ui.repair_injector(),
+                Some(UiCommand::UpdateAction) => ui.handle_update_action(),
+                Some(UiCommand::OpenUpdateRelease) => {
+                    let _ = ui.state.open_update_release();
+                }
                 Some(UiCommand::Exit) => {
                     unsafe { DestroyWindow(hwnd) };
                 }
@@ -1184,6 +1303,10 @@ unsafe extern "system" fn window_proc(
         }
         WM_APP_STATE => {
             ui.update_from_state();
+            0
+        }
+        update::WM_APP_UPDATE => {
+            ui.refresh_update_controls();
             0
         }
         WM_TIMER if wparam == NOTICE_TIMER => {
@@ -1261,7 +1384,7 @@ unsafe extern "system" fn window_proc(
         WM_GETMINMAXINFO => {
             let info = unsafe { &mut *(lparam as *mut MINMAXINFO) };
             info.ptMinTrackSize.x = ui.scale(680);
-            info.ptMinTrackSize.y = ui.scale(460);
+            info.ptMinTrackSize.y = ui.scale(560);
             0
         }
         WM_CLOSE => {

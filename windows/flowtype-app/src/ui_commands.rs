@@ -9,10 +9,13 @@ pub(super) const ID_REPAIR: usize = 121;
 pub(super) const ID_NAME: usize = 122;
 pub(super) const ID_AUTO_START: usize = 123;
 pub(super) const ID_SHOW_FLOATING: usize = 124;
+pub(super) const ID_UPDATE_ACTION: usize = 125;
+pub(super) const ID_UPDATE_RELEASE: usize = 126;
 pub(super) const ID_UNPAIR_BASE: usize = 3000;
 pub(super) const ID_TRAY_OPEN: usize = 4001;
 pub(super) const ID_TRAY_PAIR: usize = 4002;
 pub(super) const ID_TRAY_EXIT: usize = 4003;
+pub(super) const ID_TRAY_UPDATE: usize = 4004;
 
 pub(super) enum UiCommand {
     Navigate(Page),
@@ -21,6 +24,8 @@ pub(super) enum UiCommand {
     ToggleAutoStart,
     ToggleFloating,
     RepairInjector,
+    UpdateAction,
+    OpenUpdateRelease,
     Exit,
     Unpair(usize),
 }
@@ -29,12 +34,14 @@ pub(super) fn command_for_id(id: usize) -> Option<UiCommand> {
     Some(match id {
         ID_NAV_STATUS | ID_TRAY_OPEN => UiCommand::Navigate(Page::Status),
         ID_NAV_PHONES => UiCommand::Navigate(Page::Phones),
-        ID_NAV_SETTINGS => UiCommand::Navigate(Page::Settings),
+        ID_NAV_SETTINGS | ID_TRAY_UPDATE => UiCommand::Navigate(Page::Settings),
         ID_PAIR | ID_TRAY_PAIR => UiCommand::Pair,
         ID_SAVE_SETTINGS => UiCommand::SaveSettings,
         ID_AUTO_START => UiCommand::ToggleAutoStart,
         ID_SHOW_FLOATING => UiCommand::ToggleFloating,
         ID_REPAIR => UiCommand::RepairInjector,
+        ID_UPDATE_ACTION => UiCommand::UpdateAction,
+        ID_UPDATE_RELEASE => UiCommand::OpenUpdateRelease,
         ID_TRAY_EXIT => UiCommand::Exit,
         value if (ID_UNPAIR_BASE..ID_UNPAIR_BASE + 1000).contains(&value) => {
             UiCommand::Unpair(value - ID_UNPAIR_BASE)

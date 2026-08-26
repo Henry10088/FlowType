@@ -6,6 +6,7 @@ mod injector;
 mod network_address;
 mod settings;
 mod ui;
+mod update;
 
 use std::collections::HashMap;
 use std::fs;
@@ -183,7 +184,8 @@ struct AppState {
     online_connections: Mutex<HashMap<u64, OnlineConnection>>,
     switch_channels: Mutex<HashMap<u64, SwitchChannel>>,
     runtime_status: Mutex<RuntimeStatus>,
-    ui_hwnd: AtomicIsize,
+    ui_hwnd: Arc<AtomicIsize>,
+    update: update::UpdateManager,
     next_connection_id: AtomicU64,
 }
 
@@ -201,6 +203,7 @@ struct UiSnapshot {
     phones: Vec<(String, PairedPhone)>,
     status: RuntimeStatus,
     injector_ready: bool,
+    update: update::UpdateSnapshot,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -225,6 +228,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or_else(network_address::preferred_ipv4);
+    let ui_hwnd = Arc::new(AtomicIsize::new(0));
+    let update = update::UpdateManager::start(Arc::clone(&ui_hwnd))?;
     let state = Arc::new(AppState {
         identity: identity.clone(),
         pc_name: Mutex::new(identity.pc_name.clone()),
@@ -240,7 +245,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             target_name: None,
             last_error: None,
         }),
-        ui_hwnd: AtomicIsize::new(0),
+        ui_hwnd,
+        update,
         next_connection_id: AtomicU64::new(1),
     });
 
@@ -349,6 +355,7 @@ impl AppState {
                 .lock()
                 .map(|injector| injector.is_some())
                 .unwrap_or(false),
+            update: self.update.snapshot(),
         }
     }
 
@@ -578,6 +585,25 @@ impl AppState {
             }
         });
         Ok(())
+    }
+
+    fn perform_update_action(&self, action: update::UpdateAction) {
+        self.update.perform(action);
+    }
+
+    fn open_update_release(&self) -> std::io::Result<()> {
+        self.update.open_release()
+    }
+
+    fn install_update(&self) -> Result<(), String> {
+        self.update.install()
+    }
+
+    fn update_install_blocked(&self) -> bool {
+        self.runtime_status
+            .lock()
+            .map(|status| status.target_name.is_some())
+            .unwrap_or(true)
     }
 }
 

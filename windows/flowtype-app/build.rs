@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=FLOWTYPE_WINDOWS_CERT_SHA256");
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
         let icon_path = Path::new(&env::var_os("OUT_DIR").expect("OUT_DIR")).join("flowtype.ico");
         write_icon(&icon_path);
