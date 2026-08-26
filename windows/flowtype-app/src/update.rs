@@ -69,7 +69,7 @@ pub struct UpdateSnapshot {
 impl UpdateSnapshot {
     fn idle() -> Self {
         Self {
-            message: format!("当前版本 {} · Windows x64", env!("CARGO_PKG_VERSION")),
+            message: "可检查更新".to_owned(),
             action: UpdateAction::Check,
             action_label: "检查更新".to_owned(),
             progress: None,
