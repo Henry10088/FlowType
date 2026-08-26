@@ -46,6 +46,12 @@ const WM_APP_TRAY: u32 = 0x8002;
 const WM_APP_SHOW: u32 = 0x8003;
 const WM_APP_FLOATING_HIDE: u32 = 0x8004;
 const TRAY_ID: u32 = 1;
+const NOTICE_TIMER: usize = 2;
+
+struct SaveNotice {
+    success: bool,
+    text: String,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -84,6 +90,7 @@ struct UiContext {
     auto_start_checked: bool,
     floating_enabled_checked: bool,
     ball_hwnd: HWND,
+    save_notice: Option<SaveNotice>,
 }
 
 impl UiContext {
@@ -108,6 +115,7 @@ impl UiContext {
             auto_start_checked: false,
             floating_enabled_checked: settings::floating_enabled(),
             ball_hwnd: null_mut(),
+            save_notice: None,
         }
     }
 
@@ -280,12 +288,12 @@ impl UiContext {
             ButtonKind::Checkbox,
         );
         self.owner_button(
-            "保存",
+            "保存设置",
             ID_SAVE_SETTINGS,
-            646,
-            129,
-            76,
-            32,
+            610,
+            34,
+            112,
+            34,
             ButtonKind::Secondary,
         );
 
@@ -491,13 +499,22 @@ impl UiContext {
         if result.is_ok() {
             self.apply_floating_visibility();
         }
-        let (text, flags) = if result.is_ok() {
-            ("设置已保存", MB_OK | MB_ICONINFORMATION)
+        let (success, text) = if result.is_ok() {
+            (true, "设置已保存")
         } else {
-            ("设置保存失败，请检查电脑名称", MB_OK | MB_ICONERROR)
+            (false, "设置保存失败，请检查电脑名称")
         };
-        message_box(self.hwnd, text, "说写", flags);
         self.rebuild_page();
+        self.show_save_notice(success, text);
+    }
+
+    fn show_save_notice(&mut self, success: bool, text: &str) {
+        self.save_notice = Some(SaveNotice {
+            success,
+            text: text.to_owned(),
+        });
+        unsafe { SetTimer(self.hwnd, NOTICE_TIMER, 2600, None) };
+        unsafe { InvalidateRect(self.hwnd, null(), 1) };
     }
 
     fn apply_floating_visibility(&mut self) {
@@ -984,6 +1001,57 @@ impl UiContext {
                 DeleteObject(black)
             };
         }
+        if let Some(notice) = self.save_notice.as_ref() {
+            let toast = RECT {
+                left: self.scale(500),
+                top: self.scale(430),
+                right: self.scale(722),
+                bottom: self.scale(478),
+            };
+            let accent = if notice.success {
+                COLOR_TEAL
+            } else {
+                COLOR_DANGER
+            };
+            fill_round_rect(
+                dc,
+                toast,
+                if notice.success {
+                    COLOR_TEAL_PALE
+                } else {
+                    0x00f1_e4e4
+                },
+                self.scale(8),
+            );
+            let icon = RECT {
+                left: toast.left + self.scale(10),
+                top: toast.top + self.scale(10),
+                right: toast.left + self.scale(34),
+                bottom: toast.top + self.scale(34),
+            };
+            fill_ellipse(dc, icon, accent);
+            draw_label(
+                dc,
+                if notice.success { "\u{e73e}" } else { "!" },
+                icon,
+                self.icon_font,
+                COLOR_WHITE,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            draw_label(
+                dc,
+                &notice.text,
+                RECT {
+                    left: toast.left + self.scale(46),
+                    top: toast.top,
+                    right: toast.right - self.scale(10),
+                    bottom: toast.bottom,
+                },
+                self.body_font,
+                COLOR_TEXT,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+        }
         unsafe { EndPaint(self.hwnd, &paint) };
     }
 }
@@ -1124,6 +1192,12 @@ unsafe extern "system" fn window_proc(
         }
         WM_APP_STATE => {
             ui.update_from_state();
+            0
+        }
+        WM_TIMER if wparam == NOTICE_TIMER => {
+            unsafe { KillTimer(hwnd, NOTICE_TIMER) };
+            ui.save_notice = None;
+            unsafe { InvalidateRect(hwnd, null(), 1) };
             0
         }
         WM_APP_SHOW => {

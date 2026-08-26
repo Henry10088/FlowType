@@ -3,9 +3,10 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateFontW, CreatePen, CreateSolidBrush, DEFAULT_CHARSET, DT_CALCRECT, DT_SINGLELINE,
-    DeleteObject, DrawTextW, Ellipse, FillRect, GetStockObject, HDC, HFONT, HGDIOBJ, LineTo,
-    MoveToEx, PS_SOLID, RoundRect, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    CreateFontW, CreatePen, CreateRoundRectRgn, CreateSolidBrush, DEFAULT_CHARSET, DT_CALCRECT,
+    DT_SINGLELINE, DeleteObject, DrawTextW, Ellipse, FillRect, FillRgn, GetStockObject, HDC, HFONT,
+    HGDIOBJ, LineTo, MoveToEx, PS_SOLID, RoundRect, SelectObject, SetBkMode, SetTextColor,
+    TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -79,6 +80,25 @@ pub(super) fn outline_round_rect(dc: HDC, rect: RECT, color: u32, radius: i32) {
         SelectObject(dc, old_pen);
         SelectObject(dc, old_brush);
         DeleteObject(pen);
+    }
+}
+
+pub(super) fn fill_round_rect(dc: HDC, rect: RECT, color: u32, radius: i32) {
+    let brush = unsafe { CreateSolidBrush(color) };
+    let region = unsafe {
+        CreateRoundRectRgn(
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+            radius.max(1) * 2,
+            radius.max(1) * 2,
+        )
+    };
+    unsafe {
+        FillRgn(dc, region, brush);
+        DeleteObject(region);
+        DeleteObject(brush);
     }
 }
 
