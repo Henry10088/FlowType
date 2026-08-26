@@ -4,7 +4,7 @@ FlowType 把 Android 手机上的实时文本输入同步到 Windows 当前光�
 
 ## 当前版本
 
-当前版本为 `0.1.18`，仍属于 V1 内部发布阶段。V1 的数据路径是：
+当前版本为 `0.2.0`，仍属于 V1 内部发布阶段。V1 的数据路径是：
 
 ```text
 Android 系统输入法 -> 局域网 WSS -> Windows 当前输入位置
@@ -146,7 +146,7 @@ UI 层边界见 [客户端 UI 架构](docs/ui-architecture.md)。核心需求和
 - Windows 输入服务需要管理员权限；未安装或被安全软件阻止时，手机会显示输入服务不可用
 - 当前只支持一次发送一张图片；原图可能较大，受 Windows 接收端大小限制
 - 不自动发送 Enter，完成操作不会额外修改目标文本
-- 版本升级和发布签名流程仍是项目维护者操作，不建议直接使用未签名构建包作为正式发行版
+- GitHub Actions 自动构建、签名清单和 Release 上传已经实现；Windows 与 Android 客户端支持后台检查、可恢复下载、安装前复核和用户确认安装，详见 [在线更新设计](docs/update-design-v1.md)
 - 发布前运行 `scripts\verify-version.ps1`，确认 Android、Windows、安装包和文档版本一致
 
 ## 安全与隐私

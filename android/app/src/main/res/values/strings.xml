@@ -68,5 +68,13 @@
     <string name="computer_online">在线</string>
     <string name="computer_offline">未连接</string>
     <string name="recently_used">最近使用</string>
-    <string name="version_label">版本 0.1.18</string>
+    <string name="version_label">版本 0.2.0</string>
+    <string name="input_display">输入与显示</string>
+    <string name="version_and_updates">版本与更新</string>
+    <string name="check_updates">检查更新</string>
+    <string name="view_release_notes">查看说明</string>
+    <string name="update_finish_work_first">请先完成当前输入或图片传输</string>
+    <string name="update_install_permission_title">允许安装说写更新</string>
+    <string name="update_install_permission_message">Android 需要允许说写安装由项目发布并已验证签名的更新包。此权限只用于你主动安装更新。</string>
+    <string name="update_privacy_summary">检查更新时会连接 GitHub，并向 GitHub 暴露常规网络信息（如 IP 地址）。不会上传输入内容、历史记录或绑定信息。</string>
 </resources>

@@ -46,6 +46,7 @@ class MainActivity : ComponentActivity() {
     private var suppressTextChange = false
     private var scanLaunched = false
     private var waitingForOverlayPermission = false
+    private var waitingForUpdatePermission = false
     private var imeWasVisible = false
     private var ignoreImeDismissUntil = 0L
     private lateinit var input: EditText
@@ -104,6 +105,9 @@ class MainActivity : ComponentActivity() {
                     FloatingInputService.stop(this)
                 }
             },
+            onInstallUpdate = ::installUpdate,
+            onOpenRelease = ::openUpdateRelease,
+            isVisible = { page == Screen.SETTINGS },
         )
     }
     private val observer: (FlowTypeApplication.UiState) -> Unit = { state ->
@@ -151,6 +155,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         imageScreen.shutdown()
+        settingsScreen.shutdown()
         super.onDestroy()
     }
 
@@ -175,6 +180,39 @@ class MainActivity : ComponentActivity() {
             if (Settings.canDrawOverlays(this)) enableFloating() else controller.settings.floatingInput = false
             if (page == Screen.SETTINGS) showSettings()
         }
+        if (waitingForUpdatePermission) {
+            waitingForUpdatePermission = false
+            if (controller.updates.canRequestPackageInstalls()) installUpdate()
+            else if (page == Screen.SETTINGS) showSettings()
+        }
+    }
+
+    private fun installUpdate() {
+        if (controller.state().activeSession ||
+            controller.state().imageTransfer == FlowTypeApplication.ImageTransferState.SENDING
+        ) {
+            Toast.makeText(this, R.string.update_finish_work_first, Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (!controller.updates.canRequestPackageInstalls()) {
+            AlertDialog.Builder(this)
+                .setTitle(R.string.update_install_permission_title)
+                .setMessage(R.string.update_install_permission_message)
+                .setNegativeButton(R.string.cancel, null)
+                .setPositiveButton(R.string.open_settings) { _, _ ->
+                    waitingForUpdatePermission = true
+                    startActivity(controller.updates.unknownSourcesIntent())
+                }
+                .show()
+            return
+        }
+        controller.updates.prepareInstall()
+            .onSuccess(::startActivity)
+            .onFailure { Toast.makeText(this, it.message, Toast.LENGTH_LONG).show() }
+    }
+
+    private fun openUpdateRelease() {
+        controller.updates.releaseUrl()?.let { startActivity(Intent(Intent.ACTION_VIEW, it)) }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

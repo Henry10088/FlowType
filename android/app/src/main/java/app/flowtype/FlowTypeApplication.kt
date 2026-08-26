@@ -23,6 +23,7 @@ import app.flowtype.protocol.SnapshotType
 import app.flowtype.security.PhoneIdentity
 import app.flowtype.security.SecureDraftStore
 import app.flowtype.session.InputSession
+import app.flowtype.update.UpdateManager
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArraySet
 
@@ -52,6 +53,8 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
     lateinit var history: HistoryStore
         private set
     lateinit var settings: SettingsStore
+        private set
+    lateinit var updates: UpdateManager
         private set
 
     private lateinit var drafts: SecureDraftStore
@@ -87,6 +90,9 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         settings = SettingsStore(database)
         drafts = SecureDraftStore(this)
         session = InputSession(bindings.phoneId) { UUID.randomUUID().toString() }
+        updates = UpdateManager(this) {
+            session.sessionId != null || imageTransfer == ImageTransferState.SENDING
+        }
         syncClient = SyncClient(bindings.phoneId, PhoneIdentity(), this)
         targetProbeClient = app.flowtype.network.TargetProbeClient(bindings.phoneId, PhoneIdentity())
         discovery = ComputerDiscovery(this, bindings, ::onComputerDiscovered)
