@@ -30,6 +30,8 @@ const BALL_SIZE: i32 = 48;
 const SHADOW_MARGIN: i32 = 7;
 const BALL_MARGIN: i32 = 24;
 const BALL_BORDER: (u8, u8, u8) = (255, 255, 255);
+const MENU_OPEN: usize = 1;
+const MENU_HIDE: usize = 2;
 
 #[derive(Clone, Copy)]
 struct Paint {
@@ -222,6 +224,37 @@ fn create_tooltip(context: &mut BallContext) {
             0,
             (&mut tool as *mut TTTOOLINFOW) as LPARAM,
         );
+    }
+}
+
+fn show_context_menu(context: &BallContext) {
+    let menu = unsafe { CreatePopupMenu() };
+    if menu.is_null() {
+        return;
+    }
+    let open = wide("打开主窗口");
+    let hide = wide("关闭悬浮球");
+    let mut cursor = POINT { x: 0, y: 0 };
+    unsafe {
+        AppendMenuW(menu, MF_STRING, MENU_OPEN, open.as_ptr());
+        AppendMenuW(menu, MF_STRING, MENU_HIDE, hide.as_ptr());
+        GetCursorPos(&mut cursor);
+        let command = TrackPopupMenu(
+            menu,
+            TPM_RIGHTBUTTON | TPM_RETURNCMD,
+            cursor.x,
+            cursor.y,
+            0,
+            context.main_hwnd,
+            null(),
+        );
+        DestroyMenu(menu);
+        match command as usize {
+            MENU_OPEN => PostMessageW(context.main_hwnd, super::WM_APP_SHOW, 0, 0),
+            MENU_HIDE => PostMessageW(context.main_hwnd, super::WM_APP_FLOATING_HIDE, 0, 0),
+            _ => 0,
+        };
+        PostMessageW(context.main_hwnd, WM_NULL, 0, 0);
     }
 }
 
@@ -569,6 +602,10 @@ unsafe extern "system" fn window_proc(
             }
         }
         WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
+        WM_RBUTTONUP => {
+            show_context_menu(context);
+            0
+        }
         WM_LBUTTONDOWN => {
             let mut cursor = POINT { x: 0, y: 0 };
             unsafe { GetCursorPos(&mut cursor) };

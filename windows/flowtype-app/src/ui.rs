@@ -44,6 +44,7 @@ use ui_theme::*;
 const CLASS_NAME: &str = "FlowTypeMainWindow";
 const WM_APP_TRAY: u32 = 0x8002;
 const WM_APP_SHOW: u32 = 0x8003;
+const WM_APP_FLOATING_HIDE: u32 = 0x8004;
 const TRAY_ID: u32 = 1;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -75,11 +76,13 @@ struct UiContext {
     qr: Option<(usize, Vec<bool>)>,
     name_edit: HWND,
     auto_start: HWND,
+    show_floating: HWND,
     title_font: HFONT,
     heading_font: HFONT,
     body_font: HFONT,
     icon_font: HFONT,
     auto_start_checked: bool,
+    floating_enabled_checked: bool,
     ball_hwnd: HWND,
 }
 
@@ -97,11 +100,13 @@ impl UiContext {
             qr: None,
             name_edit: null_mut(),
             auto_start: null_mut(),
+            show_floating: null_mut(),
             title_font: null_mut(),
             heading_font: null_mut(),
             body_font: null_mut(),
             icon_font: null_mut(),
             auto_start_checked: false,
+            floating_enabled_checked: settings::floating_enabled(),
             ball_hwnd: null_mut(),
         }
     }
@@ -139,6 +144,7 @@ impl UiContext {
         self.qr = None;
         self.name_edit = null_mut();
         self.auto_start = null_mut();
+        self.show_floating = null_mut();
         create_navigation(self);
         match self.page {
             Page::Status => self.build_status(),
@@ -263,6 +269,16 @@ impl UiContext {
             34,
             ButtonKind::Checkbox,
         );
+        self.floating_enabled_checked = settings::floating_enabled();
+        self.show_floating = self.owner_button(
+            "显示悬浮球",
+            ID_SHOW_FLOATING,
+            220,
+            214,
+            220,
+            34,
+            ButtonKind::Checkbox,
+        );
         self.owner_button(
             "保存",
             ID_SAVE_SETTINGS,
@@ -273,17 +289,17 @@ impl UiContext {
             ButtonKind::Secondary,
         );
 
-        self.text("输入服务", 220, 250, 120, 26, self.heading_font);
+        self.text("输入服务", 220, 290, 120, 26, self.heading_font);
         let service = if snapshot.injector_ready {
             "正常运行"
         } else {
             "输入服务不可用"
         };
-        self.text(service, 246, 292, 100, 28, self.body_font);
+        self.text(service, 246, 332, 100, 28, self.body_font);
         self.muted_text(
             "可向普通和管理员窗口输入文字",
             350,
-            292,
+            332,
             250,
             28,
             self.body_font,
@@ -292,15 +308,15 @@ impl UiContext {
             "修复输入服务",
             ID_REPAIR,
             610,
-            282,
+            322,
             112,
             38,
             ButtonKind::Secondary,
         );
-        self.text("关于", 220, 368, 120, 26, self.heading_font);
-        self.text("版本", 220, 410, 80, 26, self.body_font);
-        self.text(env!("CARGO_PKG_VERSION"), 320, 410, 120, 26, self.body_font);
-        self.muted_text("Windows x64", 320, 440, 180, 26, self.body_font);
+        self.text("关于", 220, 408, 120, 26, self.heading_font);
+        self.text("版本", 220, 450, 80, 26, self.body_font);
+        self.text(env!("CARGO_PKG_VERSION"), 320, 450, 120, 26, self.body_font);
+        self.muted_text("Windows x64", 320, 480, 180, 26, self.body_font);
     }
 
     fn build_pairing(&mut self) {
@@ -468,7 +484,13 @@ impl UiContext {
         let result = self
             .state
             .rename_computer(&name)
-            .and_then(|_| settings::set_auto_start(self.auto_start_checked).map_err(Into::into));
+            .and_then(|_| settings::set_auto_start(self.auto_start_checked).map_err(Into::into))
+            .and_then(|_| {
+                settings::set_floating_enabled(self.floating_enabled_checked).map_err(Into::into)
+            });
+        if result.is_ok() {
+            self.apply_floating_visibility();
+        }
         let (text, flags) = if result.is_ok() {
             ("设置已保存", MB_OK | MB_ICONINFORMATION)
         } else {
@@ -476,6 +498,17 @@ impl UiContext {
         };
         message_box(self.hwnd, text, "说写", flags);
         self.rebuild_page();
+    }
+
+    fn apply_floating_visibility(&mut self) {
+        if self.floating_enabled_checked {
+            if self.ball_hwnd.is_null() {
+                self.ball_hwnd = ui_floating::create(self.state.clone(), self.hwnd);
+            }
+        } else if !self.ball_hwnd.is_null() {
+            unsafe { DestroyWindow(self.ball_hwnd) };
+            self.ball_hwnd = null_mut();
+        }
     }
 
     fn repair_injector(&mut self) {
@@ -710,6 +743,11 @@ impl UiContext {
                 );
             }
             ButtonKind::Checkbox => {
+                let checked = if item.CtlID as usize == ID_SHOW_FLOATING {
+                    self.floating_enabled_checked
+                } else {
+                    self.auto_start_checked
+                };
                 fill(item.hDC, &rect, COLOR_WHITE);
                 let box_size = self.scale(18);
                 let top = (rect.top + rect.bottom - box_size) / 2;
@@ -722,23 +760,15 @@ impl UiContext {
                 fill(
                     item.hDC,
                     &box_rect,
-                    if self.auto_start_checked {
-                        COLOR_TEAL
-                    } else {
-                        COLOR_WHITE
-                    },
+                    if checked { COLOR_TEAL } else { COLOR_WHITE },
                 );
                 outline_round_rect(
                     item.hDC,
                     box_rect,
-                    if self.auto_start_checked {
-                        COLOR_TEAL
-                    } else {
-                        COLOR_LINE
-                    },
+                    if checked { COLOR_TEAL } else { COLOR_LINE },
                     self.scale(2),
                 );
-                if self.auto_start_checked {
+                if checked {
                     draw_label(
                         item.hDC,
                         "\u{e73e}",
@@ -880,24 +910,24 @@ impl UiContext {
                 draw_line(
                     dc,
                     self.scale(204),
-                    self.scale(222),
+                    self.scale(262),
                     self.scale(722),
-                    self.scale(222),
+                    self.scale(262),
                     COLOR_LINE,
                 );
                 draw_line(
                     dc,
                     self.scale(204),
-                    self.scale(342),
+                    self.scale(382),
                     self.scale(722),
-                    self.scale(342),
+                    self.scale(382),
                     COLOR_LINE,
                 );
                 let dot = RECT {
                     left: self.scale(220),
-                    top: self.scale(299),
+                    top: self.scale(339),
                     right: self.scale(232),
-                    bottom: self.scale(311),
+                    bottom: self.scale(351),
                 };
                 fill_ellipse(
                     dc,
@@ -1056,7 +1086,9 @@ unsafe extern "system" fn window_proc(
             ui.rebuild_fonts();
             ui.rebuild_page();
             ui.add_tray();
-            ui.ball_hwnd = ui_floating::create(ui.state.clone(), hwnd);
+            if ui.floating_enabled_checked {
+                ui.ball_hwnd = ui_floating::create(ui.state.clone(), hwnd);
+            }
             0
         }
         WM_COMMAND => {
@@ -1077,6 +1109,10 @@ unsafe extern "system" fn window_proc(
                     ui.auto_start_checked = !ui.auto_start_checked;
                     unsafe { InvalidateRect(ui.auto_start, null(), 1) };
                 }
+                Some(UiCommand::ToggleFloating) => {
+                    ui.floating_enabled_checked = !ui.floating_enabled_checked;
+                    unsafe { InvalidateRect(ui.show_floating, null(), 1) };
+                }
                 Some(UiCommand::RepairInjector) => ui.repair_injector(),
                 Some(UiCommand::Exit) => {
                     unsafe { DestroyWindow(hwnd) };
@@ -1093,6 +1129,15 @@ unsafe extern "system" fn window_proc(
         WM_APP_SHOW => {
             ui.set_page(Page::Status);
             show_window(hwnd);
+            0
+        }
+        WM_APP_FLOATING_HIDE => {
+            ui.floating_enabled_checked = false;
+            let _ = settings::set_floating_enabled(false);
+            ui.apply_floating_visibility();
+            if ui.page == Page::Settings {
+                ui.rebuild_page();
+            }
             0
         }
         WM_APP_TRAY => {
