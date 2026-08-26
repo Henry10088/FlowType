@@ -1,0 +1,262 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to create or publish"
+        required: true
+        default: "v0.1.18-test.1"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: flowtype-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  android:
+    name: Android signed APK
+    runs-on: ubuntu-latest
+    environment: release
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android API 36
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "platform-tools"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Decode Android keystore
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.FLOWTYPE_ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/flowtype-release.jks"
+          test -s "$RUNNER_TEMP/flowtype-release.jks"
+
+      - name: Build signed Android APK
+        shell: bash
+        env:
+          FLOWTYPE_ANDROID_KEYSTORE: ${{ runner.temp }}/flowtype-release.jks
+          FLOWTYPE_ANDROID_STORE_PASSWORD: ${{ secrets.FLOWTYPE_ANDROID_STORE_PASSWORD }}
+          FLOWTYPE_ANDROID_KEY_ALIAS: ${{ secrets.FLOWTYPE_ANDROID_KEY_ALIAS }}
+          FLOWTYPE_ANDROID_KEY_PASSWORD: ${{ secrets.FLOWTYPE_ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$FLOWTYPE_ANDROID_STORE_PASSWORD"
+          test -n "$FLOWTYPE_ANDROID_KEY_ALIAS"
+          test -n "$FLOWTYPE_ANDROID_KEY_PASSWORD"
+          chmod +x ./gradlew
+          ./gradlew packageFlowTypeRelease
+
+      - name: Verify Android signature and checksum
+        shell: bash
+        run: |
+          apk="$(find build/outputs/apk/release -maxdepth 1 -type f -name 'FlowType-*-android-release.apk' -print -quit)"
+          test -n "$apk"
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -n "$apksigner"
+          "$apksigner" verify --verbose --print-certs "$apk"
+          mkdir -p release-metadata
+          sha256sum "$apk" | tee release-metadata/SHA256SUMS.txt
+
+      - name: Upload Android release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release
+          if-no-files-found: error
+          path: |
+            android/app/build/outputs/apk/release/FlowType-*-android-release.apk
+            android/release-metadata/SHA256SUMS.txt
+
+  windows:
+    name: Windows signed binaries and installer
+    runs-on: windows-latest
+    environment: release
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+
+      - name: Verify release versions
+        shell: pwsh
+        run: pwsh -File scripts\verify-version.ps1
+
+      - name: Build Windows release
+        shell: pwsh
+        working-directory: windows
+        run: cargo build --workspace --release
+
+      - name: Decode certificate and sign Windows binaries
+        shell: pwsh
+        env:
+          FLOWTYPE_WINDOWS_CERT_BASE64: ${{ secrets.FLOWTYPE_WINDOWS_CERT_BASE64 }}
+          FLOWTYPE_WINDOWS_CERT_PASSWORD: ${{ secrets.FLOWTYPE_WINDOWS_CERT_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:FLOWTYPE_WINDOWS_CERT_BASE64)) { throw "Missing Windows certificate secret" }
+          if ([string]::IsNullOrWhiteSpace($env:FLOWTYPE_WINDOWS_CERT_PASSWORD)) { throw "Missing Windows certificate password secret" }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP "flowtype-authenticode.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:FLOWTYPE_WINDOWS_CERT_BASE64))
+
+          $signTool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
+            Sort-Object FullName |
+            Select-Object -Last 1
+          if (-not $signTool) { throw "signtool.exe was not found" }
+
+          $buildDir = Join-Path $env:GITHUB_WORKSPACE "windows\target\release"
+          $targets = @(
+            (Join-Path $buildDir "flowtype.exe"),
+            (Join-Path $buildDir "flowtype-injector.exe"),
+            (Join-Path $buildDir "flowtype_tip.dll")
+          )
+          foreach ($target in $targets) {
+            if (-not (Test-Path -LiteralPath $target)) { throw "Missing Windows release file: $target" }
+          }
+
+          $signArgs = @("sign", "/fd", "SHA256", "/f", $pfxPath, "/p", $env:FLOWTYPE_WINDOWS_CERT_PASSWORD, "/tr", "http://timestamp.digicert.com", "/td", "SHA256") + $targets
+          & $signTool.FullName @signArgs
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed while signing Windows binaries" }
+
+      - name: Build Inno Setup installer
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path -LiteralPath $iscc)) { throw "ISCC.exe was not found" }
+          $buildDir = Join-Path $env:GITHUB_WORKSPACE "windows\target\release"
+          $outputDir = Join-Path $env:GITHUB_WORKSPACE "installer\output"
+          New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+          & $iscc "/DBuildDir=$buildDir" "/O$outputDir" (Join-Path $env:GITHUB_WORKSPACE "installer\flowtype.iss")
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+
+      - name: Sign installer and verify signatures
+        shell: pwsh
+        env:
+          FLOWTYPE_WINDOWS_CERT_BASE64: ${{ secrets.FLOWTYPE_WINDOWS_CERT_BASE64 }}
+          FLOWTYPE_WINDOWS_CERT_PASSWORD: ${{ secrets.FLOWTYPE_WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "flowtype-authenticode.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:FLOWTYPE_WINDOWS_CERT_BASE64))
+          $signTool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
+            Sort-Object FullName |
+            Select-Object -Last 1
+          $installer = Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "installer\output") -Filter "FlowType-*-x64-setup.exe" -File |
+            Sort-Object LastWriteTime |
+            Select-Object -Last 1
+          if (-not $installer) { throw "Inno Setup did not produce a FlowType installer" }
+
+          $signArgs = @("sign", "/fd", "SHA256", "/f", $pfxPath, "/p", $env:FLOWTYPE_WINDOWS_CERT_PASSWORD, "/tr", "http://timestamp.digicert.com", "/td", "SHA256", $installer.FullName)
+          & $signTool.FullName @signArgs
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed while signing the installer" }
+
+          $signedFiles = @(
+            (Join-Path $env:GITHUB_WORKSPACE "windows\target\release\flowtype.exe"),
+            (Join-Path $env:GITHUB_WORKSPACE "windows\target\release\flowtype-injector.exe"),
+            (Join-Path $env:GITHUB_WORKSPACE "windows\target\release\flowtype_tip.dll"),
+            $installer.FullName
+          )
+          $metadataDir = Join-Path $env:GITHUB_WORKSPACE "windows\release-metadata"
+          New-Item -ItemType Directory -Force -Path $metadataDir | Out-Null
+          $signatureLines = foreach ($file in $signedFiles) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file
+            if (-not $signature.SignerCertificate) { throw "No Authenticode signature found: $file" }
+            "$file`t$($signature.Status)`t$($signature.SignerCertificate.Subject)"
+          }
+          $signatureLines | Set-Content -LiteralPath (Join-Path $metadataDir "AUTHENTICODE.txt") -Encoding UTF8
+          $hashLines = foreach ($file in $signedFiles) {
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+            "$hash  $file"
+          }
+          $hashLines | Set-Content -LiteralPath (Join-Path $metadataDir "SHA256SUMS.txt") -Encoding ASCII
+
+      - name: Upload Windows release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          if-no-files-found: error
+          path: |
+            windows/target/release/flowtype.exe
+            windows/target/release/flowtype-injector.exe
+            windows/target/release/flowtype_tip.dll
+            installer/output/FlowType-*-x64-setup.exe
+            windows/release-metadata/AUTHENTICODE.txt
+            windows/release-metadata/SHA256SUMS.txt
+
+  publish:
+    name: Create GitHub Release
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Determine release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.release_tag }}"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          if [[ -z "$tag" ]]; then
+            echo "Release tag is empty" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [[ "$tag" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release and upload assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          PRERELEASE: ${{ steps.release.outputs.prerelease }}
+        run: |
+          mapfile -t assets < <(find dist -type f \( -name '*.apk' -o -name '*-x64-setup.exe' -o -name 'SHA256SUMS.txt' -o -name 'AUTHENTICODE.txt' \) -print)
+          if [[ "${#assets[@]}" -eq 0 ]]; then
+            echo "No release assets were downloaded" >&2
+            exit 1
+          fi
+          args=(release create "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --title "FlowType $RELEASE_TAG" --notes "Built by GitHub Actions. The update manifest will be added after update-signing-key setup.")
+          if [[ "$PRERELEASE" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+          gh "${args[@]}"
