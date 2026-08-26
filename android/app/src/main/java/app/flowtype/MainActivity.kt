@@ -314,7 +314,7 @@ class MainActivity : ComponentActivity() {
                     text = "  •"
                     setTextColor(getColor(R.color.status_activity))
                     textSize = 16f
-                    contentDescription = "最近鼠标活动"
+                    contentDescription = getString(R.string.recently_used)
                 })
             }
             chooser.addView(chip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40)).apply {

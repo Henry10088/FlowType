@@ -184,14 +184,14 @@ impl UiContext {
                 .unwrap_or("尚未连接"),
             105,
         );
-        self.text("等待手机开始输入", 220, 151, 470, 28, self.body_font);
+        self.label_value("输入状态", "等待手机输入", 151);
         self.label_value(
-            "当前目标",
+            "输入位置",
             snapshot
                 .status
                 .target_name
                 .as_deref()
-                .unwrap_or("尚未开始输入"),
+                .unwrap_or("尚未选择"),
             205,
         );
         self.label_value("连接地址", &format!("{}:{PORT}", self.host), 259);
@@ -199,7 +199,7 @@ impl UiContext {
             self.muted_text(error, 220, 302, 470, 42, self.body_font);
         }
         self.owner_button(
-            "绑定新手机",
+            "绑定手机",
             ID_PAIR,
             220,
             348,
@@ -213,7 +213,7 @@ impl UiContext {
         let snapshot = self.state.snapshot();
         self.title("已绑定手机");
         self.owner_button(
-            "绑定新手机",
+            "绑定手机",
             ID_PAIR,
             590,
             28,
@@ -269,7 +269,7 @@ impl UiContext {
         );
         self.auto_start_checked = settings::auto_start_enabled();
         self.auto_start = self.owner_button(
-            "登录 Windows 后自动启动说写",
+            "开机启动",
             ID_AUTO_START,
             220,
             174,
@@ -304,14 +304,6 @@ impl UiContext {
             "输入服务不可用"
         };
         self.text(service, 246, 332, 100, 28, self.body_font);
-        self.muted_text(
-            "可向普通和管理员窗口输入文字",
-            350,
-            332,
-            250,
-            28,
-            self.body_font,
-        );
         self.owner_button(
             "修复输入服务",
             ID_REPAIR,
@@ -329,7 +321,7 @@ impl UiContext {
 
     fn build_pairing(&mut self) {
         self.owner_button("", ID_NAV_PHONES, 202, 32, 34, 34, ButtonKind::Back);
-        self.text("绑定新手机", 246, 34, 300, 34, self.heading_font);
+        self.text("绑定手机", 246, 34, 300, 34, self.heading_font);
         self.text("在手机上打开说写，", 470, 145, 250, 30, self.heading_font);
         self.text("扫描此二维码", 470, 178, 220, 30, self.heading_font);
         let pc_name = self.state.snapshot().pc_name;
@@ -617,7 +609,7 @@ impl UiContext {
             AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, status.as_ptr());
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
             append_menu(menu, ID_TRAY_OPEN, "打开说写");
-            append_menu(menu, ID_TRAY_PAIR, "绑定新手机...");
+            append_menu(menu, ID_TRAY_PAIR, "绑定手机...");
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
             append_menu(menu, ID_TRAY_EXIT, "退出说写");
             let mut point: POINT = zeroed();

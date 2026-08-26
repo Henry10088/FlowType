@@ -1259,7 +1259,7 @@ where
             state.update_status(|status| {
                 status.summary = "原输入窗口已关闭".to_owned();
                 status.target_name = None;
-                status.last_error = Some("请在手机上从新光标同步全文".to_owned());
+                status.last_error = Some("请在电脑上重新放置光标，再从手机同步全文".to_owned());
             });
             (TargetState::Invalid, None)
         }
@@ -1282,7 +1282,7 @@ where
             state.update_status(|status| {
                 status.summary = "当前应用不支持实时输入".to_owned();
                 status.target_name = None;
-                status.last_error = Some("请把光标移到支持 Windows 文本服务的输入框".to_owned());
+                status.last_error = Some("请将光标移到其他输入框后重试".to_owned());
             });
             return send_json(
                 websocket,

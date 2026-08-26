@@ -51,9 +51,9 @@ class ComputersScreen(
             })
             row.addView(TextView(activity).apply {
                 text = when {
-                    selected && state.connected -> "在线 · 已选择"
-                    binding.pcId in state.onlinePcIds -> "在线"
-                    else -> "未连接"
+                    selected && state.connected -> activity.getString(R.string.computer_online_selected)
+                    binding.pcId in state.onlinePcIds -> activity.getString(R.string.computer_online)
+                    else -> activity.getString(R.string.computer_offline)
                 }
                 setTextColor(activity.getColor(if ((selected && state.connected) || binding.pcId in state.onlinePcIds) R.color.accent else R.color.status_warning))
                 textSize = 13f
