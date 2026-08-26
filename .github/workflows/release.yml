@@ -144,6 +144,12 @@ jobs:
             if (-not (Test-Path -LiteralPath $target)) { throw "Missing Windows release file: $target" }
           }
 
+          # Calculate the TIP identity before Authenticode adds a timestamp.
+          # Otherwise an unchanged TIP would get a new filename on every build.
+          $tipHash = (Get-FileHash -LiteralPath (Join-Path $buildDir "flowtype_tip.dll") -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($tipHash -notmatch '^[0-9a-f]{64}$') { throw "Invalid TIP DLL SHA-256 hash: $tipHash" }
+          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP "flowtype-tip-hash.txt") -Value $tipHash -NoNewline -Encoding ASCII
+
           $signArgs = @("sign", "/fd", "SHA256", "/f", $pfxPath, "/p", $env:FLOWTYPE_WINDOWS_CERT_PASSWORD, "/tr", "http://timestamp.digicert.com", "/td", "SHA256") + $targets
           & $signTool.FullName @signArgs
           if ($LASTEXITCODE -ne 0) { throw "signtool failed while signing Windows binaries" }
@@ -156,8 +162,9 @@ jobs:
           if (-not (Test-Path -LiteralPath $iscc)) { throw "ISCC.exe was not found" }
           $buildDir = Join-Path $env:GITHUB_WORKSPACE "windows\target\release"
           $outputDir = Join-Path $env:GITHUB_WORKSPACE "installer\output"
-          $tipDll = Join-Path $buildDir "flowtype_tip.dll"
-          $tipHash = (Get-FileHash -LiteralPath $tipDll -Algorithm SHA256).Hash.ToLowerInvariant()
+          $tipHashPath = Join-Path $env:RUNNER_TEMP "flowtype-tip-hash.txt"
+          if (-not (Test-Path -LiteralPath $tipHashPath)) { throw "TIP DLL hash file was not created before signing" }
+          $tipHash = (Get-Content -LiteralPath $tipHashPath -Raw).Trim().ToLowerInvariant()
           if ($tipHash -notmatch '^[0-9a-f]{64}$') { throw "Invalid TIP DLL SHA-256 hash: $tipHash" }
           New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
           & $iscc "/DBuildDir=$buildDir" "/DTipDllHash=$tipHash" "/O$outputDir" (Join-Path $env:GITHUB_WORKSPACE "installer\flowtype.iss")
