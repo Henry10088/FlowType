@@ -34,6 +34,8 @@ use windows_sys::Win32::Security::WinTrust::*;
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, SW_SHOWNORMAL};
 
+use crate::i18n::tr;
+
 const MANIFEST_URL: &str =
     "https://github.com/Henry10088/FlowType/releases/latest/download/flowtype-update.json";
 const RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/Henry10088/FlowType/releases/download/";
@@ -70,9 +72,9 @@ pub struct UpdateSnapshot {
 impl UpdateSnapshot {
     fn idle() -> Self {
         Self {
-            message: "可检查更新".to_owned(),
+            message: tr("可检查更新", "Ready to check for updates").to_owned(),
             action: UpdateAction::Check,
-            action_label: "检查更新".to_owned(),
+            action_label: tr("检查更新", "Check for updates").to_owned(),
             progress: None,
             version: None,
         }
@@ -80,9 +82,12 @@ impl UpdateSnapshot {
 
     pub fn tray_label(&self) -> Option<String> {
         match self.action {
-            UpdateAction::Download => self.version.as_ref().map(|v| format!("更新到 {v}...")),
+            UpdateAction::Download => self
+                .version
+                .as_ref()
+                .map(|v| format!("{}{v}...", tr("更新到 ", "Update to "))),
             UpdateAction::Cancel => Some(self.message.clone()),
-            UpdateAction::Install => Some("更新已下载...".to_owned()),
+            UpdateAction::Install => Some(tr("更新已下载...", "Update downloaded...").to_owned()),
             _ => None,
         }
     }
@@ -172,9 +177,9 @@ impl UpdateManager {
             .lock()
             .map(|state| state.snapshot.clone())
             .unwrap_or_else(|_| UpdateSnapshot {
-                message: "更新状态不可用".to_owned(),
+                message: tr("更新状态不可用", "Update status unavailable").to_owned(),
                 action: UpdateAction::Check,
-                action_label: "重试检查更新".to_owned(),
+                action_label: tr("重试检查更新", "Check again").to_owned(),
                 progress: None,
                 version: None,
             })
@@ -201,27 +206,25 @@ impl UpdateManager {
     }
 
     pub fn install(&self) -> Result<(), String> {
-        let (manifest, path) = self
-            .shared
-            .lock()
-            .map_err(|_| "更新状态不可用".to_owned())
-            .and_then(|state| {
-                Ok((
-                    state
-                        .manifest
-                        .clone()
-                        .ok_or_else(|| "更新清单不可用".to_owned())?,
-                    state
-                        .installer_path
-                        .clone()
-                        .ok_or_else(|| "安装包不可用".to_owned())?,
-                ))
-            })?;
+        let (manifest, path) =
+            self.shared
+                .lock()
+                .map_err(|_| tr("更新状态不可用", "Update status unavailable").to_owned())
+                .and_then(|state| {
+                    Ok((
+                        state.manifest.clone().ok_or_else(|| {
+                            tr("更新清单不可用", "Update information unavailable").to_owned()
+                        })?,
+                        state.installer_path.clone().ok_or_else(|| {
+                            tr("安装包不可用", "Installer unavailable").to_owned()
+                        })?,
+                    ))
+                })?;
         set_snapshot(
             &self.shared,
             &self.ui_hwnd,
             UpdateSnapshot {
-                message: "正在重新校验更新…".to_owned(),
+                message: tr("正在重新校验更新…", "Verifying update again...").to_owned(),
                 action: UpdateAction::None,
                 action_label: String::new(),
                 progress: None,
@@ -235,7 +238,10 @@ impl UpdateManager {
                 &self.shared,
                 &self.ui_hwnd,
                 &manifest,
-                &format!("更新校验失败：{error}"),
+                &format!(
+                    "{}{error}",
+                    tr("更新校验失败：", "Update verification failed: ")
+                ),
             );
             error
         })?;
@@ -244,7 +250,10 @@ impl UpdateManager {
                 &self.shared,
                 &self.ui_hwnd,
                 &manifest,
-                &format!("无法启动安装程序：{error}"),
+                &format!(
+                    "{}{error}",
+                    tr("无法启动安装程序：", "Could not start the installer: ")
+                ),
             );
             error.to_string()
         })
@@ -309,7 +318,10 @@ fn update_worker(
                             &shared,
                             &ui_hwnd,
                             &manifest,
-                            &format!("无法开始下载：{error}"),
+                            &format!(
+                                "{}{error}",
+                                tr("无法开始下载：", "Could not start the download: ")
+                            ),
                         ),
                     }
                 }
@@ -366,7 +378,7 @@ fn check_for_update(
         shared,
         hwnd,
         UpdateSnapshot {
-            message: "正在检查更新…".to_owned(),
+            message: tr("正在检查更新…", "Checking for updates...").to_owned(),
             action: UpdateAction::None,
             action_label: String::new(),
             progress: None,
@@ -381,7 +393,15 @@ fn check_for_update(
             if let Some(highest) = persisted.highest_verified_version.as_deref()
                 && compare_versions(&manifest.version, highest).is_some_and(|order| order.is_lt())
             {
-                set_failure(shared, hwnd, &manifest, "服务器返回了旧版更新清单");
+                set_failure(
+                    shared,
+                    hwnd,
+                    &manifest,
+                    tr(
+                        "服务器返回了旧版更新清单",
+                        "The server returned an older update",
+                    ),
+                );
                 return;
             }
             if persisted
@@ -416,9 +436,9 @@ fn check_for_update(
                         shared,
                         hwnd,
                         UpdateSnapshot {
-                            message: "已是最新版本".to_owned(),
+                            message: tr("已是最新版本", "FlowType is up to date").to_owned(),
                             action: UpdateAction::Check,
-                            action_label: "再次检查".to_owned(),
+                            action_label: tr("再次检查", "Check again").to_owned(),
                             progress: None,
                             version: None,
                         },
@@ -426,7 +446,12 @@ fn check_for_update(
                         None,
                     );
                 }
-                None => set_failure(shared, hwnd, &manifest, "更新版本格式无效"),
+                None => set_failure(
+                    shared,
+                    hwnd,
+                    &manifest,
+                    tr("更新版本格式无效", "Invalid update version"),
+                ),
             }
         }
         Err(error) => {
@@ -435,7 +460,11 @@ fn check_for_update(
                 shared,
                 hwnd,
                 &placeholder,
-                &format!("检查更新失败：{}", friendly_update_error(&error)),
+                &format!(
+                    "{}{}",
+                    tr("检查更新失败：", "Could not check for updates: "),
+                    friendly_update_error(&error)
+                ),
             );
         }
     }
@@ -471,8 +500,8 @@ fn fetch_verified_manifest() -> Result<UpdateManifest, String> {
     let manifest_url =
         std::env::var("FLOWTYPE_UPDATE_MANIFEST_URL").unwrap_or_else(|_| MANIFEST_URL.to_owned());
     let bytes = http_get(&manifest_url, MAX_MANIFEST_BYTES).map_err(|e| e.to_string())?;
-    let untrusted: UpdateManifest =
-        serde_json::from_slice(&bytes).map_err(|_| "更新清单格式无效".to_owned())?;
+    let untrusted: UpdateManifest = serde_json::from_slice(&bytes)
+        .map_err(|_| tr("更新清单格式无效", "Invalid update information").to_owned())?;
     let signature_url = if manifest_url == MANIFEST_URL {
         format!(
             "{RELEASE_DOWNLOAD_PREFIX}v{}/flowtype-update.json.sig",
@@ -482,7 +511,7 @@ fn fetch_verified_manifest() -> Result<UpdateManifest, String> {
         let base = manifest_url
             .rsplit_once('/')
             .map(|(base, _)| base)
-            .ok_or_else(|| "更新清单地址无效".to_owned())?;
+            .ok_or_else(|| tr("更新清单地址无效", "Invalid update URL").to_owned())?;
         format!("{base}/flowtype-update.json.sig")
     };
     let signature = http_get(&signature_url, MAX_SIGNATURE_BYTES).map_err(|e| e.to_string())?;
@@ -492,7 +521,7 @@ fn fetch_verified_manifest() -> Result<UpdateManifest, String> {
 fn verify_manifest(bytes: &[u8], signature_text: &[u8]) -> Result<UpdateManifest, String> {
     let public_der = STANDARD
         .decode(include_str!("../../../release/update-public-key-spki.b64").trim())
-        .map_err(|_| "内置更新公钥无效".to_owned())?;
+        .map_err(|_| tr("内置更新公钥无效", "Invalid built-in update key").to_owned())?;
     verify_manifest_with_key(bytes, signature_text, &public_der)
 }
 
@@ -502,19 +531,19 @@ fn verify_manifest_with_key(
     public_der: &[u8],
 ) -> Result<UpdateManifest, String> {
     if bytes.len() > MAX_MANIFEST_BYTES || signature_text.len() > MAX_SIGNATURE_BYTES {
-        return Err("更新清单过大".to_owned());
+        return Err(tr("更新清单过大", "Update information is too large").to_owned());
     }
-    let key =
-        VerifyingKey::from_public_key_der(public_der).map_err(|_| "更新公钥格式无效".to_owned())?;
+    let key = VerifyingKey::from_public_key_der(public_der)
+        .map_err(|_| tr("更新公钥格式无效", "Invalid update key").to_owned())?;
     let signature_bytes = STANDARD
         .decode(String::from_utf8_lossy(signature_text).trim())
-        .map_err(|_| "更新签名格式无效".to_owned())?;
-    let signature =
-        Signature::from_der(&signature_bytes).map_err(|_| "更新签名格式无效".to_owned())?;
+        .map_err(|_| tr("更新签名格式无效", "Invalid update signature").to_owned())?;
+    let signature = Signature::from_der(&signature_bytes)
+        .map_err(|_| tr("更新签名格式无效", "Invalid update signature").to_owned())?;
     key.verify(bytes, &signature)
-        .map_err(|_| "更新清单签名不匹配".to_owned())?;
-    let mut manifest: UpdateManifest =
-        serde_json::from_slice(bytes).map_err(|_| "更新清单格式无效".to_owned())?;
+        .map_err(|_| tr("更新清单签名不匹配", "Update signature mismatch").to_owned())?;
+    let mut manifest: UpdateManifest = serde_json::from_slice(bytes)
+        .map_err(|_| tr("更新清单格式无效", "Invalid update information").to_owned())?;
     validate_manifest(&manifest)?;
     manifest.verified_raw = bytes.to_vec();
     manifest.verified_signature = signature_text.to_vec();
@@ -523,18 +552,27 @@ fn verify_manifest_with_key(
 
 fn validate_manifest(manifest: &UpdateManifest) -> Result<(), String> {
     if manifest.schema != 1 || manifest.key_id != UPDATE_KEY_ID {
-        return Err("不支持的更新清单版本或密钥".to_owned());
+        return Err(tr(
+            "不支持的更新清单版本或密钥",
+            "Unsupported update information",
+        )
+        .to_owned());
     }
-    parse_version(&manifest.version).ok_or_else(|| "更新版本格式无效".to_owned())?;
+    parse_version(&manifest.version)
+        .ok_or_else(|| tr("更新版本格式无效", "Invalid update version").to_owned())?;
     if manifest.published_at.len() > 40
         || manifest.notes_zh_cn.len() > 8192
         || manifest.release_url.len() > 2048
     {
-        return Err("更新清单字段过长".to_owned());
+        return Err(tr(
+            "更新清单字段过长",
+            "Update information contains an oversized field",
+        )
+        .to_owned());
     }
     let tag = format!("v{}", manifest.version);
     if manifest.release_url != format!("{RELEASE_TAG_PREFIX}{tag}") {
-        return Err("更新发布地址无效".to_owned());
+        return Err(tr("更新发布地址无效", "Invalid release URL").to_owned());
     }
     let expected_prefix = format!("{RELEASE_DOWNLOAD_PREFIX}{tag}/");
     for asset in [
@@ -551,11 +589,11 @@ fn validate_manifest(manifest: &UpdateManifest) -> Result<(), String> {
             || asset.size > MAX_INSTALLER_BYTES
             || !valid_sha256(&asset.sha256)
         {
-            return Err("更新资产信息无效".to_owned());
+            return Err(tr("更新资产信息无效", "Invalid update package information").to_owned());
         }
     }
     if manifest.android.version_code == 0 {
-        return Err("Android versionCode 无效".to_owned());
+        return Err(tr("Android versionCode 无效", "Invalid Android versionCode").to_owned());
     }
     Ok(())
 }
@@ -582,7 +620,7 @@ fn start_download(
         .rsplit_once('/')
         .map(|(_, name)| name)
         .filter(|name| !name.is_empty() && !name.contains(['\\', '/']))
-        .ok_or_else(|| "安装包文件名无效".to_owned())?;
+        .ok_or_else(|| tr("安装包文件名无效", "Invalid installer filename").to_owned())?;
     let path = update_dir.join(file_name);
     let _ = fs::remove_file(&path);
     let mut id = GUID::zeroed();
@@ -597,7 +635,9 @@ fn start_download(
             )
             .map_err(|e| e.to_string())?;
     }
-    let job = job.ok_or_else(|| "BITS 未返回下载任务".to_owned())?;
+    let job = job.ok_or_else(|| {
+        tr("BITS 未返回下载任务", "BITS did not create a download job").to_owned()
+    })?;
     unsafe {
         job.SetPriority(BG_JOB_PRIORITY_NORMAL)
             .map_err(|e| e.to_string())?;
@@ -668,17 +708,25 @@ fn poll_download(
 ) -> PollResult {
     let state = match unsafe { download.job.GetState() } {
         Ok(state) => state,
-        Err(error) => return PollResult::Failed(format!("无法读取下载状态：{error}")),
+        Err(error) => {
+            return PollResult::Failed(format!(
+                "{}{error}",
+                tr("无法读取下载状态：", "Could not read download status: ")
+            ));
+        }
     };
     if state == BG_JOB_STATE_TRANSFERRED {
         if let Err(error) = unsafe { download.job.Complete() } {
-            return PollResult::Failed(format!("无法完成下载：{error}"));
+            return PollResult::Failed(format!(
+                "{}{error}",
+                tr("无法完成下载：", "Could not finish the download: ")
+            ));
         }
         set_snapshot(
             shared,
             hwnd,
             UpdateSnapshot {
-                message: "正在校验更新…".to_owned(),
+                message: tr("正在校验更新…", "Verifying update...").to_owned(),
                 action: UpdateAction::None,
                 action_label: String::new(),
                 progress: None,
@@ -689,7 +737,10 @@ fn poll_download(
         );
         if let Err(error) = verify_installer(&download.path, &download.manifest.windows) {
             let _ = fs::remove_file(&download.path);
-            return PollResult::Failed(format!("更新校验失败：{error}"));
+            return PollResult::Failed(format!(
+                "{}{error}",
+                tr("更新校验失败：", "Update verification failed: ")
+            ));
         }
         persisted.job_id = None;
         persisted.verified = true;
@@ -703,11 +754,16 @@ fn poll_download(
         return PollResult::Ready;
     }
     if state == BG_JOB_STATE_ERROR {
-        return PollResult::Failed("下载失败，请重试".to_owned());
+        return PollResult::Failed(
+            tr("下载失败，请重试", "Download failed. Try again.").to_owned(),
+        );
     }
     let mut progress: BG_JOB_PROGRESS = unsafe { zeroed() };
     if let Err(error) = unsafe { download.job.GetProgress(&mut progress) } {
-        return PollResult::Failed(format!("无法读取下载进度：{error}"));
+        return PollResult::Failed(format!(
+            "{}{error}",
+            tr("无法读取下载进度：", "Could not read download progress: ")
+        ));
     }
     let total = if progress.BytesTotal == u64::MAX {
         download.manifest.windows.size
@@ -715,14 +771,18 @@ fn poll_download(
         progress.BytesTotal
     };
     let message = if state == BG_JOB_STATE_TRANSIENT_ERROR || state == BG_JOB_STATE_SUSPENDED {
-        "等待网络，恢复后继续下载".to_owned()
+        tr(
+            "等待网络，恢复后继续下载",
+            "Waiting for a network connection",
+        )
+        .to_owned()
     } else if matches!(
         state,
         BG_JOB_STATE_QUEUED | BG_JOB_STATE_CONNECTING | BG_JOB_STATE_TRANSFERRING
     ) {
         format_progress(progress.BytesTransferred, total)
     } else {
-        "正在准备下载…".to_owned()
+        tr("正在准备下载…", "Preparing download...").to_owned()
     };
     set_snapshot(
         shared,
@@ -730,7 +790,7 @@ fn poll_download(
         UpdateSnapshot {
             message,
             action: UpdateAction::Cancel,
-            action_label: "取消".to_owned(),
+            action_label: tr("取消", "Cancel").to_owned(),
             progress: Some((progress.BytesTransferred, total)),
             version: Some(download.manifest.version.clone()),
         },
@@ -742,8 +802,12 @@ fn poll_download(
 
 fn bits_manager() -> Result<IBackgroundCopyManager, String> {
     unsafe {
-        CoCreateInstance(&BackgroundCopyManager, None, CLSCTX_LOCAL_SERVER)
-            .map_err(|error| format!("BITS 服务不可用：{error}"))
+        CoCreateInstance(&BackgroundCopyManager, None, CLSCTX_LOCAL_SERVER).map_err(|error| {
+            format!(
+                "{}{error}",
+                tr("BITS 服务不可用：", "BITS is unavailable: ")
+            )
+        })
     }
 }
 
@@ -771,9 +835,10 @@ fn set_available(
         shared,
         hwnd,
         UpdateSnapshot {
-            message: format!("发现新版本 {}", manifest.version),
+            message: format!("{}{}", tr("发现新版本 ", "Version "), manifest.version)
+                + tr("", " is available"),
             action: UpdateAction::Download,
-            action_label: "下载更新".to_owned(),
+            action_label: tr("下载更新", "Download update").to_owned(),
             progress: None,
             version: Some(manifest.version.clone()),
         },
@@ -792,9 +857,13 @@ fn set_ready(
         shared,
         hwnd,
         UpdateSnapshot {
-            message: format!("更新 {} 已下载", manifest.version),
+            message: if crate::i18n::is_chinese() {
+                format!("更新 {} 已下载", manifest.version)
+            } else {
+                format!("Update {} downloaded", manifest.version)
+            },
             action: UpdateAction::Install,
-            action_label: "安装更新".to_owned(),
+            action_label: tr("安装更新", "Install update").to_owned(),
             progress: Some((manifest.windows.size, manifest.windows.size)),
             version: Some(manifest.version.clone()),
         },
@@ -815,7 +884,7 @@ fn set_failure(
         UpdateSnapshot {
             message: message.to_owned(),
             action: UpdateAction::Check,
-            action_label: "重试检查更新".to_owned(),
+            action_label: tr("重试检查更新", "Check again").to_owned(),
             progress: None,
             version: None,
         },
@@ -836,7 +905,7 @@ fn set_download_failure(
         UpdateSnapshot {
             message: message.to_owned(),
             action: UpdateAction::Download,
-            action_label: "重试下载".to_owned(),
+            action_label: tr("重试下载", "Retry download").to_owned(),
             progress: None,
             version: Some(manifest.version.clone()),
         },
@@ -847,11 +916,23 @@ fn set_download_failure(
 
 fn friendly_update_error(error: &str) -> String {
     if error.contains("12002") {
-        "连接 GitHub 超时，请检查网络后重试".to_owned()
+        tr(
+            "连接 GitHub 超时，请检查网络后重试",
+            "GitHub timed out. Check your connection and try again.",
+        )
+        .to_owned()
     } else if error.contains("12007") {
-        "无法解析 GitHub 地址，请检查网络后重试".to_owned()
+        tr(
+            "无法解析 GitHub 地址，请检查网络后重试",
+            "Could not resolve GitHub. Check your connection and try again.",
+        )
+        .to_owned()
     } else if error.contains("12029") || error.contains("12030") {
-        "无法连接 GitHub，请检查网络后重试".to_owned()
+        tr(
+            "无法连接 GitHub，请检查网络后重试",
+            "Could not connect to GitHub. Check your connection and try again.",
+        )
+        .to_owned()
     } else {
         error.to_owned()
     }
@@ -883,7 +964,7 @@ fn downloading_snapshot(manifest: &UpdateManifest, transferred: u64, total: u64)
     UpdateSnapshot {
         message: format_progress(transferred, total),
         action: UpdateAction::Cancel,
-        action_label: "取消".to_owned(),
+        action_label: tr("取消", "Cancel").to_owned(),
         progress: Some((transferred, total)),
         version: Some(manifest.version.clone()),
     }
@@ -893,19 +974,24 @@ fn format_progress(transferred: u64, total: u64) -> String {
     if total > 0 {
         let percent = transferred.saturating_mul(100) / total;
         format!(
-            "正在下载 {percent}% · {:.1}/{:.1} MB",
+            "{}{percent}% · {:.1}/{:.1} MB",
+            tr("正在下载 ", "Downloading "),
             transferred as f64 / 1_048_576.0,
             total as f64 / 1_048_576.0
         )
     } else {
-        format!("正在下载 {:.1} MB", transferred as f64 / 1_048_576.0)
+        format!(
+            "{}{:.1} MB",
+            tr("正在下载 ", "Downloading "),
+            transferred as f64 / 1_048_576.0
+        )
     }
 }
 
 fn verify_installer(path: &Path, asset: &PlatformAsset) -> Result<(), String> {
     let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
     if metadata.len() != asset.size {
-        return Err("安装包大小不匹配".to_owned());
+        return Err(tr("安装包大小不匹配", "Installer size mismatch").to_owned());
     }
     let mut file = File::open(path).map_err(|e| e.to_string())?;
     let mut digest = Sha256::new();
@@ -918,7 +1004,7 @@ fn verify_installer(path: &Path, asset: &PlatformAsset) -> Result<(), String> {
         digest.update(&buffer[..read]);
     }
     if format!("{:x}", digest.finalize()) != asset.sha256 {
-        return Err("安装包 SHA-256 不匹配".to_owned());
+        return Err(tr("安装包 SHA-256 不匹配", "Installer SHA-256 mismatch").to_owned());
     }
     verify_authenticode(path)
 }
@@ -927,7 +1013,13 @@ fn verify_authenticode(path: &Path) -> Result<(), String> {
     let expected = option_env!("FLOWTYPE_WINDOWS_CERT_SHA256")
         .map(|value| value.replace(':', "").to_ascii_lowercase())
         .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or_else(|| "此构建未固定正式发布证书，不能安装在线更新".to_owned())?;
+        .ok_or_else(|| {
+            tr(
+                "此构建未固定正式发布证书，不能安装在线更新",
+                "This build does not trust a release certificate and cannot install online updates",
+            )
+            .to_owned()
+        })?;
     let path_wide = wide(path.to_string_lossy().as_ref());
     let mut file_info: WINTRUST_FILE_INFO = unsafe { zeroed() };
     file_info.cbStruct = size_of::<WINTRUST_FILE_INFO>() as u32;
@@ -964,11 +1056,19 @@ fn verify_authenticode(path: &Path) -> Result<(), String> {
         );
     }
     if status != 0 {
-        return Err(format!("Authenticode 验证失败（0x{:08x}）", status as u32));
+        return Err(format!(
+            "{} (0x{:08x})",
+            tr("Authenticode 验证失败", "Authenticode verification failed"),
+            status as u32
+        ));
     }
     let actual = signer_hash?;
     if actual != expected {
-        return Err("安装包签名证书不是 FlowType 正式发布证书".to_owned());
+        return Err(tr(
+            "安装包签名证书不是 FlowType 正式发布证书",
+            "The installer is not signed with the FlowType release certificate",
+        )
+        .to_owned());
     }
     Ok(())
 }
@@ -978,15 +1078,27 @@ fn signer_certificate_sha256(
 ) -> Result<String, String> {
     let provider = unsafe { WTHelperProvDataFromStateData(state) };
     if provider.is_null() {
-        return Err("无法读取 Authenticode 验证结果".to_owned());
+        return Err(tr(
+            "无法读取 Authenticode 验证结果",
+            "Could not read the Authenticode result",
+        )
+        .to_owned());
     }
     let signer = unsafe { WTHelperGetProvSignerFromChain(provider, 0, 0, 0) };
     if signer.is_null() {
-        return Err("安装包没有 Authenticode 签名者".to_owned());
+        return Err(tr(
+            "安装包没有 Authenticode 签名者",
+            "The installer has no Authenticode signer",
+        )
+        .to_owned());
     }
     let certificate = unsafe { WTHelperGetProvCertFromChain(signer, 0) };
     if certificate.is_null() {
-        return Err("无法读取 Authenticode 签名证书".to_owned());
+        return Err(tr(
+            "无法读取 Authenticode 签名证书",
+            "Could not read the Authenticode certificate",
+        )
+        .to_owned());
     }
     let mut hash = [0u8; 32];
     let mut length = hash.len() as u32;
@@ -999,7 +1111,11 @@ fn signer_certificate_sha256(
         )
     };
     if success == 0 || length != hash.len() as u32 {
-        return Err("无法计算 Authenticode 证书指纹".to_owned());
+        return Err(tr(
+            "无法计算 Authenticode 证书指纹",
+            "Could not calculate the Authenticode certificate fingerprint",
+        )
+        .to_owned());
     }
     Ok(hash.iter().map(|byte| format!("{byte:02x}")).collect())
 }

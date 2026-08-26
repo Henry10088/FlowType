@@ -20,6 +20,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::AppState;
+use crate::i18n::{product_name, tr};
 use crate::settings;
 use crate::ui::ui_paint::wide;
 use crate::ui::ui_theme::{COLOR_BALL_BLACK, COLOR_BALL_ORANGE};
@@ -113,7 +114,7 @@ pub fn create(state: Arc<AppState>, main_hwnd: HWND) -> HWND {
         CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED,
             class_name.as_ptr(),
-            wide("说写").as_ptr(),
+            wide(product_name()).as_ptr(),
             WS_POPUP,
             x,
             y,
@@ -161,11 +162,27 @@ fn default_position(size: i32) -> (i32, i32) {
 fn update_tooltip(context: &mut BallContext) {
     let snapshot = context.state.snapshot();
     let text = if snapshot.phones.is_empty() {
-        "说写\n尚未绑定手机\n双击打开主页面".to_owned()
+        format!(
+            "{}\n{}\n{}",
+            product_name(),
+            tr("尚未绑定手机", "No phones paired"),
+            tr("双击打开主页面", "Double-click to open")
+        )
     } else if let Some(phone) = snapshot.status.connected_phone.as_deref() {
-        format!("说写\n已连接：{phone}\n单击切换到此电脑\n双击打开主页面")
+        format!(
+            "{}\n{}{phone}\n{}\n{}",
+            product_name(),
+            tr("已连接：", "Connected: "),
+            tr("单击切换到此电脑", "Click to switch to this computer"),
+            tr("双击打开主页面", "Double-click to open")
+        )
     } else {
-        "说写\n手机连接已断开\n双击打开主页面".to_owned()
+        format!(
+            "{}\n{}\n{}",
+            product_name(),
+            tr("手机连接已断开", "Phone disconnected"),
+            tr("双击打开主页面", "Double-click to open")
+        )
     };
     context.tooltip_text = wide(&text);
     if context.tooltip.is_null() {
@@ -232,8 +249,8 @@ fn show_context_menu(context: &BallContext) {
     if menu.is_null() {
         return;
     }
-    let open = wide("打开主窗口");
-    let hide = wide("关闭悬浮球");
+    let open = wide(tr("打开主窗口", "Open FlowType"));
+    let hide = wide(tr("关闭悬浮球", "Hide floating ball"));
     let mut cursor = POINT { x: 0, y: 0 };
     unsafe {
         AppendMenuW(menu, MF_STRING, MENU_OPEN, open.as_ptr());

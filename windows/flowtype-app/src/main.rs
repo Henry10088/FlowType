@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod clipboard;
+mod i18n;
 mod identity;
 mod injector;
 mod network_address;
@@ -41,6 +42,7 @@ use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastE
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 
+use crate::i18n::tr;
 use crate::identity::PcIdentity;
 use crate::injector::InjectorClient;
 
@@ -240,7 +242,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         online_connections: Mutex::new(HashMap::new()),
         switch_channels: Mutex::new(HashMap::new()),
         runtime_status: Mutex::new(RuntimeStatus {
-            summary: "等待手机连接".to_owned(),
+            summary: tr("等待手机连接", "Waiting for phone").to_owned(),
             connected_phone: None,
             target_name: None,
             last_error: None,
@@ -259,8 +261,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Err(error) = runtime.block_on(run_network(network_state, endpoint_host)) {
                 eprintln!("network stopped: {error}");
                 network_error_state.update_status(|status| {
-                    status.summary = "连接服务不可用".to_owned();
-                    status.last_error = Some(format!("无法启动局域网连接：{error}"));
+                    status.summary = tr("连接服务不可用", "Connection unavailable").to_owned();
+                    status.last_error = Some(format!(
+                        "{}{error}",
+                        tr(
+                            "无法启动局域网连接：",
+                            "Could not start the local connection: "
+                        )
+                    ));
                 });
             }
         })?;
@@ -310,7 +318,7 @@ async fn run_network(
         let tls = tls.clone();
         tokio::spawn(async move {
             if let Err(error) = serve_connection(stream, tls, state).await {
-                eprintln!("连接已结束：{error}");
+                eprintln!("connection ended: {error}");
             }
         });
     }
@@ -345,10 +353,12 @@ impl AppState {
                 .lock()
                 .map(|status| status.clone())
                 .unwrap_or_else(|_| RuntimeStatus {
-                    summary: "状态不可用".to_owned(),
+                    summary: tr("状态不可用", "Status unavailable").to_owned(),
                     connected_phone: None,
                     target_name: None,
-                    last_error: Some("内部状态不可用".to_owned()),
+                    last_error: Some(
+                        tr("内部状态不可用", "Internal status unavailable").to_owned(),
+                    ),
                 }),
             injector_ready: self
                 .injector
@@ -437,12 +447,12 @@ impl AppState {
         self.update_status(|status| {
             if let Some((_, phone_name)) = online {
                 status.connected_phone = Some(phone_name.clone());
-                status.summary = format!("已连接：{phone_name}");
+                status.summary = format!("{}{phone_name}", tr("已连接：", "Connected: "));
                 status.last_error = None;
             } else {
                 status.connected_phone = None;
                 status.target_name = None;
-                status.summary = "等待手机连接".to_owned();
+                status.summary = tr("等待手机连接", "Waiting for phone").to_owned();
             }
         });
     }
@@ -567,8 +577,8 @@ impl AppState {
             status.summary = status
                 .connected_phone
                 .as_ref()
-                .map(|phone| format!("已连接：{phone}"))
-                .unwrap_or_else(|| "等待手机连接".to_owned());
+                .map(|phone| format!("{}{phone}", tr("已连接：", "Connected: ")))
+                .unwrap_or_else(|| tr("等待手机连接", "Waiting for phone").to_owned());
         });
     }
 
@@ -581,7 +591,7 @@ impl AppState {
         self.update_status(|status| {
             status.last_error = None;
             if status.connected_phone.is_none() {
-                status.summary = "等待手机连接".to_owned();
+                status.summary = tr("等待手机连接", "Waiting for phone").to_owned();
             }
         });
         Ok(())
@@ -794,13 +804,13 @@ async fn serve_connection(
                 .map_err(|_| "image worker failed")?;
                 if stored.is_ok() {
                     state.update_status(|status| {
-                        status.summary = "图片已保存到剪贴板".to_owned();
+                        status.summary = tr("图片已保存到剪贴板", "Image copied to clipboard").to_owned();
                         status.last_error = None;
                     });
                     send_image_reply(&mut websocket, &image.transfer_id, true, "").await?;
                 } else {
                     state.update_status(|status| {
-                        status.last_error = Some("无法写入 Windows 剪贴板".to_owned());
+                        status.last_error = Some(tr("无法写入 Windows 剪贴板", "Could not copy the image to the Windows clipboard").to_owned());
                     });
                     send_image_reply(
                         &mut websocket,
@@ -942,7 +952,7 @@ fn claim_active_connection(
         connection_id,
     });
     state.update_status(|status| {
-        status.summary = format!("已连接：{phone_name}");
+        status.summary = format!("{}{phone_name}", tr("已连接：", "Connected: "));
         status.connected_phone = Some(phone_name.to_owned());
         status.target_name = None;
         status.last_error = None;
@@ -983,8 +993,10 @@ fn injector_request(
     if result.is_err() {
         *injector = None;
         state.update_status(|status| {
-            status.summary = "Windows 输入服务不可用".to_owned();
-            status.last_error = Some("请在设置中修复输入服务".to_owned());
+            status.summary =
+                tr("Windows 输入服务不可用", "Windows input is unavailable").to_owned();
+            status.last_error =
+                Some(tr("请在设置中修复输入服务", "Repair input from Settings").to_owned());
         });
     }
     result
@@ -999,9 +1011,9 @@ impl Drop for ActiveConnectionLease {
         {
             *active = None;
             self.state.update_status(|status| {
-                status.summary = "等待手机连接".to_owned();
+                status.summary = tr("等待手机连接", "Waiting for phone").to_owned();
                 if let Some(phone) = status.connected_phone.as_deref() {
-                    status.summary = format!("已连接：{phone}");
+                    status.summary = format!("{}{phone}", tr("已连接：", "Connected: "));
                 }
                 status.target_name = None;
             });
@@ -1123,7 +1135,7 @@ where
         match response {
             InjectorResponse::SessionBegun { target_name } => {
                 state.update_status(|status| {
-                    status.summary = format!("正在输入到：{target_name}");
+                    status.summary = format!("{}{target_name}", tr("正在输入到：", "Typing in: "));
                     status.target_name = Some(target_name.clone());
                     status.last_error = None;
                 });
@@ -1280,23 +1292,35 @@ where
     let (target_state, target_name) = match response {
         InjectorResponse::TargetNotForeground { target_name } => {
             state.update_status(|status| {
-                status.summary = format!("请回到：{target_name}");
+                status.summary = format!("{}{target_name}", tr("请回到：", "Return to: "));
                 status.target_name = Some(target_name.clone());
             });
             (TargetState::NotForeground, Some(target_name))
         }
         InjectorResponse::TargetInvalid => {
             state.update_status(|status| {
-                status.summary = "原输入窗口已关闭".to_owned();
+                status.summary = tr("原输入窗口已关闭", "The input window was closed").to_owned();
                 status.target_name = None;
-                status.last_error = Some("请在电脑上重新放置光标，再从手机同步全文".to_owned());
+                status.last_error = Some(
+                    tr(
+                        "请在电脑上重新放置光标，再从手机同步全文",
+                        "Place the cursor again, then sync from your phone",
+                    )
+                    .to_owned(),
+                );
             });
             (TargetState::Invalid, None)
         }
         InjectorResponse::TargetModified => {
             state.update_status(|status| {
-                status.summary = "电脑端已编辑".to_owned();
-                status.last_error = Some("本次同步已停止，手机正文仍保留".to_owned());
+                status.summary = tr("电脑端已编辑", "Text edited on the computer").to_owned();
+                status.last_error = Some(
+                    tr(
+                        "本次同步已停止，手机正文仍保留",
+                        "Syncing stopped. The text remains on your phone.",
+                    )
+                    .to_owned(),
+                );
             });
             return send_json(
                 websocket,
@@ -1310,9 +1334,19 @@ where
         }
         InjectorResponse::TargetUnsupported => {
             state.update_status(|status| {
-                status.summary = "当前应用不支持实时输入".to_owned();
+                status.summary = tr(
+                    "当前应用不支持实时输入",
+                    "This app does not support live input",
+                )
+                .to_owned();
                 status.target_name = None;
-                status.last_error = Some("请将光标移到其他输入框后重试".to_owned());
+                status.last_error = Some(
+                    tr(
+                        "请将光标移到其他输入框后重试",
+                        "Move the cursor to another text field and try again",
+                    )
+                    .to_owned(),
+                );
             });
             return send_json(
                 websocket,
@@ -1331,11 +1365,15 @@ where
                 ErrorCode::SequenceConflict
             };
             state.update_status(|status| {
-                status.summary = "输入已停止".to_owned();
+                status.summary = tr("输入已停止", "Input stopped").to_owned();
                 status.last_error = Some(if code == ErrorCode::InjectionUnknown {
-                    "Windows 无法确认本次输入结果".to_owned()
+                    tr(
+                        "Windows 无法确认本次输入结果",
+                        "Windows could not confirm this input",
+                    )
+                    .to_owned()
                 } else {
-                    "输入状态不一致".to_owned()
+                    tr("输入状态不一致", "Input state mismatch").to_owned()
                 });
             });
             return send_json(

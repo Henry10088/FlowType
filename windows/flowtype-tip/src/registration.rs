@@ -23,7 +23,7 @@ use crate::{CLSID_FLOWTYPE_TIP, FLOWTYPE_LANG_ID, GUID_FLOWTYPE_PROFILE, module_
 
 const CLSID_TEXT: &str = "{9A50B266-9E86-4FF4-871B-8D47AD8C658B}";
 const KEYBOARD_CATEGORY_TEXT: &str = "{34745C63-B2F0-4784-8B67-5E12C8701A31}";
-const DESCRIPTION: &str = "FlowType 手机语音输入";
+const DESCRIPTION: &str = "FlowType Input Service";
 
 pub fn register() -> Result<()> {
     register_com_server()?;

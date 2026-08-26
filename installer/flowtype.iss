@@ -41,6 +41,10 @@ ChangesEnvironment=no
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "chinesesimplified"; MessagesFile: "languages\ChineseSimplified.isl"
+
 [Files]
 Source: "{#BuildDir}\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\{#InjectorExeName}"; DestDir: "{app}"; Flags: ignoreversion
@@ -58,7 +62,7 @@ Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Parameters: "--show
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FirewallRule}"""; Flags: runhidden waituntilterminated
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{#FirewallRule}"" dir=in action=allow protocol=TCP localport=32187 program=""{app}\{#AppExeName}"" profile=any"; Flags: runhidden waituntilterminated
 Filename: "{app}\{#AppExeName}"; Parameters: "--enable-auto-start"; Flags: runhidden waituntilterminated runasoriginaluser
-Filename: "{app}\{#AppExeName}"; Parameters: "--show"; Description: "运行{#AppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+Filename: "{app}\{#AppExeName}"; Parameters: "--show"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
 Filename: "{sys}\schtasks.exe"; Parameters: "/End /TN ""{#TaskName}"""; Flags: runhidden waituntilterminated; RunOnceId: "StopInjector"

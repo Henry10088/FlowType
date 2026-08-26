@@ -14,6 +14,8 @@ use windows_sys::Win32::Security::Cryptography::{
     CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
 };
 
+use crate::i18n::tr;
+
 #[derive(Clone)]
 pub struct PcIdentity {
     pub pc_id: String,
@@ -77,7 +79,8 @@ impl PcIdentity {
         let spki_sha256 = STANDARD.encode(Sha256::digest(signing_key.subject_public_key_info()));
         let identity = Self {
             pc_id: Uuid::new_v4().to_string(),
-            pc_name: env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows 电脑".to_owned()),
+            pc_name: env::var("COMPUTERNAME")
+                .unwrap_or_else(|_| tr("Windows 电脑", "Windows PC").to_owned()),
             cert_der: cert.der().to_vec(),
             key_der: signing_key.serialize_der(),
             spki_sha256,

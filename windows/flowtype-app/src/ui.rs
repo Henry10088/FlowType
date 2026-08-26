@@ -26,6 +26,7 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
+use crate::i18n::{is_chinese, product_name, tr};
 use crate::{AppState, PORT, WM_APP_STATE, settings, update};
 
 #[path = "ui_commands.rs"]
@@ -191,26 +192,38 @@ impl UiContext {
         let snapshot = self.state.snapshot();
         self.text(&snapshot.status.summary, 258, 43, 430, 34, self.title_font);
         self.label_value(
-            "手机",
+            tr("手机", "Phone"),
             snapshot
                 .status
                 .connected_phone
                 .as_deref()
-                .unwrap_or("尚未连接"),
+                .unwrap_or(tr("尚未连接", "Not connected")),
             105,
         );
-        self.label_value("输入状态", "等待手机输入", 151);
         self.label_value(
-            "输入位置",
-            snapshot.status.target_name.as_deref().unwrap_or("尚未选择"),
+            tr("输入状态", "Input status"),
+            tr("等待手机输入", "Waiting for phone input"),
+            151,
+        );
+        self.label_value(
+            tr("输入位置", "Input location"),
+            snapshot
+                .status
+                .target_name
+                .as_deref()
+                .unwrap_or(tr("尚未选择", "Not selected")),
             205,
         );
-        self.label_value("连接地址", &format!("{}:{PORT}", self.host), 259);
+        self.label_value(
+            tr("连接地址", "Address"),
+            &format!("{}:{PORT}", self.host),
+            259,
+        );
         if let Some(error) = snapshot.status.last_error.as_deref() {
             self.muted_text(error, 220, 302, 470, 42, self.body_font);
         }
         self.owner_button(
-            "绑定手机",
+            tr("绑定手机", "Pair phone"),
             ID_PAIR,
             220,
             348,
@@ -222,27 +235,46 @@ impl UiContext {
 
     fn build_phones(&mut self) {
         let snapshot = self.state.snapshot();
-        self.title("已绑定手机");
-        self.owner_button("绑定手机", ID_PAIR, 590, 28, 132, 42, ButtonKind::Secondary);
+        self.title(tr("已绑定手机", "Paired phones"));
+        self.owner_button(
+            tr("绑定手机", "Pair phone"),
+            ID_PAIR,
+            590,
+            28,
+            132,
+            42,
+            ButtonKind::Secondary,
+        );
         if snapshot.phones.is_empty() {
-            self.muted_text("还没有绑定手机", 220, 112, 420, 30, self.body_font);
+            self.muted_text(
+                tr("还没有绑定手机", "No phones paired"),
+                220,
+                112,
+                420,
+                30,
+                self.body_font,
+            );
         }
         for (index, (phone_id, phone)) in snapshot.phones.iter().enumerate() {
             let y = 102 + index as i32 * 84;
             self.text(&phone.phone_name, 268, y, 260, 28, self.heading_font);
             let connected = snapshot.status.connected_phone.as_deref() == Some(&phone.phone_name);
-            let state_text = if connected { "已连接" } else { "未连接" };
+            let state_text = if connected {
+                tr("已连接", "Connected")
+            } else {
+                tr("未连接", "Offline")
+            };
             self.text(state_text, 288, y + 34, 90, 24, self.body_font);
             let detail = if connected {
-                "刚刚连接"
+                tr("刚刚连接", "Connected now")
             } else if phone.last_connected.is_some() {
-                "最近连接过"
+                tr("最近连接过", "Previously connected")
             } else {
-                "尚未连接过"
+                tr("尚未连接过", "Never connected")
             };
             self.muted_text(detail, 380, y + 34, 190, 24, self.body_font);
             self.owner_button(
-                "解除绑定",
+                tr("解除绑定", "Unpair"),
                 ID_UNPAIR_BASE + index,
                 620,
                 y + 13,
@@ -256,9 +288,16 @@ impl UiContext {
 
     fn build_settings(&mut self) {
         let snapshot = self.state.snapshot();
-        self.title("设置");
-        self.text("常规", 220, 92, 120, 26, self.heading_font);
-        self.text("电脑名称", 220, 134, 110, 28, self.body_font);
+        self.title(tr("设置", "Settings"));
+        self.text(tr("常规", "General"), 220, 92, 120, 26, self.heading_font);
+        self.text(
+            tr("电脑名称", "Computer name"),
+            220,
+            134,
+            125,
+            28,
+            self.body_font,
+        );
         self.name_edit = self.control(
             "EDIT",
             &snapshot.pc_name,
@@ -272,7 +311,7 @@ impl UiContext {
         );
         self.auto_start_checked = settings::auto_start_enabled();
         self.auto_start = self.owner_button(
-            "开机启动",
+            tr("开机启动", "Start with Windows"),
             ID_AUTO_START,
             220,
             174,
@@ -282,7 +321,7 @@ impl UiContext {
         );
         self.floating_enabled_checked = settings::floating_enabled();
         self.show_floating = self.owner_button(
-            "显示悬浮球",
+            tr("显示悬浮球", "Show floating ball"),
             ID_SHOW_FLOATING,
             220,
             214,
@@ -291,7 +330,7 @@ impl UiContext {
             ButtonKind::Checkbox,
         );
         self.owner_button(
-            "保存设置",
+            tr("保存设置", "Save settings"),
             ID_SAVE_SETTINGS,
             610,
             34,
@@ -300,15 +339,22 @@ impl UiContext {
             ButtonKind::Secondary,
         );
 
-        self.text("输入服务", 220, 272, 120, 26, self.heading_font);
+        self.text(
+            tr("输入服务", "Input service"),
+            220,
+            272,
+            140,
+            26,
+            self.heading_font,
+        );
         let service = if snapshot.injector_ready {
-            "正常运行"
+            tr("正常运行", "Running")
         } else {
-            "输入服务不可用"
+            tr("输入服务不可用", "Input unavailable")
         };
         self.text(service, 246, 308, 180, 28, self.body_font);
         self.owner_button(
-            "修复输入服务",
+            tr("修复输入服务", "Repair input"),
             ID_REPAIR,
             610,
             298,
@@ -316,9 +362,20 @@ impl UiContext {
             38,
             ButtonKind::Secondary,
         );
-        self.text("版本与更新", 220, 370, 160, 26, self.heading_font);
         self.text(
-            &format!("当前版本 {} · Windows x64", env!("CARGO_PKG_VERSION")),
+            tr("版本与更新", "Version & updates"),
+            220,
+            370,
+            180,
+            26,
+            self.heading_font,
+        );
+        self.text(
+            &format!(
+                "{} {} · Windows x64",
+                tr("当前版本", "Current version"),
+                env!("CARGO_PKG_VERSION")
+            ),
             220,
             406,
             350,
@@ -338,7 +395,7 @@ impl UiContext {
             self.body_font,
         );
         self.update_repository = self.owner_button(
-            "GitHub 仓库",
+            tr("GitHub 仓库", "GitHub"),
             ID_UPDATE_REPOSITORY,
             370,
             476,
@@ -347,7 +404,7 @@ impl UiContext {
             ButtonKind::Secondary,
         );
         self.update_history = self.owner_button(
-            "查看更新",
+            tr("查看更新", "Release history"),
             ID_UPDATE_HISTORY,
             490,
             476,
@@ -356,7 +413,7 @@ impl UiContext {
             ButtonKind::Secondary,
         );
         self.update_action = self.owner_button(
-            "检查更新",
+            tr("检查更新", "Check now"),
             ID_UPDATE_ACTION,
             610,
             474,
@@ -364,27 +421,68 @@ impl UiContext {
             34,
             ButtonKind::Secondary,
         );
-        self.muted_text("检查更新会连接 GitHub。", 220, 518, 500, 34, self.body_font);
+        self.muted_text(
+            tr(
+                "检查更新会连接 GitHub。",
+                "Checking for updates connects to GitHub.",
+            ),
+            220,
+            518,
+            500,
+            34,
+            self.body_font,
+        );
         self.refresh_update_controls();
     }
 
     fn build_pairing(&mut self) {
         self.owner_button("", ID_NAV_PHONES, 202, 32, 34, 34, ButtonKind::Back);
-        self.text("绑定手机", 246, 34, 300, 34, self.heading_font);
-        self.text("在手机上打开说写，", 470, 145, 250, 30, self.heading_font);
-        self.text("扫描此二维码", 470, 178, 220, 30, self.heading_font);
+        self.text(
+            tr("绑定手机", "Pair phone"),
+            246,
+            34,
+            300,
+            34,
+            self.heading_font,
+        );
+        self.text(
+            tr("在手机上打开说写，", "Open FlowType on your phone"),
+            470,
+            145,
+            250,
+            30,
+            self.heading_font,
+        );
+        self.text(
+            tr("扫描此二维码", "Scan this QR code"),
+            470,
+            178,
+            220,
+            30,
+            self.heading_font,
+        );
         let pc_name = self.state.snapshot().pc_name;
         self.text(
-            &format!("此电脑：{pc_name}"),
+            &format!("{}{pc_name}", tr("此电脑：", "Computer: ")),
             470,
             252,
             250,
             28,
             self.body_font,
         );
-        self.text("等待手机扫描", 486, 294, 180, 26, self.body_font);
+        self.text(
+            tr("等待手机扫描", "Waiting for scan"),
+            486,
+            294,
+            180,
+            26,
+            self.body_font,
+        );
         self.muted_text(
-            "二维码仅用于本次绑定，绑定成功后立即失效",
+            tr(
+                "二维码仅用于本次绑定，绑定成功后立即失效",
+                "This QR code expires after pairing",
+            ),
             470,
             334,
             270,
@@ -403,12 +501,22 @@ impl UiContext {
                     ));
                 }
                 Err(_) => {
-                    self.text("二维码生成失败", 220, 140, 220, 30, self.body_font);
+                    self.text(
+                        tr("二维码生成失败", "Could not create QR code"),
+                        220,
+                        140,
+                        250,
+                        30,
+                        self.body_font,
+                    );
                 }
             },
             Err(_) => {
                 self.text(
-                    "无法开始绑定，请重新打开此页面",
+                    tr(
+                        "无法开始绑定，请重新打开此页面",
+                        "Could not start pairing. Reopen this page.",
+                    ),
                     220,
                     140,
                     430,
@@ -541,9 +649,15 @@ impl UiContext {
             self.apply_floating_visibility();
         }
         let (success, text) = if result.is_ok() {
-            (true, "设置已保存")
+            (true, tr("设置已保存", "Settings saved"))
         } else {
-            (false, "设置保存失败，请检查电脑名称")
+            (
+                false,
+                tr(
+                    "设置保存失败，请检查电脑名称",
+                    "Could not save settings. Check the computer name.",
+                ),
+            )
         };
         self.rebuild_page();
         self.show_save_notice(success, text);
@@ -574,11 +688,14 @@ impl UiContext {
         message_box(
             self.hwnd,
             if result.is_ok() {
-                "输入服务已恢复"
+                tr("输入服务已恢复", "Input service repaired")
             } else {
-                "无法启动输入服务，请重新运行安装程序"
+                tr(
+                    "无法启动输入服务，请重新运行安装程序",
+                    "Could not start the input service. Run the installer again.",
+                )
             },
-            "说写",
+            product_name(),
             if result.is_ok() {
                 MB_OK | MB_ICONINFORMATION
             } else {
@@ -598,11 +715,15 @@ impl UiContext {
             .iter()
             .find(|(id, _)| id == &phone_id)
             .map(|(_, phone)| phone.phone_name.as_str())
-            .unwrap_or("这部手机");
+            .unwrap_or(tr("这部手机", "this phone"));
         if message_box(
             self.hwnd,
-            &format!("解绑“{name}”？解绑后需要重新扫描二维码。"),
-            "解绑手机",
+            &if is_chinese() {
+                format!("解绑“{name}”？解绑后需要重新扫描二维码。")
+            } else {
+                format!("Unpair \"{name}\"? You will need to scan the QR code again.")
+            },
+            tr("解绑手机", "Unpair phone"),
             MB_YESNO | MB_ICONWARNING,
         ) == IDYES
         {
@@ -628,7 +749,7 @@ impl UiContext {
         let status = if snapshot.action == update::UpdateAction::Install
             && self.state.update_install_blocked()
         {
-            "输入结束后可安装".to_owned()
+            tr("输入结束后可安装", "Available after input ends").to_owned()
         } else {
             snapshot.message.clone()
         };
@@ -669,7 +790,13 @@ impl UiContext {
         let action = self.state.snapshot().update.action;
         if action == update::UpdateAction::Install {
             if self.state.update_install_blocked() {
-                self.show_save_notice(false, "请先完成当前输入，再安装更新");
+                self.show_save_notice(
+                    false,
+                    tr(
+                        "请先完成当前输入，再安装更新",
+                        "Finish the current input before installing",
+                    ),
+                );
                 return;
             }
             if self.state.install_update().is_ok() {
@@ -695,7 +822,7 @@ impl UiContext {
         data.uCallbackMessage = WM_APP_TRAY;
         data.hIcon = app_icon();
         let status = self.state.snapshot().status.summary;
-        copy_wide(&mut data.szTip, &format!("说写 · {status}"));
+        copy_wide(&mut data.szTip, &format!("{} · {status}", product_name()));
         data
     }
 
@@ -718,13 +845,13 @@ impl UiContext {
         unsafe {
             AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, status.as_ptr());
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
-            append_menu(menu, ID_TRAY_OPEN, "打开说写");
-            append_menu(menu, ID_TRAY_PAIR, "绑定手机...");
+            append_menu(menu, ID_TRAY_OPEN, tr("打开说写", "Open FlowType"));
+            append_menu(menu, ID_TRAY_PAIR, tr("绑定手机...", "Pair phone..."));
             if let Some(label) = self.state.snapshot().update.tray_label() {
                 append_menu(menu, ID_TRAY_UPDATE, &label);
             }
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
-            append_menu(menu, ID_TRAY_EXIT, "退出说写");
+            append_menu(menu, ID_TRAY_EXIT, tr("退出说写", "Exit FlowType"));
             let mut point: POINT = zeroed();
             GetCursorPos(&mut point);
             SetForegroundWindow(self.hwnd);
@@ -1194,7 +1321,7 @@ pub fn run(
     };
     let context = Box::new(UiContext::new(state, host, page));
     let context_ptr = Box::into_raw(context);
-    let title = wide("说写");
+    let title = wide(product_name());
     let system_dpi = unsafe { GetDpiForSystem() }.max(96) as i32;
     let initial_width = 760 * system_dpi / 96;
     let initial_height = 600 * system_dpi / 96;
@@ -1423,7 +1550,7 @@ unsafe extern "system" fn window_proc(
 
 fn create_navigation(ui: &mut UiContext) {
     ui.owner_button(
-        "状态",
+        tr("状态", "Status"),
         ID_NAV_STATUS,
         0,
         18,
@@ -1432,7 +1559,7 @@ fn create_navigation(ui: &mut UiContext) {
         ButtonKind::Navigation(Page::Status),
     );
     ui.owner_button(
-        "已绑定手机",
+        tr("已绑定手机", "Paired phones"),
         ID_NAV_PHONES,
         0,
         66,
@@ -1441,7 +1568,7 @@ fn create_navigation(ui: &mut UiContext) {
         ButtonKind::Navigation(Page::Phones),
     );
     ui.owner_button(
-        "设置",
+        tr("设置", "Settings"),
         ID_NAV_SETTINGS,
         0,
         114,
