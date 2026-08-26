@@ -38,6 +38,8 @@ const MANIFEST_URL: &str =
     "https://github.com/Henry10088/FlowType/releases/latest/download/flowtype-update.json";
 const RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/Henry10088/FlowType/releases/download/";
 const RELEASE_TAG_PREFIX: &str = "https://github.com/Henry10088/FlowType/releases/tag/";
+const REPOSITORY_URL: &str = "https://github.com/Henry10088/FlowType";
+const RELEASES_URL: &str = "https://github.com/Henry10088/FlowType/releases";
 const UPDATE_KEY_ID: &str = "flowtype-update-2026";
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 const MAX_SIGNATURE_BYTES: usize = 1024;
@@ -62,7 +64,6 @@ pub struct UpdateSnapshot {
     pub action: UpdateAction,
     pub action_label: String,
     pub progress: Option<(u64, u64)>,
-    pub release_url: Option<String>,
     pub version: Option<String>,
 }
 
@@ -73,7 +74,6 @@ impl UpdateSnapshot {
             action: UpdateAction::Check,
             action_label: "检查更新".to_owned(),
             progress: None,
-            release_url: None,
             version: None,
         }
     }
@@ -176,7 +176,6 @@ impl UpdateManager {
                 action: UpdateAction::Check,
                 action_label: "重试".to_owned(),
                 progress: None,
-                release_url: None,
                 version: None,
             })
     }
@@ -193,12 +192,12 @@ impl UpdateManager {
         }
     }
 
-    pub fn open_release(&self) -> io::Result<()> {
-        let url = self
-            .snapshot()
-            .release_url
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "release URL is unavailable"))?;
-        shell_open("open", &url)
+    pub fn open_repository(&self) -> io::Result<()> {
+        shell_open("open", REPOSITORY_URL)
+    }
+
+    pub fn open_releases(&self) -> io::Result<()> {
+        shell_open("open", RELEASES_URL)
     }
 
     pub fn install(&self) -> Result<(), String> {
@@ -226,7 +225,6 @@ impl UpdateManager {
                 action: UpdateAction::None,
                 action_label: String::new(),
                 progress: None,
-                release_url: Some(manifest.release_url.clone()),
                 version: Some(manifest.version.clone()),
             },
             Some(manifest.clone()),
@@ -372,7 +370,6 @@ fn check_for_update(
             action: UpdateAction::None,
             action_label: String::new(),
             progress: None,
-            release_url: None,
             version: None,
         },
         None,
@@ -423,7 +420,6 @@ fn check_for_update(
                             action: UpdateAction::Check,
                             action_label: "再次检查".to_owned(),
                             progress: None,
-                            release_url: Some(manifest.release_url),
                             version: None,
                         },
                         None,
@@ -686,7 +682,6 @@ fn poll_download(
                 action: UpdateAction::None,
                 action_label: String::new(),
                 progress: None,
-                release_url: Some(download.manifest.release_url.clone()),
                 version: Some(download.manifest.version.clone()),
             },
             Some(download.manifest.clone()),
@@ -737,7 +732,6 @@ fn poll_download(
             action: UpdateAction::Cancel,
             action_label: "取消".to_owned(),
             progress: Some((progress.BytesTransferred, total)),
-            release_url: Some(download.manifest.release_url.clone()),
             version: Some(download.manifest.version.clone()),
         },
         Some(download.manifest.clone()),
@@ -781,7 +775,6 @@ fn set_available(
             action: UpdateAction::Download,
             action_label: "下载更新".to_owned(),
             progress: None,
-            release_url: Some(manifest.release_url.clone()),
             version: Some(manifest.version.clone()),
         },
         Some(manifest),
@@ -803,7 +796,6 @@ fn set_ready(
             action: UpdateAction::Install,
             action_label: "安装更新".to_owned(),
             progress: Some((manifest.windows.size, manifest.windows.size)),
-            release_url: Some(manifest.release_url.clone()),
             version: Some(manifest.version.clone()),
         },
         Some(manifest),
@@ -814,7 +806,7 @@ fn set_ready(
 fn set_failure(
     shared: &Arc<Mutex<SharedUpdate>>,
     hwnd: &Arc<AtomicIsize>,
-    manifest: &UpdateManifest,
+    _manifest: &UpdateManifest,
     message: &str,
 ) {
     set_snapshot(
@@ -825,7 +817,6 @@ fn set_failure(
             action: UpdateAction::Check,
             action_label: "重试".to_owned(),
             progress: None,
-            release_url: Some(manifest.release_url.clone()),
             version: None,
         },
         None,
@@ -861,7 +852,6 @@ fn downloading_snapshot(manifest: &UpdateManifest, transferred: u64, total: u64)
         action: UpdateAction::Cancel,
         action_label: "取消".to_owned(),
         progress: Some((transferred, total)),
-        release_url: Some(manifest.release_url.clone()),
         version: Some(manifest.version.clone()),
     }
 }

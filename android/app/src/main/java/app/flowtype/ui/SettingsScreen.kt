@@ -21,7 +21,8 @@ class SettingsScreen(
     private val onOpenComputers: () -> Unit,
     private val onFloatingToggle: (Boolean) -> Unit,
     private val onInstallUpdate: () -> Unit,
-    private val onOpenRelease: () -> Unit,
+    private val onOpenRepository: () -> Unit,
+    private val onOpenHistory: () -> Unit,
     private val isVisible: () -> Boolean,
 ) {
     private val updateObserver: (UpdateManager.State) -> Unit = { state ->
@@ -67,7 +68,8 @@ class SettingsScreen(
         val status = activity.findViewById<TextView>(R.id.updateStatus) ?: return
         val progress = activity.findViewById<ProgressBar>(R.id.updateProgress)
         val action = activity.findViewById<Button>(R.id.updateAction)
-        val notes = activity.findViewById<Button>(R.id.updateNotes)
+        val repository = activity.findViewById<Button>(R.id.updateRepository)
+        val history = activity.findViewById<Button>(R.id.updateHistory)
         status.text = state.message
         progress.visibility = if (state.showProgress) View.VISIBLE else View.GONE
         if (state.showProgress) {
@@ -81,7 +83,7 @@ class SettingsScreen(
             if (state.action == UpdateManager.Action.INSTALL) onInstallUpdate()
             else controller.updates.perform(state.action)
         }
-        notes.visibility = if (state.releaseUrl != null) View.VISIBLE else View.GONE
-        notes.setOnClickListener { onOpenRelease() }
+        repository.setOnClickListener { onOpenRepository() }
+        history.setOnClickListener { onOpenHistory() }
     }
 }

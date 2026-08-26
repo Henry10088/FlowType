@@ -106,7 +106,8 @@ class MainActivity : ComponentActivity() {
                 }
             },
             onInstallUpdate = ::installUpdate,
-            onOpenRelease = ::openUpdateRelease,
+            onOpenRepository = ::openGithubRepository,
+            onOpenHistory = ::openUpdateHistory,
             isVisible = { page == Screen.SETTINGS },
         )
     }
@@ -211,8 +212,12 @@ class MainActivity : ComponentActivity() {
             .onFailure { Toast.makeText(this, it.message, Toast.LENGTH_LONG).show() }
     }
 
-    private fun openUpdateRelease() {
-        controller.updates.releaseUrl()?.let { startActivity(Intent(Intent.ACTION_VIEW, it)) }
+    private fun openGithubRepository() {
+        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Henry10088/FlowType")))
+    }
+
+    private fun openUpdateHistory() {
+        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Henry10088/FlowType/releases")))
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

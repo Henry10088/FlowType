@@ -10,7 +10,8 @@ pub(super) const ID_NAME: usize = 122;
 pub(super) const ID_AUTO_START: usize = 123;
 pub(super) const ID_SHOW_FLOATING: usize = 124;
 pub(super) const ID_UPDATE_ACTION: usize = 125;
-pub(super) const ID_UPDATE_RELEASE: usize = 126;
+pub(super) const ID_UPDATE_REPOSITORY: usize = 126;
+pub(super) const ID_UPDATE_HISTORY: usize = 127;
 pub(super) const ID_UNPAIR_BASE: usize = 3000;
 pub(super) const ID_TRAY_OPEN: usize = 4001;
 pub(super) const ID_TRAY_PAIR: usize = 4002;
@@ -25,7 +26,8 @@ pub(super) enum UiCommand {
     ToggleFloating,
     RepairInjector,
     UpdateAction,
-    OpenUpdateRelease,
+    OpenUpdateRepository,
+    OpenUpdateHistory,
     Exit,
     Unpair(usize),
 }
@@ -41,7 +43,8 @@ pub(super) fn command_for_id(id: usize) -> Option<UiCommand> {
         ID_SHOW_FLOATING => UiCommand::ToggleFloating,
         ID_REPAIR => UiCommand::RepairInjector,
         ID_UPDATE_ACTION => UiCommand::UpdateAction,
-        ID_UPDATE_RELEASE => UiCommand::OpenUpdateRelease,
+        ID_UPDATE_REPOSITORY => UiCommand::OpenUpdateRepository,
+        ID_UPDATE_HISTORY => UiCommand::OpenUpdateHistory,
         ID_TRAY_EXIT => UiCommand::Exit,
         value if (ID_UNPAIR_BASE..ID_UNPAIR_BASE + 1000).contains(&value) => {
             UiCommand::Unpair(value - ID_UNPAIR_BASE)

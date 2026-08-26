@@ -591,8 +591,12 @@ impl AppState {
         self.update.perform(action);
     }
 
-    fn open_update_release(&self) -> std::io::Result<()> {
-        self.update.open_release()
+    fn open_update_repository(&self) -> std::io::Result<()> {
+        self.update.open_repository()
+    }
+
+    fn open_update_history(&self) -> std::io::Result<()> {
+        self.update.open_releases()
     }
 
     fn install_update(&self) -> Result<(), String> {

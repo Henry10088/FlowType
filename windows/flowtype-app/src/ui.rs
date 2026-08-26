@@ -86,7 +86,8 @@ struct UiContext {
     update_status: HWND,
     update_progress: HWND,
     update_action: HWND,
-    update_release: HWND,
+    update_repository: HWND,
+    update_history: HWND,
     title_font: HFONT,
     heading_font: HFONT,
     body_font: HFONT,
@@ -115,7 +116,8 @@ impl UiContext {
             update_status: null_mut(),
             update_progress: null_mut(),
             update_action: null_mut(),
-            update_release: null_mut(),
+            update_repository: null_mut(),
+            update_history: null_mut(),
             title_font: null_mut(),
             heading_font: null_mut(),
             body_font: null_mut(),
@@ -164,7 +166,8 @@ impl UiContext {
         self.update_status = null_mut();
         self.update_progress = null_mut();
         self.update_action = null_mut();
-        self.update_release = null_mut();
+        self.update_repository = null_mut();
+        self.update_history = null_mut();
         create_navigation(self);
         match self.page {
             Page::Status => self.build_status(),
@@ -334,10 +337,19 @@ impl UiContext {
             6,
             self.body_font,
         );
-        self.update_release = self.owner_button(
-            "查看说明",
-            ID_UPDATE_RELEASE,
-            500,
+        self.update_repository = self.owner_button(
+            "GitHub 仓库",
+            ID_UPDATE_REPOSITORY,
+            220,
+            476,
+            120,
+            32,
+            ButtonKind::Text,
+        );
+        self.update_history = self.owner_button(
+            "查看更新",
+            ID_UPDATE_HISTORY,
+            348,
             476,
             94,
             32,
@@ -352,14 +364,7 @@ impl UiContext {
             34,
             ButtonKind::Secondary,
         );
-        self.muted_text(
-            "检查更新会连接 GitHub。",
-            220,
-            518,
-            500,
-            34,
-            self.body_font,
-        );
+        self.muted_text("检查更新会连接 GitHub。", 220, 518, 500, 34, self.body_font);
         self.refresh_update_controls();
     }
 
@@ -638,14 +643,6 @@ impl UiContext {
                     SW_SHOW
                 },
             );
-            ShowWindow(
-                self.update_release,
-                if snapshot.release_url.is_some() {
-                    SW_SHOW
-                } else {
-                    SW_HIDE
-                },
-            );
             if let Some((transferred, total)) = snapshot.progress {
                 let position = if total == 0 {
                     0
@@ -662,7 +659,8 @@ impl UiContext {
                 ShowWindow(self.update_progress, SW_HIDE);
             }
             InvalidateRect(self.update_action, null(), 1);
-            InvalidateRect(self.update_release, null(), 1);
+            InvalidateRect(self.update_repository, null(), 1);
+            InvalidateRect(self.update_history, null(), 1);
         }
         self.update_tray();
     }
@@ -1290,8 +1288,11 @@ unsafe extern "system" fn window_proc(
                 }
                 Some(UiCommand::RepairInjector) => ui.repair_injector(),
                 Some(UiCommand::UpdateAction) => ui.handle_update_action(),
-                Some(UiCommand::OpenUpdateRelease) => {
-                    let _ = ui.state.open_update_release();
+                Some(UiCommand::OpenUpdateRepository) => {
+                    let _ = ui.state.open_update_repository();
+                }
+                Some(UiCommand::OpenUpdateHistory) => {
+                    let _ = ui.state.open_update_history();
                 }
                 Some(UiCommand::Exit) => {
                     unsafe { DestroyWindow(hwnd) };

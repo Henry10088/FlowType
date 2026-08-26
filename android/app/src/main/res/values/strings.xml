@@ -72,7 +72,8 @@
     <string name="input_display">输入与显示</string>
     <string name="version_and_updates">版本与更新</string>
     <string name="check_updates">检查更新</string>
-    <string name="view_release_notes">查看说明</string>
+    <string name="github_repository">GitHub 仓库</string>
+    <string name="view_updates">查看更新</string>
     <string name="update_finish_work_first">请先完成当前输入或图片传输</string>
     <string name="update_install_permission_title">允许安装说写更新</string>
     <string name="update_install_permission_message">Android 需要允许说写安装由项目发布并已验证签名的更新包。此权限只用于你主动安装更新。</string>

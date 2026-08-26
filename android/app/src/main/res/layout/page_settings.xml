@@ -158,17 +158,28 @@
                     android:textColor="#001817"
                     android:textSize="14sp" />
                 <Button
-                    android:id="@+id/updateNotes"
+                    android:id="@+id/updateRepository"
+                    android:layout_width="wrap_content"
+                    android:layout_height="44dp"
+                    android:layout_marginStart="8dp"
+                    android:background="?android:attr/selectableItemBackground"
+                    android:minWidth="104dp"
+                    android:text="@string/github_repository"
+                    android:textAllCaps="false"
+                    android:textColor="@color/text_primary"
+                    android:textSize="14sp"
+                    />
+                <Button
+                    android:id="@+id/updateHistory"
                     android:layout_width="wrap_content"
                     android:layout_height="44dp"
                     android:layout_marginStart="8dp"
                     android:background="?android:attr/selectableItemBackground"
                     android:minWidth="96dp"
-                    android:text="@string/view_release_notes"
+                    android:text="@string/view_updates"
                     android:textAllCaps="false"
                     android:textColor="@color/text_primary"
-                    android:textSize="14sp"
-                    android:visibility="gone" />
+                    android:textSize="14sp" />
             </LinearLayout>
             <TextView
                 android:layout_width="match_parent"
