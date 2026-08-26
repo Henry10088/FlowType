@@ -82,7 +82,7 @@ jobs:
           test -n "$apksigner"
           "$apksigner" verify --verbose --print-certs "$apk"
           mkdir -p release-metadata
-          sha256sum "$apk" | tee release-metadata/SHA256SUMS.txt
+          sha256sum "$apk" | tee release-metadata/FlowType-android-SHA256SUMS.txt
 
       - name: Upload Android release artifact
         uses: actions/upload-artifact@v4
@@ -91,7 +91,7 @@ jobs:
           if-no-files-found: error
           path: |
             android/app/build/outputs/apk/release/FlowType-*-android-release.apk
-            android/release-metadata/SHA256SUMS.txt
+            android/release-metadata/FlowType-android-SHA256SUMS.txt
 
   windows:
     name: Windows signed binaries and installer
@@ -193,12 +193,12 @@ jobs:
             if (-not $signature.SignerCertificate) { throw "No Authenticode signature found: $file" }
             "$file`t$($signature.Status)`t$($signature.SignerCertificate.Subject)"
           }
-          $signatureLines | Set-Content -LiteralPath (Join-Path $metadataDir "AUTHENTICODE.txt") -Encoding UTF8
+          $signatureLines | Set-Content -LiteralPath (Join-Path $metadataDir "FlowType-windows-AUTHENTICODE.txt") -Encoding UTF8
           $hashLines = foreach ($file in $signedFiles) {
             $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
             "$hash  $file"
           }
-          $hashLines | Set-Content -LiteralPath (Join-Path $metadataDir "SHA256SUMS.txt") -Encoding ASCII
+          $hashLines | Set-Content -LiteralPath (Join-Path $metadataDir "FlowType-windows-SHA256SUMS.txt") -Encoding ASCII
 
       - name: Upload Windows release artifact
         uses: actions/upload-artifact@v4
@@ -210,8 +210,8 @@ jobs:
             windows/target/release/flowtype-injector.exe
             windows/target/release/flowtype_tip.dll
             installer/output/FlowType-*-x64-setup.exe
-            windows/release-metadata/AUTHENTICODE.txt
-            windows/release-metadata/SHA256SUMS.txt
+            windows/release-metadata/FlowType-windows-AUTHENTICODE.txt
+            windows/release-metadata/FlowType-windows-SHA256SUMS.txt
 
   publish:
     name: Create GitHub Release
@@ -250,7 +250,7 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           PRERELEASE: ${{ steps.release.outputs.prerelease }}
         run: |
-          mapfile -t assets < <(find dist -type f \( -name '*.apk' -o -name '*-x64-setup.exe' -o -name 'SHA256SUMS.txt' -o -name 'AUTHENTICODE.txt' \) -print)
+          mapfile -t assets < <(find dist -type f \( -name '*.apk' -o -name '*-x64-setup.exe' -o -name '*-SHA256SUMS.txt' -o -name '*-AUTHENTICODE.txt' \) -print)
           if [[ "${#assets[@]}" -eq 0 ]]; then
             echo "No release assets were downloaded" >&2
             exit 1
