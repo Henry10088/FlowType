@@ -8,6 +8,7 @@
 flowtype.exe
 flowtype-injector.exe
 flowtype_tip.dll
+flowtype_tip_x86.dll
 ```
 
 验证记录中的旧命令、旧文件大小、旧哈希和旧环境不能直接用于当前版本发布验收。当前构建、安装和测试方式以根目录 [README](../../README.md)、[CONTRIBUTING.md](../../CONTRIBUTING.md) 和 GitHub Actions 为准。

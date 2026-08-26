@@ -23,12 +23,14 @@ FLOWTYPE_ANDROID_KEY_PASSWORD
 
 1. `flowtype.exe`
 2. `flowtype-injector.exe`
-3. 重新编译 Inno Setup 安装包
-4. `FlowType-<version>-x64-setup.exe`
+3. `flowtype_tip.dll`
+4. `flowtype_tip_x86.dll`
+5. 重新编译 Inno Setup 安装包
+6. `FlowType-<version>-x64-setup.exe`
 
-必须使用 RFC 3161 时间戳服务和 SHA-256 摘要。发布前用 PowerShell `Get-AuthenticodeSignature` 验证三个文件均为 `Valid`，并检查签名主体与项目发布者一致。
+必须使用 RFC 3161 时间戳服务和 SHA-256 摘要。发布前用 PowerShell `Get-AuthenticodeSignature` 验证以上文件均为 `Valid`，并检查签名主体与项目发布者一致。
 
-Windows 安装包内的两个程序应先签名，安装包在最后签名；不能只签最外层安装包。
+Windows 安装包内的两个程序和两个 TIP DLL 应先签名，安装包在最后签名；不能只签最外层安装包。
 
 ## 在线更新清单
 

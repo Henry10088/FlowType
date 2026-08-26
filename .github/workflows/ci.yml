@@ -63,6 +63,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: i686-pc-windows-msvc
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run tests
@@ -73,11 +74,17 @@ jobs:
         shell: pwsh
         run: pwsh -File ..\scripts\verify-version.ps1
       - name: Build Windows release
-        run: cargo build --workspace --release
+        shell: pwsh
+        run: |
+          cargo build --workspace --release
+          cargo build -p flowtype-tip --release --target i686-pc-windows-msvc
+          Copy-Item -LiteralPath "target\i686-pc-windows-msvc\release\flowtype_tip.dll" -Destination "target\release\flowtype_tip_x86.dll" -Force
       - name: Build Inno Setup installer
         shell: pwsh
         run: |
           choco install innosetup --no-progress -y
           $tipHash = (Get-FileHash -LiteralPath "target\release\flowtype_tip.dll" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $tipX86Hash = (Get-FileHash -LiteralPath "target\release\flowtype_tip_x86.dll" -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($tipHash -notmatch '^[0-9a-f]{64}$') { throw "Invalid TIP DLL SHA-256 hash: $tipHash" }
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DBuildDir="..\windows\target\release" /DTipDllHash=$tipHash ..\installer\flowtype.iss
+          if ($tipX86Hash -notmatch '^[0-9a-f]{64}$') { throw "Invalid x86 TIP DLL SHA-256 hash: $tipX86Hash" }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DBuildDir="..\windows\target\release" /DTipDllHash=$tipHash /DTipDllX86Hash=$tipX86Hash ..\installer\flowtype.iss

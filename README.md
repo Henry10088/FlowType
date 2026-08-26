@@ -97,7 +97,10 @@ cd windows
 cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+rustup target add i686-pc-windows-msvc
 cargo build --workspace --release
+cargo build -p flowtype-tip --release --target i686-pc-windows-msvc
+Copy-Item .\target\i686-pc-windows-msvc\release\flowtype_tip.dll .\target\release\flowtype_tip_x86.dll -Force
 ```
 
 Release 文件位于 `windows/target/release/`，主要文件为：
@@ -106,6 +109,7 @@ Release 文件位于 `windows/target/release/`，主要文件为：
 flowtype.exe
 flowtype-injector.exe
 flowtype_tip.dll
+flowtype_tip_x86.dll
 ```
 
 ### Windows 安装包
@@ -114,9 +118,11 @@ flowtype_tip.dll
 
 ```powershell
 $tipHash = (Get-FileHash .\windows\target\release\flowtype_tip.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+$tipX86Hash = (Get-FileHash .\windows\target\release\flowtype_tip_x86.dll -Algorithm SHA256).Hash.ToLowerInvariant()
 & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" `
   /DBuildDir="..\windows\target\release" `
   /DTipDllHash=$tipHash `
+  /DTipDllX86Hash=$tipX86Hash `
   installer/flowtype.iss
 ```
 

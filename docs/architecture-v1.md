@@ -416,7 +416,7 @@ Windows 只持久化：
 V1 使用 Inno Setup：
 
 1. 申请一次安装级 UAC。
-2. 安装两个 Rust 可执行文件和一个 TSF DLL 到 `Program Files`，通过 `regsvr32` 注册 Speech Text Service。
+2. 安装两个 Rust 可执行文件和 x64/x86 TSF DLL 到 `Program Files`，分别通过对应位数的 `regsvr32` 注册 Speech Text Service；覆盖升级先注销所有历史 TIP DLL，卸载后清除两种注册表视图和当前用户 Profile。
 3. 为普通主程序创建当前用户登录启动项。
 4. 为高权限注入助手创建最高权限计划任务。
 5. 创建远端范围为 `LocalSubnet` 的入站防火墙规则。

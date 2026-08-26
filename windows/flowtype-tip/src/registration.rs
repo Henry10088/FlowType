@@ -9,8 +9,8 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
-    RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW,
 };
 use windows::Win32::UI::TextServices::{
     CLSID_TF_CategoryMgr, CLSID_TF_InputProcessorProfiles, GUID_TFCAT_TIP_KEYBOARD,
@@ -22,6 +22,7 @@ use windows::core::{HRESULT, PCWSTR, Result};
 use crate::{CLSID_FLOWTYPE_TIP, FLOWTYPE_LANG_ID, GUID_FLOWTYPE_PROFILE, module_instance};
 
 const CLSID_TEXT: &str = "{9A50B266-9E86-4FF4-871B-8D47AD8C658B}";
+const KEYBOARD_CATEGORY_TEXT: &str = "{34745C63-B2F0-4784-8B67-5E12C8701A31}";
 const DESCRIPTION: &str = "FlowType 手机语音输入";
 
 pub fn register() -> Result<()> {
@@ -87,6 +88,7 @@ fn register_tsf_profile() -> Result<()> {
             &CLSID_FLOWTYPE_TIP,
         )
     };
+    remove_keyboard_category_registry()?;
     for category in [
         GUID_TFCAT_TIP_SPEECH,
         GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
@@ -100,30 +102,56 @@ fn register_tsf_profile() -> Result<()> {
 }
 
 fn unregister_tsf_profile() -> Result<()> {
-    let _com = ComScope::initialize()?;
-    let categories: ITfCategoryMgr =
-        unsafe { CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)? };
-    for category in [
-        GUID_TFCAT_TIP_SPEECH,
-        GUID_TFCAT_TIP_KEYBOARD,
-        GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
-        GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
-    ] {
+    let _com = ComScope::initialize().ok();
+    if let Ok(categories) = unsafe {
+        CoCreateInstance::<_, ITfCategoryMgr>(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)
+    } {
+        for category in [
+            GUID_TFCAT_TIP_SPEECH,
+            GUID_TFCAT_TIP_KEYBOARD,
+            GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+            GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+        ] {
+            let _ = unsafe {
+                categories.UnregisterCategory(&CLSID_FLOWTYPE_TIP, &category, &CLSID_FLOWTYPE_TIP)
+            };
+        }
+    }
+    if let Ok(profiles) = unsafe {
+        CoCreateInstance::<_, ITfInputProcessorProfileMgr>(
+            &CLSID_TF_InputProcessorProfiles,
+            None,
+            CLSCTX_INPROC_SERVER,
+        )
+    } {
         let _ = unsafe {
-            categories.UnregisterCategory(&CLSID_FLOWTYPE_TIP, &category, &CLSID_FLOWTYPE_TIP)
+            profiles.UnregisterProfile(
+                &CLSID_FLOWTYPE_TIP,
+                FLOWTYPE_LANG_ID,
+                &GUID_FLOWTYPE_PROFILE,
+                0,
+            )
         };
     }
-    let profiles: ITfInputProcessorProfileMgr =
-        unsafe { CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)? };
-    let _ = unsafe {
-        profiles.UnregisterProfile(
-            &CLSID_FLOWTYPE_TIP,
-            FLOWTYPE_LANG_ID,
-            &GUID_FLOWTYPE_PROFILE,
-            0,
-        )
-    };
-    Ok(())
+    remove_tip_registry()
+}
+
+fn remove_keyboard_category_registry() -> Result<()> {
+    let tip_root = format!(r"Software\Microsoft\CTF\TIP\{CLSID_TEXT}");
+    delete_registry_tree(
+        HKEY_LOCAL_MACHINE,
+        &format!(r"{tip_root}\Category\Category\{KEYBOARD_CATEGORY_TEXT}"),
+    )?;
+    delete_registry_tree(
+        HKEY_LOCAL_MACHINE,
+        &format!(r"{tip_root}\Category\Item\{CLSID_TEXT}\{KEYBOARD_CATEGORY_TEXT}"),
+    )
+}
+
+fn remove_tip_registry() -> Result<()> {
+    let tip_root = format!(r"Software\Microsoft\CTF\TIP\{CLSID_TEXT}");
+    delete_registry_tree(HKEY_LOCAL_MACHINE, &tip_root)?;
+    delete_registry_tree(HKEY_CURRENT_USER, &tip_root)
 }
 
 fn module_path() -> Result<String> {
@@ -177,6 +205,16 @@ fn set_registry_string(path: &str, name: Option<&str>, value: &str) -> Result<()
     };
     let _ = unsafe { RegCloseKey(key) };
     if status == ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(win32_error(status.0))
+    }
+}
+
+fn delete_registry_tree(root: HKEY, path: &str) -> Result<()> {
+    let key = wide(path);
+    let status = unsafe { RegDeleteTreeW(root, PCWSTR(key.as_ptr())) };
+    if status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND {
         Ok(())
     } else {
         Err(win32_error(status.0))

@@ -11,6 +11,11 @@
 #endif
 #define TipDllSourceName "flowtype_tip.dll"
 #define TipDllName "flowtype_tip-" + TipDllHash + ".dll"
+#ifndef TipDllX86Hash
+#define TipDllX86Hash "dev"
+#endif
+#define TipDllX86SourceName "flowtype_tip_x86.dll"
+#define TipDllX86Name "flowtype_tip_x86-" + TipDllX86Hash + ".dll"
 #define TaskName "FlowType Injector"
 #define FirewallRule "FlowType Local Network"
 
@@ -33,12 +38,14 @@ WizardStyle=modern
 CloseApplications=no
 RestartApplications=no
 ChangesEnvironment=no
+DisableDirPage=yes
 DisableProgramGroupPage=yes
 
 [Files]
 Source: "{#BuildDir}\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\{#InjectorExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\{#TipDllSourceName}"; DestDir: "{app}"; DestName: "{#TipDllName}"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#BuildDir}\{#TipDllX86SourceName}"; DestDir: "{app}"; DestName: "{#TipDllX86Name}"; Flags: ignoreversion onlyifdoesntexist
 
 [InstallDelete]
 Type: files; Name: "{app}\flowtype-app.exe"
@@ -48,9 +55,6 @@ Type: files; Name: "{app}\flowtype-injector.exe"
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Parameters: "--show"
 
 [Run]
-Filename: "{sys}\regsvr32.exe"; Parameters: "/s ""{app}\{#TipDllName}"""; Flags: runhidden waituntilterminated
-Filename: "{sys}\schtasks.exe"; Parameters: "/Create /F /TN ""{#TaskName}"" /SC ONLOGON /RL HIGHEST /IT /TR """"{app}\{#InjectorExeName}"""""; Flags: runhidden waituntilterminated
-Filename: "{sys}\schtasks.exe"; Parameters: "/Run /TN ""{#TaskName}"""; Flags: runhidden waituntilterminated
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FirewallRule}"""; Flags: runhidden waituntilterminated
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{#FirewallRule}"" dir=in action=allow protocol=TCP localport=32187 program=""{app}\{#AppExeName}"" profile=any"; Flags: runhidden waituntilterminated
 Filename: "{app}\{#AppExeName}"; Parameters: "--enable-auto-start"; Flags: runhidden waituntilterminated runasoriginaluser
@@ -58,31 +62,133 @@ Filename: "{app}\{#AppExeName}"; Parameters: "--show"; Description: "运行{#App
 
 [UninstallRun]
 Filename: "{sys}\schtasks.exe"; Parameters: "/End /TN ""{#TaskName}"""; Flags: runhidden waituntilterminated; RunOnceId: "StopInjector"
-Filename: "{sys}\regsvr32.exe"; Parameters: "/u /s ""{app}\{#TipDllName}"""; Flags: runhidden waituntilterminated; RunOnceId: "UnregisterTip"
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /F /TN ""{#TaskName}"""; Flags: runhidden waituntilterminated; RunOnceId: "DeleteInjectorTask"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FirewallRule}"""; Flags: runhidden waituntilterminated; RunOnceId: "DeleteFirewallRule"
 
 [Code]
-procedure CleanupObsoleteTipDlls();
+procedure DeleteKeyboardCategory(RootKey: Integer);
+var
+  TipRoot: String;
+  KeyboardCategory: String;
+  TipClsid: String;
+begin
+  TipClsid := '{9A50B266-9E86-4FF4-871B-8D47AD8C658B}';
+  KeyboardCategory := '{34745C63-B2F0-4784-8B67-5E12C8701A31}';
+  TipRoot := 'Software\Microsoft\CTF\TIP\' + TipClsid;
+  RegDeleteKeyIncludingSubkeys(RootKey,
+    TipRoot + '\Category\Category\' + KeyboardCategory);
+  RegDeleteKeyIncludingSubkeys(RootKey,
+    TipRoot + '\Category\Item\' + TipClsid + '\' + KeyboardCategory);
+end;
+
+procedure CleanupKeyboardCategoryRegistrations();
+begin
+  DeleteKeyboardCategory(HKEY_LOCAL_MACHINE_64);
+  DeleteKeyboardCategory(HKEY_LOCAL_MACHINE_32);
+end;
+
+procedure CleanupAllTipRegistrations();
+var
+  TipClsid: String;
+  TipRoot: String;
+  ClassRoot: String;
+begin
+  TipClsid := '{9A50B266-9E86-4FF4-871B-8D47AD8C658B}';
+  TipRoot := 'Software\Microsoft\CTF\TIP\' + TipClsid;
+  ClassRoot := 'Software\Classes\CLSID\' + TipClsid;
+  RegDeleteKeyIncludingSubkeys(HKEY_LOCAL_MACHINE_64, TipRoot);
+  RegDeleteKeyIncludingSubkeys(HKEY_LOCAL_MACHINE_32, TipRoot);
+  RegDeleteKeyIncludingSubkeys(HKEY_LOCAL_MACHINE_64, ClassRoot);
+  RegDeleteKeyIncludingSubkeys(HKEY_LOCAL_MACHINE_32, ClassRoot);
+  RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER, TipRoot);
+end;
+
+procedure UnregisterInstalledTipDlls();
 var
   FindRec: TFindRec;
   Candidate: String;
+  Regsvr32: String;
+  ResultCode: Integer;
 begin
-  { A TSF host may still have an older TIP DLL loaded. Never schedule a reboot
-    for cleanup; an occupied file is harmless and will be retried next update. }
-  if FindFirst(ExpandConstant('{app}\flowtype_tip-*.dll'), FindRec) then
+  if FindFirst(ExpandConstant('{app}\flowtype_tip*.dll'), FindRec) then
   begin
     try
       repeat
         Candidate := AddBackslash(ExpandConstant('{app}')) + FindRec.Name;
-        if CompareText(FindRec.Name, '{#TipDllName}') <> 0 then
-          DeleteFile(Candidate);
+        if Pos('flowtype_tip_x86', Lowercase(FindRec.Name)) = 1 then
+          Regsvr32 := ExpandConstant('{syswow64}\regsvr32.exe')
+        else
+          Regsvr32 := ExpandConstant('{sys}\regsvr32.exe');
+        Exec(Regsvr32, '/u /s "' + Candidate + '"', '', SW_HIDE,
+          ewWaitUntilTerminated, ResultCode);
       until not FindNext(FindRec);
     finally
       FindClose(FindRec);
     end;
   end;
-  DeleteFile(ExpandConstant('{app}\flowtype_tip.dll'));
+end;
+
+procedure CleanupTipDlls(KeepCurrent: Boolean);
+var
+  FindRec: TFindRec;
+  Candidate: String;
+  Keep: Boolean;
+begin
+  { A TSF host may still have an older TIP DLL loaded. Never schedule a reboot
+    for cleanup; an occupied but unregistered file is harmless. }
+  if FindFirst(ExpandConstant('{app}\flowtype_tip*.dll'), FindRec) then
+  begin
+    try
+      repeat
+        Keep := KeepCurrent and
+          ((CompareText(FindRec.Name, '{#TipDllName}') = 0) or
+           (CompareText(FindRec.Name, '{#TipDllX86Name}') = 0));
+        if not Keep then
+        begin
+          Candidate := AddBackslash(ExpandConstant('{app}')) + FindRec.Name;
+          DeleteFile(Candidate);
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+end;
+
+procedure RegisterCurrentTipDlls();
+var
+  ResultCode: Integer;
+  TipX86: String;
+  TipX64: String;
+begin
+  TipX86 := ExpandConstant('{app}\{#TipDllX86Name}');
+  TipX64 := ExpandConstant('{app}\{#TipDllName}');
+  if (not Exec(ExpandConstant('{syswow64}\regsvr32.exe'),
+      '/s "' + TipX86 + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or
+      (ResultCode <> 0) then
+    RaiseException('Failed to register the FlowType x86 text service.');
+  if (not Exec(ExpandConstant('{sys}\regsvr32.exe'),
+      '/s "' + TipX64 + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or
+      (ResultCode <> 0) then
+  begin
+    CleanupAllTipRegistrations();
+    RaiseException('Failed to register the FlowType x64 text service.');
+  end;
+end;
+
+procedure ConfigureInjectorTask();
+var
+  ResultCode: Integer;
+  Parameters: String;
+begin
+  Parameters := '/Create /F /TN "{#TaskName}" /SC ONLOGON /RL HIGHEST /IT ' +
+    '/TR %ProgramFiles%\FlowType\{#InjectorExeName}';
+  if (not Exec(ExpandConstant('{sys}\schtasks.exe'), Parameters, '', SW_HIDE,
+      ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
+    RaiseException('Failed to create the FlowType Injector task.');
+  if (not Exec(ExpandConstant('{sys}\schtasks.exe'), '/Run /TN "{#TaskName}"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
+    RaiseException('Failed to start the FlowType Injector task.');
 end;
 
 function InitializeSetup(): Boolean;
@@ -98,10 +204,22 @@ begin
   Result := True;
 end;
 
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  UnregisterInstalledTipDlls();
+  CleanupKeyboardCategoryRegistrations();
+  Result := '';
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
-    CleanupObsoleteTipDlls();
+  begin
+    RegisterCurrentTipDlls();
+    CleanupKeyboardCategoryRegistrations();
+    ConfigureInjectorTask();
+    CleanupTipDlls(True);
+  end;
 end;
 
 function InitializeUninstall(): Boolean;
@@ -118,22 +236,15 @@ begin
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-var
-  FindRec: TFindRec;
-  Candidate: String;
 begin
-  if CurUninstallStep <> usPostUninstall then
-    Exit;
-  if FindFirst(AddBackslash(ExpandConstant('{app}')) + 'flowtype_tip-*.dll', FindRec) then
+  if CurUninstallStep = usUninstall then
   begin
-    try
-      repeat
-        Candidate := AddBackslash(ExpandConstant('{app}')) + FindRec.Name;
-        DeleteFile(Candidate);
-      until not FindNext(FindRec);
-    finally
-      FindClose(FindRec);
-    end;
+    UnregisterInstalledTipDlls();
+    CleanupAllTipRegistrations();
+  end
+  else if CurUninstallStep = usPostUninstall then
+  begin
+    CleanupAllTipRegistrations();
+    CleanupTipDlls(False);
   end;
-  DeleteFile(ExpandConstant('{app}\flowtype_tip.dll'));
 end;

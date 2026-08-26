@@ -1,5 +1,12 @@
 # 已知问题与回归记录
 
+## WI-2026-08-27-01：升级或卸载后残留 FlowType 输入法条目
+
+- **现象**：Windows 输入切换界面出现本不应显示的 FlowType 输入法；覆盖升级或卸载后，旧 TIP DLL 和注册表项仍可能保留。
+- **根因**：按内容哈希保留 TIP DLL 的升级方案只处理当前 x64 文件名，没有枚举早期版本号命名和 x86 DLL；旧版注册过的 `GUID_TFCAT_TIP_KEYBOARD` 类别也没有在安装器层强制清除。
+- **修复**：TIP 注册只保留 `GUID_TFCAT_TIP_SPEECH`，安装前枚举并注销所有历史 x64/x86 DLL，覆盖升级后仅注册当前两种位数的内容哈希 DLL；已被应用加载的旧文件不强制要求重启删除。卸载时再次注销全部历史 DLL，并清除 x64、x86 和当前用户的 FlowType TSF 注册。
+- **回归用例**：从包含 `flowtype_tip_0_1_*.dll`、`flowtype_tip_x86_0_1_*.dll` 和键盘类别残项的旧安装覆盖升级；确认 `Win + Space` 不显示 FlowType，x64/x86 Speech 类别正常，随后卸载并确认两种注册表视图和当前用户 Profile 均不存在 FlowType CLSID。
+
 ## WI-2026-08-24-09：Windows IoT 缺少 MSVC 运行库
 
 - **现象**：安装程序完成后启动 `flowtype.exe` 报找不到 `VCRUNTIME140.dll`。
