@@ -340,20 +340,20 @@ impl UiContext {
         self.update_repository = self.owner_button(
             "GitHub 仓库",
             ID_UPDATE_REPOSITORY,
-            220,
+            370,
             476,
-            120,
+            112,
             32,
-            ButtonKind::Text,
+            ButtonKind::Secondary,
         );
         self.update_history = self.owner_button(
             "查看更新",
             ID_UPDATE_HISTORY,
-            348,
+            490,
             476,
-            94,
+            112,
             32,
-            ButtonKind::Text,
+            ButtonKind::Secondary,
         );
         self.update_action = self.owner_button(
             "检查更新",
