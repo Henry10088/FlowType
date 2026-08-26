@@ -174,7 +174,7 @@ impl UpdateManager {
             .unwrap_or_else(|_| UpdateSnapshot {
                 message: "更新状态不可用".to_owned(),
                 action: UpdateAction::Check,
-                action_label: "重试".to_owned(),
+                action_label: "重试检查更新".to_owned(),
                 progress: None,
                 version: None,
             })
@@ -305,7 +305,7 @@ fn update_worker(
                             );
                             active = Some(download);
                         }
-                        Err(error) => set_failure(
+                        Err(error) => set_download_failure(
                             &shared,
                             &ui_hwnd,
                             &manifest,
@@ -349,7 +349,7 @@ fn update_worker(
                     persisted.job_id = None;
                     persisted.verified = false;
                     let _ = save_persisted(&persisted);
-                    set_failure(&shared, &ui_hwnd, &manifest, &message);
+                    set_download_failure(&shared, &ui_hwnd, &manifest, &message);
                 }
             }
         }
@@ -435,7 +435,7 @@ fn check_for_update(
                 shared,
                 hwnd,
                 &placeholder,
-                &format!("检查更新失败：{error}"),
+                &format!("检查更新失败：{}", friendly_update_error(&error)),
             );
         }
     }
@@ -815,13 +815,46 @@ fn set_failure(
         UpdateSnapshot {
             message: message.to_owned(),
             action: UpdateAction::Check,
-            action_label: "重试".to_owned(),
+            action_label: "重试检查更新".to_owned(),
             progress: None,
             version: None,
         },
         None,
         None,
     );
+}
+
+fn set_download_failure(
+    shared: &Arc<Mutex<SharedUpdate>>,
+    hwnd: &Arc<AtomicIsize>,
+    manifest: &UpdateManifest,
+    message: &str,
+) {
+    set_snapshot(
+        shared,
+        hwnd,
+        UpdateSnapshot {
+            message: message.to_owned(),
+            action: UpdateAction::Download,
+            action_label: "重试下载".to_owned(),
+            progress: None,
+            version: Some(manifest.version.clone()),
+        },
+        Some(manifest.clone()),
+        None,
+    );
+}
+
+fn friendly_update_error(error: &str) -> String {
+    if error.contains("12002") {
+        "连接 GitHub 超时，请检查网络后重试".to_owned()
+    } else if error.contains("12007") {
+        "无法解析 GitHub 地址，请检查网络后重试".to_owned()
+    } else if error.contains("12029") || error.contains("12030") {
+        "无法连接 GitHub，请检查网络后重试".to_owned()
+    } else {
+        error.to_owned()
+    }
 }
 
 fn set_snapshot(
