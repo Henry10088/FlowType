@@ -19,8 +19,10 @@ $cargoVersion = Read-RequiredMatch "windows/Cargo.toml" '^version\s*=\s*"([^" ]+
 $androidVersion = Read-RequiredMatch "android/app/build.gradle.kts" '^\s*versionName\s*=\s*"([^" ]+)"' "Android versionName"
 $androidCode = Read-RequiredMatch "android/app/build.gradle.kts" '^\s*versionCode\s*=\s*(\d+)' "Android versionCode"
 $androidLabelVersion = Read-RequiredMatch "android/app/src/main/res/values/strings.xml" 'name="version_label">[^0-9]*([0-9]+\.[0-9]+\.[0-9]+)' "Android displayed version"
+$androidZhLabelVersion = Read-RequiredMatch "android/app/src/main/res/values-zh/strings.xml" 'name="version_label">[^0-9]*([0-9]+\.[0-9]+\.[0-9]+)' "Android Chinese displayed version"
 $installerVersion = Read-RequiredMatch "installer/flowtype.iss" '^#define AppVersion "([^" ]+)"' "installer version"
 $readmeVersion = Read-RequiredMatch "README.md" '^.*?([0-9]+\.[0-9]+\.[0-9]+)' "README version"
+$readmeZhVersion = Read-RequiredMatch "README.zh-CN.md" '^.*?([0-9]+\.[0-9]+\.[0-9]+)' "Chinese README version"
 $releaseDocVersion = Read-RequiredMatch "docs/release-versioning.md" '^.{0,10}([0-9]+\.[0-9]+\.[0-9]+).*Android' "release document version"
 
 $latestTag = (& git -C $root tag --list 'v[0-9]*' --sort=-version:refname | Select-Object -First 1).Trim()
@@ -35,8 +37,10 @@ $versions = @{
     "Cargo" = $cargoVersion
     "Android" = $androidVersion
     "Android displayed" = $androidLabelVersion
+    "Android Chinese displayed" = $androidZhLabelVersion
     "Installer" = $installerVersion
     "README" = $readmeVersion
+    "Chinese README" = $readmeZhVersion
     "Release document" = $releaseDocVersion
 }
 $mismatches = $versions.GetEnumerator() | Where-Object { $_.Value -ne $cargoVersion }

@@ -1,40 +1,45 @@
-# 说写（FlowType）
+# FlowType
 
-FlowType 把 Android 手机上的实时文本输入同步到 Windows 当前光标位置。手机使用系统当前输入法，适合语音输入，也支持普通键盘输入；Windows 端通过输入服务把中文 Unicode 文本写入当前前台应用。
+English | [简体中文](README.zh-CN.md)
 
-## 当前版本
+> Speak into your phone. Your PC does the typing.
 
-当前版本为 `0.2.0`，仍属于 V1 内部发布阶段。V1 的数据路径是：
+Use your phone's voice input to type on Windows in real time. FlowType uses the current Android input method, so voice typing and the regular keyboard both work. The Windows app sends the text to the active application.
+
+## Current Version
+
+The current version is `0.2.0` and remains an internal V1 release. Its data path is:
 
 ```text
-Android 系统输入法 -> 局域网 WSS -> Windows 当前输入位置
+Android input method -> local WSS connection -> Windows input location
 ```
 
-同步发送完整文本和递增序号，Windows 根据前后状态计算差异，因此可以处理语音识别中的修正、删除和替换。
+Android sends complete text snapshots with increasing sequence numbers. Windows calculates the difference between snapshots, which lets it handle corrections, deletions, and replacements made by voice recognition.
 
-## 功能范围
+## Features
 
-- Android 多行输入框，直接使用手机当前系统输入法
-- Android 与多台 Windows 电脑绑定、手工切换或按用户选择的候选电脑自动切换
-- 二维码绑定，绑定信息默认长期保存
-- WSS 加密传输和设备身份认证
-- 自动重连；网络中断时保留最新完整草稿
-- Windows 当前光标文本注入，优先覆盖中文 Unicode、VS Code、Codex、浏览器和终端
-- Windows 半透明悬浮球：颜色表示连接状态，单击切换手机当前电脑，双击打开主页面，按住拖动位置
-- 已绑定电脑保持轻量控制连接，橙色电脑的悬浮球单击也可以通知手机切换；控制连接不传输输入内容
-- Android 历史记录、复制、作为新输入和删除
-- 可选悬浮输入球和悬浮输入面板
-- 单张照片或图库图片发送到 Windows 剪贴板，可选择原图
+- Multiline Android input using the current system input method
+- Pair and switch between multiple Windows computers
+- QR-code pairing with persistent device bindings
+- Encrypted WSS transport and device authentication
+- Automatic reconnection while retaining the latest complete draft
+- Unicode text input for VS Code, Codex, browsers, terminals, and other Windows apps
+- A movable Windows floating ball for connection status and quick computer switching
+- Android input history with copy, reuse, and delete actions
+- Optional Android floating input ball and panel
+- Send one camera or gallery image to the Windows clipboard, with optional original quality
+- Chinese and English interfaces selected from the system language
+- Background update checks, resumable downloads, package verification, and user-confirmed installation
 
-公网中转、锁屏状态下持续语音输入、多张图片和自动发送 Enter 不在 V1 范围内。
+Public relays, continuous voice input while the phone is locked, multiple-image transfers, and automatic Enter input are outside the V1 scope.
 
-## 安装
+## Installation
 
 ### Windows
 
-下载 Release 中的 `FlowType-<version>-x64-setup.exe`，运行安装程序并按提示授予管理员权限。安装程序会注册 FlowType 输入服务、配置开机启动和局域网防火墙规则。
+Download `FlowType-<version>-x64-setup.exe` from [Releases](https://github.com/Henry10088/FlowType/releases), run it, and approve the administrator prompt. The installer registers the FlowType input service, enables startup with Windows, and adds the local-network firewall rule.
 
-安装后可从开始菜单启动，也可以运行安装目录中的：
+After installation, launch FlowType from the Start menu or run:
 
 ```text
 flowtype.exe --show
@@ -42,34 +47,34 @@ flowtype.exe --show
 
 ### Android
 
-下载 Release 中的 `FlowType-<version>-android-release.apk`，在 Android 设置中允许安装此来源的应用后安装。首次运行时扫描 Windows 应用显示的二维码，随后选择电脑并开始输入。
+Download `FlowType-<version>-android-release.apk` from [Releases](https://github.com/Henry10088/FlowType/releases). Allow installation from that source in Android settings, then install the APK. On first launch, scan the QR code shown by the Windows app.
 
-这是 V1 内测阶段的包名迁移版本：Android applicationId 为 `app.flowtype`。从旧包安装的用户需要先卸载旧版本，再安装新 APK，并重新扫描二维码绑定电脑；旧版本不会与新版本互通。
+The Android application ID is `app.flowtype`. Users migrating from the older package must uninstall it, install the current APK, and pair their computers again.
 
-正式 APK 使用发布签名；本地未配置签名环境时，Gradle 只生成 unsigned 内部构建包。
+Release APKs are signed. Without local signing credentials, Gradle produces an unsigned internal build that must not be distributed as a release.
 
-## 环境要求
-
-### Android 构建
-
-- JDK 17
-- Android SDK Platform 36
-- Android SDK Build Tools 和 Platform Tools
-- Android Gradle Wrapper 8.11.1（仓库已包含）
-- Android 最低版本 API 29
-
-### Windows 构建
-
-- Windows 10/11 x64
-- Visual Studio Build Tools 的 MSVC C++ 工具链和 Windows SDK
-- Rust stable MSVC 工具链
-- Inno Setup 6（仅构建安装程序时需要）
-
-## 本地构建
+## Requirements
 
 ### Android
 
-在仓库根目录执行：
+- JDK 17
+- Android SDK Platform 36
+- Android SDK Build Tools and Platform Tools
+- Android Gradle Wrapper 8.11.1, included in the repository
+- Android API 29 or later
+
+### Windows
+
+- Windows 10 or 11 x64
+- Visual Studio Build Tools with the MSVC C++ toolchain and Windows SDK
+- Stable Rust MSVC toolchain
+- Inno Setup 6 for building the installer
+
+## Local Build
+
+### Android
+
+From the repository root:
 
 ```powershell
 cd android
@@ -77,9 +82,7 @@ cd android
 .\gradlew.bat packageFlowTypeRelease
 ```
 
-输出位于 `android/app/build/outputs/apk/release/FlowType-<version>-android-release.apk`。如果没有配置签名环境，任务会明确输出 `FlowType-<version>-android-release-unsigned.apk`；该文件只用于内部验证，不能直接作为正式安装包分发。
-
-配置正式签名时需要同时设置以下环境变量：
+The output is written to `android/app/build/outputs/apk/release/`. Configure all of the following variables to create a signed release APK:
 
 ```text
 FLOWTYPE_ANDROID_KEYSTORE
@@ -88,7 +91,7 @@ FLOWTYPE_ANDROID_KEY_ALIAS
 FLOWTYPE_ANDROID_KEY_PASSWORD
 ```
 
-签名材料不应提交到 Git。
+Never commit signing material.
 
 ### Windows
 
@@ -103,7 +106,7 @@ cargo build -p flowtype-tip --release --target i686-pc-windows-msvc
 Copy-Item .\target\i686-pc-windows-msvc\release\flowtype_tip.dll .\target\release\flowtype_tip_x86.dll -Force
 ```
 
-Release 文件位于 `windows/target/release/`，主要文件为：
+The main release files are:
 
 ```text
 flowtype.exe
@@ -112,9 +115,9 @@ flowtype_tip.dll
 flowtype_tip_x86.dll
 ```
 
-### Windows 安装包
+### Windows Installer
 
-安装 Inno Setup 6 后，在 `windows/` 目录完成 Release 构建，然后从仓库根目录执行：
+After building the Windows release files, run Inno Setup from the repository root:
 
 ```powershell
 $tipHash = (Get-FileHash .\windows\target\release\flowtype_tip.dll -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -126,49 +129,48 @@ $tipX86Hash = (Get-FileHash .\windows\target\release\flowtype_tip_x86.dll -Algor
   installer/flowtype.iss
 ```
 
-安装包输出到 `installer/output/`。便携包只需解压后运行 `flowtype.exe`，但不会自动注册输入服务、开机任务或防火墙规则；普通用户应优先使用安装程序。
+The installer is written to `installer/output/`.
 
-## 项目结构
+## Repository Layout
 
 ```text
-android/              Android 应用、会话状态和网络客户端
-windows/flowtype-core/ 协议、序号状态机和 Unicode 差异算法
-windows/flowtype-app/  Windows 主程序、WSS 服务和 Win32 UI
-windows/flowtype-injector/ 高权限输入服务和 TSF 注入
-windows/flowtype-tip/ Windows 文本服务组件
-protocol/v1/           协议 fixture
-docs/                  需求、架构、开发计划和验证记录
-installer/             Inno Setup 安装程序脚本
+android/                 Android app, session state, and network client
+windows/flowtype-core/   Protocol, sequence state, and Unicode diff logic
+windows/flowtype-app/    Windows app, WSS server, and Win32 UI
+windows/flowtype-injector/ Elevated input service and TSF injection
+windows/flowtype-tip/    Windows Text Services component
+protocol/v1/             Protocol fixtures
+docs/                    Requirements, architecture, plans, and validation notes
+installer/               Inno Setup installer
 ```
 
-UI 层边界见 [客户端 UI 架构](docs/ui-architecture.md)。核心需求和技术决策见 [V1 产品需求基线](docs/requirements-v1.md) 与 [V1 技术方案](docs/architecture-v1.md)。
+See [UI architecture](docs/ui-architecture.md), [V1 requirements](docs/requirements-v1.md), and [V1 architecture](docs/architecture-v1.md) for the current technical baseline.
 
-## 已知限制
+## Known Limitations
 
-- 仅支持同一局域网或可互通的 Tailscale 网络，不提供公网中转
-- Windows 注入依赖目标应用当前仍在前台；切换窗口后不会擅自写入新窗口
-- 不同输入法和厂商 Android 系统对悬浮窗、后台保活和相机权限的行为可能不同
-- 锁屏状态下是否能持续使用语音输入取决于 Android 厂商和输入法，V1 不保证
-- Windows 输入服务需要管理员权限；未安装或被安全软件阻止时，手机会显示输入服务不可用
-- 当前只支持一次发送一张图片；原图可能较大，受 Windows 接收端大小限制
-- 不自动发送 Enter，完成操作不会额外修改目标文本
-- GitHub Actions 自动构建、签名清单和 Release 上传已经实现；Windows 与 Android 客户端支持后台检查、可恢复下载、安装前复核和用户确认安装，详见 [在线更新设计](docs/update-design-v1.md)
-- 发布前运行 `scripts\verify-version.ps1`，确认 Android、Windows、安装包和文档版本一致
+- Both devices must be on the same local network or a mutually reachable Tailscale network.
+- Windows only updates the original foreground target; it does not take over a newly focused window.
+- Floating windows, background behavior, and camera permissions vary across Android vendors and input methods.
+- Continuous voice input while the phone is locked is not guaranteed.
+- The Windows input service requires administrator permission to install and repair.
+- Image transfer currently supports one image at a time.
+- FlowType does not send Enter automatically, and finishing an input does not alter the target text.
+- Run `scripts\verify-version.ps1` before a release to verify that Android, Windows, installer, and documentation versions agree.
 
-## 安全与隐私
+## Security and Privacy
 
-正文通过 TLS 传输，手机和电脑使用设备身份认证；Android 密钥保存在 Keystore，Windows 密钥和绑定数据使用当前用户保护的存储。正文历史只保存在 Android 本地加密存储中，Windows 不建立已完成正文历史。
+Text is transferred over TLS with device authentication. Android keys are stored in Android Keystore. Windows keys and pairing data are protected for the current Windows user. Completed text history remains on Android; Windows does not create its own history of completed text.
 
-安全问题请阅读 [SECURITY.md](SECURITY.md)，不要在公开 Issue 中发布密钥、配对二维码、输入正文或网络抓包。
+Read [SECURITY.md](SECURITY.md) before reporting a vulnerability. Do not post keys, pairing QR codes, input text, or sensitive packet captures in a public issue.
 
-## 参与贡献
+## Contributing
 
-请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。提交改动前至少运行 Android 测试/Lint 和 Windows Rust 测试/Clippy；协议、会话和注入行为变更应补充测试。
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes. Run the Android tests and Lint checks, plus the Windows tests and Clippy checks, before opening a pull request.
 
-## 许可证
+## License
 
-本项目采用 [Apache License 2.0](LICENSE)。第三方依赖仍受各自许可证约束。
+FlowType is licensed under the [Apache License 2.0](LICENSE). Third-party dependencies remain subject to their own licenses.
 
-## 历史验证记录
+## Historical Validation Notes
 
-`docs/validation/` 中的阶段文档是开发过程的历史记录，不是当前发行版的完整兼容性承诺。早期记录中的 `flowtype-app.exe`、`flowtype-injector.exe` 等文件名是历史构建名称；当前 Windows 文件名以 `flowtype.exe`、`flowtype-injector.exe` 和 `flowtype_tip.dll` 为准。详见 [验证记录说明](docs/validation/README.md)。
+Files under `docs/validation/` are development records, not complete compatibility guarantees for the current release. Some older notes use historical executable names. See the [validation notes overview](docs/validation/README.md) for context.
