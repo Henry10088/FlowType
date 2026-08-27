@@ -62,6 +62,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.94.1-x86_64-pc-windows-msvc
           components: rustfmt, clippy
           targets: i686-pc-windows-msvc
       - name: Check formatting

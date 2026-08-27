@@ -15,7 +15,7 @@ FLOWTYPE_ANDROID_KEY_PASSWORD
 
 四项必须同时存在；只配置部分值时构建会立即失败。未配置任何一项时仍可生成明确标记为 unsigned 的内部测试 APK。
 
-发布前使用 Android SDK `apksigner verify --verbose --print-certs` 验证签名，并单独保存证书 SHA-256 指纹。
+发布前使用 Android SDK `apksigner verify --verbose --print-certs` 验证签名，并单独保存证书 SHA-256 指纹。GitHub Actions 会始终验证 APK 签名有效；如需固定发布证书，还可在 `release` Environment Variables 中配置 `FLOWTYPE_ANDROID_CERT_SHA256`，不配置时不会阻断构建。
 
 ## Windows
 
@@ -28,7 +28,7 @@ FLOWTYPE_ANDROID_KEY_PASSWORD
 5. 重新编译 Inno Setup 安装包
 6. `FlowType-<version>-x64-setup.exe`
 
-必须使用 RFC 3161 时间戳服务和 SHA-256 摘要。发布前用 PowerShell `Get-AuthenticodeSignature` 验证以上文件均为 `Valid`，并检查签名主体与项目发布者一致。
+必须使用 RFC 3161 时间戳服务和 SHA-256 摘要。发布前用 PowerShell `Get-AuthenticodeSignature` 验证以上文件均为 `Valid`，并检查签名主体与项目发布者一致。GitHub Actions 会始终验证 Authenticode 签名有效；如需固定发布证书，还可配置 `FLOWTYPE_WINDOWS_CERT_SHA256`，不配置时不会阻断构建。
 
 Windows 安装包内的两个程序和两个 TIP DLL 应先签名，安装包在最后签名；不能只签最外层安装包。
 

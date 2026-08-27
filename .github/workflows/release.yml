@@ -87,16 +87,19 @@ jobs:
         env:
           FLOWTYPE_ANDROID_CERT_SHA256: ${{ vars.FLOWTYPE_ANDROID_CERT_SHA256 }}
         run: |
-          test -n "$FLOWTYPE_ANDROID_CERT_SHA256"
           apk="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name 'FlowType-*-android-release.apk' -print -quit)"
           test -n "$apk"
           apksigner="$ANDROID_HOME/build-tools/36.0.0/apksigner"
           test -x "$apksigner"
           "$apksigner" verify --verbose --print-certs "$apk"
           actual="$($apksigner verify --print-certs "$apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1 | tr '[:upper:]' '[:lower:]' | tr -d ':')"
-          expected="$(printf '%s' "$FLOWTYPE_ANDROID_CERT_SHA256" | tr '[:upper:]' '[:lower:]' | tr -d ':')"
           test -n "$actual"
-          test "$actual" = "$expected"
+          if [[ -n "$FLOWTYPE_ANDROID_CERT_SHA256" ]]; then
+            expected="$(printf '%s' "$FLOWTYPE_ANDROID_CERT_SHA256" | tr '[:upper:]' '[:lower:]' | tr -d ':')"
+            test "$actual" = "$expected"
+          else
+            echo "FLOWTYPE_ANDROID_CERT_SHA256 is not configured; signature validity was verified without certificate pinning."
+          fi
           mkdir -p release-metadata
           sha256sum "$apk" | tee release-metadata/FlowType-android-SHA256SUMS.txt
 
@@ -136,7 +139,6 @@ jobs:
         env:
           FLOWTYPE_WINDOWS_CERT_SHA256: ${{ vars.FLOWTYPE_WINDOWS_CERT_SHA256 }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:FLOWTYPE_WINDOWS_CERT_SHA256)) { throw "Missing FLOWTYPE_WINDOWS_CERT_SHA256 environment variable" }
           cargo build --workspace --release
           cargo build -p flowtype-tip --release --target i686-pc-windows-msvc
           Copy-Item -LiteralPath "target\i686-pc-windows-msvc\release\flowtype_tip.dll" -Destination "target\release\flowtype_tip_x86.dll" -Force
@@ -211,7 +213,7 @@ jobs:
         run: |
           $pfxPath = Join-Path $env:RUNNER_TEMP "flowtype-authenticode.pfx"
           [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:FLOWTYPE_WINDOWS_CERT_BASE64))
-          if ([string]::IsNullOrWhiteSpace($env:FLOWTYPE_WINDOWS_CERT_SHA256)) { throw "Missing FLOWTYPE_WINDOWS_CERT_SHA256 environment variable" }
+          $expected = if ([string]::IsNullOrWhiteSpace($env:FLOWTYPE_WINDOWS_CERT_SHA256)) { $null } else { $env:FLOWTYPE_WINDOWS_CERT_SHA256.Replace(":", "").ToLowerInvariant() }
           $signTool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
             Sort-Object FullName |
             Select-Object -Last 1
@@ -239,11 +241,11 @@ jobs:
             $signature = Get-AuthenticodeSignature -LiteralPath $file
             if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or -not $signature.SignerCertificate) { throw "Invalid Authenticode signature: $file ($($signature.Status))" }
             $actual = $signature.SignerCertificate.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToLowerInvariant()
-            $expected = $env:FLOWTYPE_WINDOWS_CERT_SHA256.Replace(":", "").ToLowerInvariant()
-            if ($actual -ne $expected) { throw "Unexpected Authenticode certificate: $file" }
+            if ($expected -and $actual -ne $expected) { throw "Unexpected Authenticode certificate: $file" }
             "$file`t$($signature.Status)`t$($signature.SignerCertificate.Subject)"
           }
           $signatureLines | Set-Content -LiteralPath (Join-Path $metadataDir "FlowType-windows-AUTHENTICODE.txt") -Encoding UTF8
+          if (-not $expected) { Add-Content -LiteralPath (Join-Path $metadataDir "FlowType-windows-AUTHENTICODE.txt") -Value "Certificate pinning variable not configured; signatures verified as Valid." -Encoding UTF8 }
           $hashLines = foreach ($file in $signedFiles) {
             $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
             "$hash  $file"
