@@ -106,6 +106,7 @@ class MainActivity : ComponentActivity() {
                     FloatingInputService.stop(this)
                 }
             },
+            onChangeLanguage = ::showLanguageChooser,
             onInstallUpdate = ::installUpdate,
             onOpenRepository = ::openGithubRepository,
             onOpenHistory = ::openUpdateHistory,
@@ -144,7 +145,9 @@ class MainActivity : ComponentActivity() {
                 if (page == Screen.INPUT) moveTaskToBack(true) else showInput(focus = false)
             }
         })
-        if (!handlePairingIntent(intent)) {
+        if (savedInstanceState?.getBoolean(STATE_REOPEN_SETTINGS) == true) {
+            showSettings()
+        } else if (!handlePairingIntent(intent)) {
             showInput(focus = intent.action != ACTION_OPEN_IMAGE)
             if (intent.action == ACTION_OPEN_IMAGE) chooseImageSource()
         }
@@ -167,6 +170,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        imeWasVisible = false
+        ignoreImeDismissUntil = SystemClock.uptimeMillis() + INPUT_RESUME_GRACE_MS
         controller.observe(observer)
         FloatingInputService.hide(this)
     }
@@ -181,6 +186,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         controller.ensureConnected()
+        if (page == Screen.INPUT) showKeyboard()
         if (waitingForOverlayPermission) {
             waitingForOverlayPermission = false
             if (Settings.canDrawOverlays(this)) enableFloating() else controller.settings.floatingInput = false
@@ -261,7 +267,6 @@ class MainActivity : ComponentActivity() {
             controller.settings.extraDim = !controller.settings.extraDim
             applyInputWindowSettings()
         }
-        findViewById<ImageButton>(R.id.changeLanguage).setOnClickListener { showLanguageChooser() }
         findViewById<ImageButton>(R.id.openSettings).setOnClickListener { showSettings() }
         findViewById<ImageButton>(R.id.openImage).setOnClickListener { chooseImageSource() }
         renderInput(controller.state())
@@ -271,7 +276,7 @@ class MainActivity : ComponentActivity() {
 
     private fun showLanguageChooser() {
         val languages = LanguageManager.Language.entries
-        val labels = arrayOf("跟随系统 / System", "简体中文", "English")
+        val labels = languages.map(LanguageManager::displayName).toTypedArray()
         val selected = languages.indexOf(LanguageManager.current(this))
         AlertDialog.Builder(this)
             .setTitle(R.string.language)
@@ -285,6 +290,11 @@ class MainActivity : ComponentActivity() {
             }
             .setNegativeButton(R.string.cancel, null)
             .show()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean(STATE_REOPEN_SETTINGS, page == Screen.SETTINGS)
+        super.onSaveInstanceState(outState)
     }
 
     private fun chooseImageSource() {
@@ -545,6 +555,8 @@ class MainActivity : ComponentActivity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     companion object {
+        private const val STATE_REOPEN_SETTINGS = "reopen_settings"
+        private const val INPUT_RESUME_GRACE_MS = 1_000L
         const val ACTION_OPEN_IMAGE = "app.flowtype.OPEN_IMAGE"
         private const val NOTIFICATION_PERMISSION = 10
     }

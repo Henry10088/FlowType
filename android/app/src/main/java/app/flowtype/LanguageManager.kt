@@ -29,6 +29,12 @@ object LanguageManager {
         applyTo(context.applicationContext, language)
     }
 
+    fun displayName(language: Language): String = when (language) {
+        Language.SYSTEM -> "跟随系统 / System"
+        Language.CHINESE -> "简体中文"
+        Language.ENGLISH -> "English"
+    }
+
     fun wrap(context: Context): Context {
         val locale = localeFor(current(context)) ?: return context
         val configuration = Configuration(context.resources.configuration)

@@ -7,8 +7,9 @@ import android.widget.ProgressBar
 import android.widget.Switch
 import android.widget.TextView
 import androidx.activity.ComponentActivity
-import app.flowtype.R
 import app.flowtype.FlowTypeApplication
+import app.flowtype.LanguageManager
+import app.flowtype.R
 import app.flowtype.update.UpdateManager
 
 /** Binds persistent settings to controls; permission orchestration stays in MainActivity. */
@@ -20,6 +21,7 @@ class SettingsScreen(
     private val onBack: () -> Unit,
     private val onOpenComputers: () -> Unit,
     private val onFloatingToggle: (Boolean) -> Unit,
+    private val onChangeLanguage: () -> Unit,
     private val onInstallUpdate: () -> Unit,
     private val onOpenRepository: () -> Unit,
     private val onOpenHistory: () -> Unit,
@@ -39,6 +41,9 @@ class SettingsScreen(
         activity.setContentView(R.layout.page_settings)
         applyInsets()
         activity.findViewById<View>(R.id.back).setOnClickListener { onBack() }
+        activity.findViewById<View>(R.id.languageSetting).setOnClickListener { onChangeLanguage() }
+        activity.findViewById<TextView>(R.id.languageSummary).text =
+            LanguageManager.displayName(LanguageManager.current(activity))
         activity.findViewById<Switch>(R.id.autoSelectComputer).apply {
             isChecked = controller.settings.autoSelectComputer
             isEnabled = !controller.state().activeSession
