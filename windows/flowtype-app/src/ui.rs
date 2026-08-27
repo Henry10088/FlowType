@@ -1674,7 +1674,8 @@ unsafe extern "system" fn window_proc(
         WM_CREATE => {
             ui.rebuild_fonts();
             let (width, height) = ui.client_size();
-            ui.direct2d = Direct2dPainter::new(hwnd, width as u32, height as u32).ok();
+            let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
+            ui.direct2d = Direct2dPainter::new(hwnd, width as u32, height as u32, dpi).ok();
             ui.rebuild_page();
             ui.add_tray();
             if ui.floating_enabled_checked {
@@ -1812,6 +1813,10 @@ unsafe extern "system" fn window_proc(
                     suggested.bottom - suggested.top,
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 );
+            }
+            if let Some(painter) = ui.direct2d.as_ref() {
+                let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
+                painter.set_dpi(dpi);
             }
             ui.rebuild_fonts();
             ui.rebuild_page();

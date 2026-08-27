@@ -33,6 +33,7 @@ impl Direct2dPainter {
         hwnd: windows_sys::Win32::Foundation::HWND,
         width: u32,
         height: u32,
+        dpi: f32,
     ) -> windows::core::Result<Self> {
         unsafe {
             let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
@@ -53,6 +54,7 @@ impl Direct2dPainter {
                 presentOptions: D2D1_PRESENT_OPTIONS_NONE,
             };
             let target = factory.CreateHwndRenderTarget(&properties, &hwnd_properties)?;
+            target.SetDpi(dpi, dpi);
             let write: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let icon = text_format(
                 &write,
@@ -68,6 +70,10 @@ impl Direct2dPainter {
         unsafe {
             let _ = self.target.Resize(&D2D_SIZE_U { width, height });
         }
+    }
+
+    pub(super) fn set_dpi(&self, dpi: f32) {
+        unsafe { self.target.SetDpi(dpi, dpi) };
     }
 
     pub(super) fn paint_phones(
