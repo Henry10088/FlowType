@@ -20,7 +20,7 @@ class UpdateManagerTest {
     @Test(expected = IllegalArgumentException::class)
     fun rejectsAssetOutsideMatchingReleaseTag() {
         UpdateManager.parseAndValidateManifest(
-            manifestJson().replace("download/v0.2.0/", "download/v0.1.9/").toByteArray(),
+            manifestJson().replace("download/android-v0.2.0/", "download/android-v0.1.9/").toByteArray(),
         )
     }
 
@@ -45,20 +45,21 @@ class UpdateManagerTest {
 
     private fun manifestJson() = """
         {
-          "schema": 1,
-          "key_id": "flowtype-update-2026",
+          "schema": 2,
+          "key_id": "flowtype-update-2026-v2",
+          "platform": "android",
           "version": "0.2.0",
           "published_at": "2026-08-26T10:00:00Z",
-          "release_url": "https://github.com/Henry10088/FlowType/releases/tag/v0.2.0",
+          "release_url": "https://github.com/Henry10088/FlowType/releases/tag/android-v0.2.0",
           "notes_zh_cn": "测试更新",
           "windows": {
-            "url": "https://github.com/Henry10088/FlowType/releases/download/v0.2.0/FlowType-0.2.0-x64-setup.exe",
-            "sha256": "${"a".repeat(64)}",
-            "size": 100
+            "url": "",
+            "sha256": "",
+            "size": 0
           },
           "android": {
             "version_code": 20,
-            "url": "https://github.com/Henry10088/FlowType/releases/download/v0.2.0/FlowType-0.2.0-android-release.apk",
+            "url": "https://github.com/Henry10088/FlowType/releases/download/android-v0.2.0/FlowType-0.2.0-android-release.apk",
             "sha256": "${"b".repeat(64)}",
             "size": 200
           }

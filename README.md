@@ -155,7 +155,7 @@ See [UI architecture](docs/ui-architecture.md), [V1 requirements](docs/requireme
 - The Windows input service requires administrator permission to install and repair.
 - Image transfer currently supports one image at a time.
 - FlowType does not send Enter automatically, and finishing an input does not alter the target text.
-- Run `scripts\verify-version.ps1` before a release to verify that Android, Windows, installer, and documentation versions agree.
+- Run `scripts\verify-version.ps1 -Platform Windows` or `-Platform Android` before a release; each platform has its own version and GitHub Release.
 
 ## Security and Privacy
 

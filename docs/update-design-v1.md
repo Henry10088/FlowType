@@ -32,24 +32,23 @@
 | Git 标签触发 GitHub Actions | 已实现 |
 | Android 签名 APK 自动构建与校验 | 已实现 |
 | Windows 程序、TSF DLL 和 Inno Setup 安装包自动构建、签名与校验 | 已实现 |
-| GitHub Release 自动创建并上传两端产物 | 已实现 |
+| GitHub Release 按平台独立创建并上传产物 | 已实现 |
 | `flowtype-update.json`、独立清单签名和草稿完成后发布 | 已实现 |
 | Windows 和 Android 客户端检查、后台下载与安装交互 | 已实现 |
 
 ## 2. 发布与发现拓扑
 
 ```text
-版本标签 vX.Y.Z
+平台版本标签 windows-vX.Y.Z / android-vX.Y.Z
        |
        v
 GitHub Actions
-  |-- 构建并签名 Android APK
-  |-- 构建并签名 Windows 程序和 Inno Setup 安装包
+  |-- 目标平台构建并签名产物
   |-- 生成 SHA-256 和更新清单
   |-- 使用独立更新私钥签署清单
        |
        v
-GitHub Release（先草稿，资产齐全后发布）
+GitHub Release（每个平台独立，先草稿，资产齐全后发布）
        |
        +-- flowtype-update.json
        +-- flowtype-update.json.sig
@@ -61,36 +60,26 @@ GitHub Release（先草稿，资产齐全后发布）
                   +-- Android：OkHttp 检查，DownloadManager 下载
 ```
 
-生产客户端使用不随版本变化的清单地址：
-
-```text
-https://github.com/Henry10088/FlowType/releases/latest/download/flowtype-update.json
-https://github.com/Henry10088/FlowType/releases/latest/download/flowtype-update.json.sig
-```
-
-`releases/latest` 只指向最新的正式 Release，测试标签和 prerelease 不进入普通客户端，也不生成稳定更新清单。客户端读取公开文件，不需要 GitHub Token，也不调用 GitHub API。
+生产客户端先读取 GitHub Releases API，按平台筛选最新的 `windows-vX.Y.Z` 或 `android-vX.Y.Z` 正式 Release，再下载该 Release 中的清单和签名。客户端不需要 GitHub Token。
 
 GitHub Release 必须先创建为草稿，所有安装包、校验文件、清单和签名上传并复核完成后再发布。这样 `latest` 不会短暂指向资产不完整的版本。
 
 ## 3. 更新清单
 
-`flowtype-update.json` 使用 UTF-8、无 BOM 的 JSON。初始 schema 如下：
+`flowtype-update.json` 使用 UTF-8、无 BOM 的 JSON。平台独立发布使用 schema 2，每份清单只包含对应平台资产：
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
+  "key_id": "flowtype-update-2026-v2",
+  "platform": "android",
   "version": "0.1.19",
   "published_at": "2026-08-26T10:00:00Z",
-  "release_url": "https://github.com/Henry10088/FlowType/releases/tag/v0.1.19",
+  "release_url": "https://github.com/Henry10088/FlowType/releases/tag/android-v0.1.19",
   "notes_zh_cn": "修复实时输入稳定性问题。",
-  "windows": {
-    "url": "https://github.com/Henry10088/FlowType/releases/download/v0.1.19/FlowType-0.1.19-x64-setup.exe",
-    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-    "size": 3456789
-  },
   "android": {
     "version_code": 20,
-    "url": "https://github.com/Henry10088/FlowType/releases/download/v0.1.19/FlowType-0.1.19-android-release.apk",
+    "url": "https://github.com/Henry10088/FlowType/releases/download/android-v0.1.19/FlowType-0.1.19-android-release.apk",
     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
     "size": 2345678
   }
@@ -99,7 +88,7 @@ GitHub Release 必须先创建为草稿，所有安装包、校验文件、清�
 
 约束如下：
 
-- Windows 使用严格 SemVer 比较 `version`；Android 以严格递增的 `version_code` 判断是否可升级，并显示同一 `version`。
+- Windows 使用严格 SemVer 比较 `version`；Android 以严格递增的 `version_code` 判断是否可升级。两端版本可以不同。
 - 客户端只接受受支持的 `schema`、HTTPS 下载地址、大于零且在实现上限内的 `size` 和格式正确的 SHA-256。示例中的全零摘要只是占位值，发布清单必须填入产物真实摘要。
 - 相同或更低版本不提示安装，正式客户端不自动降级。
 - `release_url` 只用于用户查看发布说明，不能替代安装包校验。
@@ -135,7 +124,7 @@ GitHub 仓库使用受保护的 `release` Environment，并为正式发布设置
 - 自动检查发现新版本后只在设置页和 Windows 托盘菜单显示轻量提示，不抢焦点、不打断语音输入。
 - 手工检查需要在原位置显示检查中、最新版本、新版本或具体失败状态。
 
-Windows 使用系统 WinHTTP 获取体积很小的清单和签名；Android 复用现有 OkHttp。两端请求都设置合理的连接和读取超时，并要求重新验证缓存，避免长期读取陈旧的 `latest` 响应。
+Windows 使用系统 WinHTTP 获取体积很小的 Releases API 响应、清单和签名；Android 复用现有 OkHttp。两端按平台筛选正式标签，并设置合理的连接和读取超时。
 
 ## 6. Windows 更新流程
 
@@ -221,7 +210,7 @@ Android 和 Windows 设置页都增加紧凑的“版本与更新”区域，不
 4. 从最终产物计算文件大小和 SHA-256，生成 `flowtype-update.json`。
 5. 在受保护的 `release` Environment 中读取独立更新签名私钥，签署清单原始字节。
 6. 上传清单和分离签名，并在干净步骤中用公开验证密钥复核签名、摘要、版本和资产 URL。
-7. 所有检查通过后发布 Release；任一步失败都保留为草稿，不更新 `releases/latest`。
+7. 所有检查通过后发布目标平台 Release；任一步失败都保留为草稿，不影响另一平台的发布。
 
 正式 Release 仍需项目所有者明确授权推送版本标签。工作流不从分支普通 push 自动发布，也不能把测试 prerelease 变成生产客户端的 latest。
 

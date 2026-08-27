@@ -12,6 +12,7 @@ import app.flowtype.R
 import okhttp3.CacheControl
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.security.KeyFactory
@@ -49,6 +50,7 @@ class UpdateManager(
         val signature: ByteArray,
         val version: String,
         val versionCode: Long,
+        val platform: String,
         val releaseUrl: String,
         val notes: String,
         val android: Asset,
@@ -192,12 +194,34 @@ class UpdateManager(
     }
 
     private fun fetchVerifiedManifest(): Manifest {
-        val bytes = get(MANIFEST_URL, MAX_MANIFEST_BYTES)
+        val manifestUrl = System.getenv("FLOWTYPE_UPDATE_MANIFEST_URL") ?: latestReleaseManifestUrl()
+        val bytes = get(manifestUrl, MAX_MANIFEST_BYTES)
         val untrustedVersion = JSONObject(bytes.toString(Charsets.UTF_8)).optString("version")
         require(parseVersion(untrustedVersion) != null) { "invalid update version" }
-        val signatureUrl = "$RELEASE_DOWNLOAD_PREFIX/v$untrustedVersion/flowtype-update.json.sig"
+        val signatureUrl = "${manifestUrl.substringBeforeLast('/')}/flowtype-update.json.sig"
         val signature = get(signatureUrl, MAX_SIGNATURE_BYTES)
         return verifyManifest(bytes, signature)
+    }
+
+    private fun latestReleaseManifestUrl(): String {
+        val releases = JSONArray(get(RELEASES_API_URL, MAX_RELEASES_BYTES).toString(Charsets.UTF_8))
+        val tags = buildList {
+            for (index in 0 until releases.length()) {
+                val release = releases.getJSONObject(index)
+                val tag = release.optString("tag_name")
+                if (!release.optBoolean("draft") && !release.optBoolean("prerelease") &&
+                    tag.startsWith("android-v") && parseVersion(tag.removePrefix("android-v")) != null
+                ) add(tag)
+            }
+        }.sortedWith { left, right ->
+            val leftVersion = checkNotNull(parseVersion(left.removePrefix("android-v")))
+            val rightVersion = checkNotNull(parseVersion(right.removePrefix("android-v")))
+            compareValues(rightVersion.first, leftVersion.first).takeIf { it != 0 }
+                ?: compareValues(rightVersion.second, leftVersion.second).takeIf { it != 0 }
+                ?: compareValues(rightVersion.third, leftVersion.third)
+        }
+        val tag = tags.firstOrNull() ?: throw IllegalStateException("no Android release found")
+        return "$RELEASE_DOWNLOAD_PREFIX/$tag/flowtype-update.json"
     }
 
     private fun get(url: String, limit: Int): ByteArray {
@@ -452,13 +476,15 @@ class UpdateManager(
     }
 
     companion object {
-        private const val MANIFEST_URL = "https://github.com/Henry10088/FlowType/releases/latest/download/flowtype-update.json"
+        private const val RELEASES_API_URL = "https://api.github.com/repos/Henry10088/FlowType/releases?per_page=30"
         private const val RELEASE_DOWNLOAD_PREFIX = "https://github.com/Henry10088/FlowType/releases/download"
         private const val RELEASE_TAG_PREFIX = "https://github.com/Henry10088/FlowType/releases/tag/"
         private const val RELEASES_URL = "https://github.com/Henry10088/FlowType/releases"
-        private const val KEY_ID = "flowtype-update-2026"
+        private const val KEY_ID = "flowtype-update-2026-v2"
+        private const val PLATFORM = "android"
         private const val PUBLIC_KEY = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE81gLLKum3oiKT8hYqGYfnYpgeHmAt/xnfD4F39yrg+5/++M5/UNSUvU2aWA7iLro/+irFe/SwoHQ45WPVLnAdw=="
         private const val MAX_MANIFEST_BYTES = 64 * 1024
+        private const val MAX_RELEASES_BYTES = 512 * 1024
         private const val MAX_SIGNATURE_BYTES = 1024
         private const val MAX_APK_BYTES = 200L * 1024 * 1024
         private const val AUTO_CHECK_DELAY_SECONDS = 30L
@@ -487,14 +513,14 @@ class UpdateManager(
         internal fun parseAndValidateManifest(bytes: ByteArray): Manifest {
             require(bytes.size <= MAX_MANIFEST_BYTES) { "update manifest too large" }
             val root = JSONObject(bytes.toString(Charsets.UTF_8))
-            require(root.getInt("schema") == 1 && root.getString("key_id") == KEY_ID) { "unsupported update manifest" }
+            require(root.getInt("schema") == 2 && root.getString("key_id") == KEY_ID && root.getString("platform") == PLATFORM) { "unsupported update manifest" }
             val version = root.getString("version")
             require(parseVersion(version) != null) { "invalid update version" }
             require(root.optString("published_at").length <= 40) { "update manifest field too long" }
             val notes = root.optString("notes_zh_cn")
             require(notes.length <= 8192) { "update manifest field too long" }
             val releaseUrl = root.getString("release_url")
-            require(releaseUrl == "${RELEASE_TAG_PREFIX}v$version") { "invalid release URL" }
+            require(releaseUrl == "${RELEASE_TAG_PREFIX}android-v$version") { "invalid release URL" }
             val android = root.getJSONObject("android")
             val versionCode = android.getLong("version_code")
             require(versionCode > 0) { "invalid Android versionCode" }
@@ -503,10 +529,10 @@ class UpdateManager(
                 sha256 = android.getString("sha256"),
                 size = android.getLong("size"),
             )
-            require(asset.url.startsWith("$RELEASE_DOWNLOAD_PREFIX/v$version/") && asset.url.length <= 2048) { "invalid update asset URL" }
+            require(asset.url.startsWith("$RELEASE_DOWNLOAD_PREFIX/android-v$version/") && asset.url.length <= 2048) { "invalid update asset URL" }
             require(asset.size in 1..MAX_APK_BYTES) { "invalid update asset size" }
             require(asset.sha256.matches(Regex("[0-9a-f]{64}"))) { "invalid update asset digest" }
-            return Manifest(bytes.copyOf(), byteArrayOf(), version, versionCode, releaseUrl, notes, asset)
+            return Manifest(bytes.copyOf(), byteArrayOf(), version, versionCode, PLATFORM, releaseUrl, notes, asset)
         }
 
         internal fun parseVersion(value: String): Triple<Int, Int, Int>? {

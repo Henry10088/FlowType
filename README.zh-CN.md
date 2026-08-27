@@ -157,7 +157,7 @@ UI 层边界见 [客户端 UI 架构](docs/ui-architecture.md)。核心需求和
 - 当前只支持一次发送一张图片；原图可能较大，受 Windows 接收端大小限制
 - 不自动发送 Enter，完成操作不会额外修改目标文本
 - GitHub Actions 自动构建、签名清单和 Release 上传已经实现；Windows 与 Android 客户端支持后台检查、可恢复下载、安装前复核和用户确认安装，详见 [在线更新设计](docs/update-design-v1.md)
-- 发布前运行 `scripts\verify-version.ps1`，确认 Android、Windows、安装包和文档版本一致
+- 发布前运行 `scripts\verify-version.ps1 -Platform Windows` 或 `-Platform Android`；两个平台使用独立版本号和 GitHub Release
 
 ## 安全与隐私
 

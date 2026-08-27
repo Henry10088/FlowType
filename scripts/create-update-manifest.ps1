@@ -1,27 +1,37 @@
 param(
     [Parameter(Mandatory = $true)][string]$Tag,
+    [Parameter(Mandatory = $true)][ValidateSet("windows", "android")][string]$Platform,
     [Parameter(Mandatory = $true)][string]$Version,
-    [Parameter(Mandatory = $true)][int]$AndroidVersionCode,
-    [Parameter(Mandatory = $true)][string]$WindowsInstaller,
-    [Parameter(Mandatory = $true)][string]$AndroidApk,
+    [int]$AndroidVersionCode = 0,
+    [string]$WindowsInstaller = "",
+    [string]$AndroidApk = "",
     [Parameter(Mandatory = $true)][string]$PublicKey,
     [Parameter(Mandatory = $true)][string]$OutputDirectory
 )
 
 $ErrorActionPreference = "Stop"
-$keyId = "flowtype-update-2026"
+$keyId = "flowtype-update-2026-v2"
 $repository = "Henry10088/FlowType"
 
-if ($Tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
-    throw "Invalid release tag: $Tag"
+if ($Tag -notmatch '^(windows|android)-v[0-9]+\.[0-9]+\.[0-9]+$' -or $Tag -notmatch "^$Platform-") {
+    throw "Invalid $Platform release tag: $Tag"
 }
-if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or $Tag -ne "v$Version") {
+if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or $Tag -ne "$Platform-v$Version") {
     throw "Release tag $Tag does not match version $Version"
 }
-if ($AndroidVersionCode -lt 1) {
+if ($Platform -eq "android" -and $AndroidVersionCode -lt 1) {
     throw "Android versionCode must be positive"
 }
-foreach ($path in @($WindowsInstaller, $AndroidApk, $PublicKey)) {
+if ($Platform -eq "windows" -and [string]::IsNullOrWhiteSpace($WindowsInstaller)) {
+    throw "Windows installer is required for a Windows release"
+}
+if ($Platform -eq "android" -and [string]::IsNullOrWhiteSpace($AndroidApk)) {
+    throw "Android APK is required for an Android release"
+}
+$requiredPaths = @($PublicKey)
+if ($Platform -eq "windows") { $requiredPaths += $WindowsInstaller }
+if ($Platform -eq "android") { $requiredPaths += $AndroidApk }
+foreach ($path in $requiredPaths) {
     if (!(Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Required update input does not exist: $path"
     }
@@ -54,22 +64,37 @@ try {
         throw "Update public key contains trailing data"
     }
 
-    $windows = Get-Item -LiteralPath $WindowsInstaller
-    $android = Get-Item -LiteralPath $AndroidApk
+    $windows = if ($Platform -eq "windows") { Get-Item -LiteralPath $WindowsInstaller } else { $null }
+    $android = if ($Platform -eq "android") { Get-Item -LiteralPath $AndroidApk } else { $null }
     $baseUrl = "https://github.com/$repository/releases/download/$Tag"
     $manifest = [ordered]@{
-        schema = 1
+        schema = 2
         key_id = $keyId
+        platform = $Platform
         version = $Version
         published_at = [DateTimeOffset]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
         release_url = "https://github.com/$repository/releases/tag/$Tag"
         notes_zh_cn = "查看 GitHub Release 获取本次更新说明。"
         windows = [ordered]@{
+            url = ""
+            sha256 = ""
+            size = 0
+        }
+        android = [ordered]@{
+            version_code = 0
+            url = ""
+            sha256 = ""
+            size = 0
+        }
+    }
+    if ($Platform -eq "windows") {
+        $manifest.windows = [ordered]@{
             url = "$baseUrl/$($windows.Name)"
             sha256 = (Get-FileHash -LiteralPath $windows.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             size = $windows.Length
         }
-        android = [ordered]@{
+    } else {
+        $manifest.android = [ordered]@{
             version_code = $AndroidVersionCode
             url = "$baseUrl/$($android.Name)"
             sha256 = (Get-FileHash -LiteralPath $android.FullName -Algorithm SHA256).Hash.ToLowerInvariant()

@@ -1,5 +1,7 @@
 param(
     [string]$ExpectedTag = "",
+    [ValidateSet("All", "Windows", "Android")]
+    [string]$Platform = "All",
     [switch]$Development
 )
 
@@ -24,9 +26,18 @@ $androidZhLabelVersion = Read-RequiredMatch "android/app/src/main/res/values-zh/
 $installerVersion = Read-RequiredMatch "installer/flowtype.iss" '^#define AppVersion "([^" ]+)"' "installer version"
 $readmeVersion = Read-RequiredMatch "README.md" '^.*?([0-9]+\.[0-9]+\.[0-9]+)' "README version"
 $readmeZhVersion = Read-RequiredMatch "README.zh-CN.md" '^.*?([0-9]+\.[0-9]+\.[0-9]+)' "Chinese README version"
-$releaseDocVersion = Read-RequiredMatch "docs/release-versioning.md" '^.{0,10}([0-9]+\.[0-9]+\.[0-9]+).*Android' "release document version"
-
-$latestTag = (& git -C $root tag --list 'v[0-9]*' --sort=-version:refname | Select-Object -First 1).Trim()
+$latestTagPattern = switch ($Platform) {
+    "Windows" { "windows-v[0-9]*" }
+    "Android" { "android-v[0-9]*" }
+    default { "v[0-9]*" }
+}
+$latestTag = ((& git -C $root tag --list $latestTagPattern --sort=-version:refname | Select-Object -First 1) -as [string]).Trim()
+$previousTagPattern = switch ($Platform) {
+    "Windows" { '^windows-v(\d+\.\d+\.\d+)$' }
+    "Android" { '^android-v(\d+\.\d+\.\d+)$' }
+    default { '^v(\d+\.\d+\.\d+)$' }
+}
+$applicationVersion = if ($Platform -eq "Android") { $androidVersion } else { $cargoVersion }
 $exactTag = ""
 try {
     $exactTag = (& git -C $root describe --tags --exact-match HEAD 2>$null).Trim()
@@ -34,20 +45,27 @@ try {
     # An untagged development commit is the normal state before publishing.
 }
 
-$versions = @{
-    "Cargo" = $cargoVersion
-    "Android" = $androidVersion
-    "Android displayed" = $androidLabelVersion
-    "Android Chinese displayed" = $androidZhLabelVersion
-    "Installer" = $installerVersion
-    "README" = $readmeVersion
-    "Chinese README" = $readmeZhVersion
-    "Release document" = $releaseDocVersion
-}
-$mismatches = $versions.GetEnumerator() | Where-Object { $_.Value -ne $cargoVersion }
-if ($mismatches) {
-    $details = ($versions.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ", "
-    throw "Version mismatch: $details"
+if ($Platform -eq "Windows") {
+    if ($installerVersion -ne $cargoVersion) {
+        throw "Windows version mismatch: Cargo=$cargoVersion, Installer=$installerVersion"
+    }
+} elseif ($Platform -eq "Android") {
+    if ($androidLabelVersion -ne $androidVersion -or $androidZhLabelVersion -ne $androidVersion) {
+        throw "Android displayed version mismatch: versionName=$androidVersion, English=$androidLabelVersion, Chinese=$androidZhLabelVersion"
+    }
+} else {
+    $versions = @{
+        "Cargo" = $cargoVersion
+        "Android" = $androidVersion
+        "Android displayed" = $androidLabelVersion
+        "Android Chinese displayed" = $androidZhLabelVersion
+        "Installer" = $installerVersion
+    }
+    $mismatches = $versions.GetEnumerator() | Where-Object { $_.Value -ne $cargoVersion }
+    if ($mismatches) {
+        $details = ($versions.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ", "
+        throw "Version mismatch: $details"
+    }
 }
 
 if ([int]$androidCode -lt 1) {
@@ -55,32 +73,42 @@ if ([int]$androidCode -lt 1) {
 }
 
 if ($ExpectedTag) {
-    if ($ExpectedTag -notmatch '^v([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$') {
-        throw "Release tag is not strict SemVer: $ExpectedTag"
+    $tagPattern = switch ($Platform) {
+        "Windows" { '^windows-v([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$' }
+        "Android" { '^android-v([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$' }
+        default { '^v([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$' }
+    }
+    if ($ExpectedTag -notmatch $tagPattern) {
+        throw "Release tag is not valid for ${Platform}: $ExpectedTag"
     }
     $tagVersion = $Matches[1]
     $prerelease = $Matches[2]
-    if ($tagVersion -ne $cargoVersion) {
-        throw "Release tag $ExpectedTag does not match application version $cargoVersion"
+    if ($tagVersion -ne $applicationVersion) {
+        throw "Release tag $ExpectedTag does not match $Platform version $applicationVersion"
     }
     if ($exactTag -and $exactTag -ne $ExpectedTag) {
         throw "HEAD is tagged as $exactTag, not expected release tag $ExpectedTag"
     }
 
-    $stableTags = @(& git -C $root tag --list 'v[0-9]*' --sort=-version:refname) |
-        Where-Object { $_ -match '^v[0-9]+\.[0-9]+\.[0-9]+$' -and $_ -ne $ExpectedTag }
+    $stableTagPattern = switch ($Platform) {
+        "Windows" { '^windows-v[0-9]+\.[0-9]+\.[0-9]+$' }
+        "Android" { '^android-v[0-9]+\.[0-9]+\.[0-9]+$' }
+        default { '^v[0-9]+\.[0-9]+\.[0-9]+$' }
+    }
+    $stableTags = @(& git -C $root tag --list $latestTagPattern --sort=-version:refname) |
+        Where-Object { $_ -match $stableTagPattern -and $_ -ne $ExpectedTag }
     $previousStableTag = $stableTags | Select-Object -First 1
-    if ($previousStableTag -and $previousStableTag -match '^v(\d+\.\d+\.\d+)$') {
+    if ($previousStableTag -and $previousStableTag -match $previousTagPattern) {
         $previousVersion = [Version]$Matches[1]
         if ($prerelease) {
-            if ([Version]$cargoVersion -lt $previousVersion) {
+            if ([Version]$applicationVersion -lt $previousVersion) {
                 throw "Prerelease version $cargoVersion is older than $previousStableTag"
             }
-        } elseif ([Version]$cargoVersion -le $previousVersion) {
-            throw "Stable version $cargoVersion must be greater than $previousStableTag"
+        } elseif ([Version]$applicationVersion -le $previousVersion) {
+            throw "Stable version $applicationVersion must be greater than $previousStableTag"
         }
 
-        if (!$prerelease) {
+        if (!$prerelease -and $Platform -eq "Android") {
             $previousGradle = (& git -C $root show "${previousStableTag}:android/app/build.gradle.kts") -join "`n"
             $previousCodeMatch = [regex]::Match($previousGradle, '^\s*versionCode\s*=\s*(\d+)', [Text.RegularExpressions.RegexOptions]::Multiline)
             if (!$previousCodeMatch.Success) {
@@ -94,12 +122,12 @@ if ($ExpectedTag) {
     }
 }
 
-if (!$Development -and $latestTag -and $exactTag -ne $latestTag -and $latestTag -match '^v(\d+\.\d+\.\d+)$') {
+if (!$Development -and $latestTag -and $exactTag -ne $latestTag -and $latestTag -match $previousTagPattern) {
     $latestReleasedVersion = [Version]$Matches[1]
-    if ([Version]$cargoVersion -le $latestReleasedVersion) {
-        throw "Version $cargoVersion must be greater than latest released version $latestTag before building a new distributable."
+    if ([Version]$applicationVersion -le $latestReleasedVersion) {
+        throw "Version $applicationVersion must be greater than latest released version $latestTag before building a new distributable."
     }
 }
 
 $tagMessage = if ($ExpectedTag) { "; release tag=$ExpectedTag" } else { "" }
-Write-Output "FlowType version $cargoVersion is consistent; Android versionCode=$androidCode$tagMessage."
+Write-Output "FlowType $Platform version is consistent; Windows=$cargoVersion, Android=$androidVersion (versionCode=$androidCode)$tagMessage."

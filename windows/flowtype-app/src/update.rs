@@ -36,13 +36,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, SW_SHOWNORMAL};
 
 use crate::i18n::tr;
 
-const MANIFEST_URL: &str =
-    "https://github.com/Henry10088/FlowType/releases/latest/download/flowtype-update.json";
+const RELEASES_API_URL: &str =
+    "https://api.github.com/repos/Henry10088/FlowType/releases?per_page=30";
 const RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/Henry10088/FlowType/releases/download/";
 const RELEASE_TAG_PREFIX: &str = "https://github.com/Henry10088/FlowType/releases/tag/";
 const REPOSITORY_URL: &str = "https://github.com/Henry10088/FlowType";
 const RELEASES_URL: &str = "https://github.com/Henry10088/FlowType/releases";
-const UPDATE_KEY_ID: &str = "flowtype-update-2026";
+const UPDATE_KEY_ID: &str = "flowtype-update-2026-v2";
+const UPDATE_PLATFORM: &str = "windows";
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 const MAX_SIGNATURE_BYTES: usize = 1024;
 const MAX_INSTALLER_BYTES: u64 = 200 * 1024 * 1024;
@@ -97,6 +98,7 @@ impl UpdateSnapshot {
 struct UpdateManifest {
     schema: u32,
     key_id: String,
+    platform: String,
     version: String,
     published_at: String,
     release_url: String,
@@ -122,6 +124,13 @@ struct AndroidAsset {
     url: String,
     sha256: String,
     size: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReleaseSummary {
+    tag_name: String,
+    draft: bool,
+    prerelease: bool,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -515,8 +524,9 @@ fn check_for_update(
 impl UpdateManifest {
     fn placeholder() -> Self {
         Self {
-            schema: 1,
+            schema: 2,
             key_id: UPDATE_KEY_ID.to_owned(),
+            platform: UPDATE_PLATFORM.to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             published_at: String::new(),
             release_url: "https://github.com/Henry10088/FlowType/releases".to_owned(),
@@ -539,25 +549,44 @@ impl UpdateManifest {
 }
 
 fn fetch_verified_manifest() -> Result<UpdateManifest, String> {
-    let manifest_url =
-        std::env::var("FLOWTYPE_UPDATE_MANIFEST_URL").unwrap_or_else(|_| MANIFEST_URL.to_owned());
+    let manifest_url = std::env::var("FLOWTYPE_UPDATE_MANIFEST_URL")
+        .unwrap_or_else(|_| latest_release_manifest_url().unwrap_or_default());
+    if manifest_url.is_empty() {
+        return Err(tr("找不到 Windows 更新", "No Windows release found").to_owned());
+    }
     let bytes = http_get(&manifest_url, MAX_MANIFEST_BYTES).map_err(|e| e.to_string())?;
-    let untrusted: UpdateManifest = serde_json::from_slice(&bytes)
+    let _untrusted: UpdateManifest = serde_json::from_slice(&bytes)
         .map_err(|_| tr("更新清单格式无效", "Invalid update information").to_owned())?;
-    let signature_url = if manifest_url == MANIFEST_URL {
-        format!(
-            "{RELEASE_DOWNLOAD_PREFIX}v{}/flowtype-update.json.sig",
-            untrusted.version
-        )
-    } else {
-        let base = manifest_url
-            .rsplit_once('/')
-            .map(|(base, _)| base)
-            .ok_or_else(|| tr("更新清单地址无效", "Invalid update URL").to_owned())?;
-        format!("{base}/flowtype-update.json.sig")
-    };
+    let base = manifest_url
+        .rsplit_once('/')
+        .map(|(base, _)| base)
+        .ok_or_else(|| tr("更新清单地址无效", "Invalid update URL").to_owned())?;
+    let signature_url = format!("{base}/flowtype-update.json.sig");
     let signature = http_get(&signature_url, MAX_SIGNATURE_BYTES).map_err(|e| e.to_string())?;
     verify_manifest(&bytes, &signature)
+}
+
+fn latest_release_manifest_url() -> Result<String, String> {
+    let bytes = http_get(RELEASES_API_URL, 512 * 1024).map_err(|e| e.to_string())?;
+    let mut releases: Vec<ReleaseSummary> = serde_json::from_slice(&bytes)
+        .map_err(|_| tr("GitHub 发布信息无效", "Invalid GitHub release list").to_owned())?;
+    releases.retain(|release| {
+        !release.draft
+            && !release.prerelease
+            && parse_version(release.tag_name.strip_prefix("windows-v").unwrap_or("")).is_some()
+    });
+    releases.sort_by(|left, right| {
+        parse_version(right.tag_name.strip_prefix("windows-v").unwrap_or("")).cmp(&parse_version(
+            left.tag_name.strip_prefix("windows-v").unwrap_or(""),
+        ))
+    });
+    let tag = releases
+        .first()
+        .map(|release| release.tag_name.as_str())
+        .ok_or_else(|| tr("暂无 Windows 更新", "No Windows update is available").to_owned())?;
+    Ok(format!(
+        "{RELEASE_DOWNLOAD_PREFIX}{tag}/flowtype-update.json"
+    ))
 }
 
 fn verify_manifest(bytes: &[u8], signature_text: &[u8]) -> Result<UpdateManifest, String> {
@@ -593,7 +622,10 @@ fn verify_manifest_with_key(
 }
 
 fn validate_manifest(manifest: &UpdateManifest) -> Result<(), String> {
-    if manifest.schema != 1 || manifest.key_id != UPDATE_KEY_ID {
+    if manifest.schema != 2
+        || manifest.key_id != UPDATE_KEY_ID
+        || manifest.platform != UPDATE_PLATFORM
+    {
         return Err(tr(
             "不支持的更新清单版本或密钥",
             "Unsupported update information",
@@ -612,19 +644,12 @@ fn validate_manifest(manifest: &UpdateManifest) -> Result<(), String> {
         )
         .to_owned());
     }
-    let tag = format!("v{}", manifest.version);
+    let tag = format!("windows-v{}", manifest.version);
     if manifest.release_url != format!("{RELEASE_TAG_PREFIX}{tag}") {
         return Err(tr("更新发布地址无效", "Invalid release URL").to_owned());
     }
     let expected_prefix = format!("{RELEASE_DOWNLOAD_PREFIX}{tag}/");
-    for asset in [
-        &manifest.windows,
-        &PlatformAsset {
-            url: manifest.android.url.clone(),
-            sha256: manifest.android.sha256.clone(),
-            size: manifest.android.size,
-        },
-    ] {
+    for asset in [&manifest.windows] {
         if !asset.url.starts_with(&expected_prefix)
             || asset.url.len() > 2048
             || asset.size == 0
@@ -633,9 +658,6 @@ fn validate_manifest(manifest: &UpdateManifest) -> Result<(), String> {
         {
             return Err(tr("更新资产信息无效", "Invalid update package information").to_owned());
         }
-    }
-    if manifest.android.version_code == 0 {
-        return Err(tr("Android versionCode 无效", "Invalid Android versionCode").to_owned());
     }
     Ok(())
 }
@@ -1391,13 +1413,14 @@ mod tests {
 
     fn manifest() -> UpdateManifest {
         let version = "9.8.7";
-        let base = format!("{RELEASE_DOWNLOAD_PREFIX}v{version}/");
+        let base = format!("{RELEASE_DOWNLOAD_PREFIX}windows-v{version}/");
         UpdateManifest {
-            schema: 1,
+            schema: 2,
             key_id: UPDATE_KEY_ID.to_owned(),
+            platform: UPDATE_PLATFORM.to_owned(),
             version: version.to_owned(),
             published_at: "2026-08-26T10:00:00Z".to_owned(),
-            release_url: format!("{RELEASE_TAG_PREFIX}v{version}"),
+            release_url: format!("{RELEASE_TAG_PREFIX}windows-v{version}"),
             notes_zh_cn: "测试".to_owned(),
             windows: PlatformAsset {
                 url: format!("{base}FlowType-{version}-x64-setup.exe"),
@@ -1405,10 +1428,10 @@ mod tests {
                 size: 123,
             },
             android: AndroidAsset {
-                version_code: 999,
-                url: format!("{base}FlowType-{version}-android-release.apk"),
-                sha256: "b".repeat(64),
-                size: 456,
+                version_code: 0,
+                url: String::new(),
+                sha256: String::new(),
+                size: 0,
             },
             verified_raw: Vec::new(),
             verified_signature: Vec::new(),
