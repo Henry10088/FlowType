@@ -2,6 +2,7 @@ package app.flowtype
 
 import android.Manifest
 import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.graphics.Typeface
@@ -131,6 +132,10 @@ class MainActivity : ComponentActivity() {
         if (saved && uri != null) showImagePreview(uri) else showKeyboard()
     }
 
+    override fun attachBaseContext(base: Context) {
+        super.attachBaseContext(LanguageManager.wrap(base))
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
@@ -256,11 +261,30 @@ class MainActivity : ComponentActivity() {
             controller.settings.extraDim = !controller.settings.extraDim
             applyInputWindowSettings()
         }
+        findViewById<ImageButton>(R.id.changeLanguage).setOnClickListener { showLanguageChooser() }
         findViewById<ImageButton>(R.id.openSettings).setOnClickListener { showSettings() }
         findViewById<ImageButton>(R.id.openImage).setOnClickListener { chooseImageSource() }
         renderInput(controller.state())
         applyInputWindowSettings()
         if (focus) showKeyboard()
+    }
+
+    private fun showLanguageChooser() {
+        val languages = LanguageManager.Language.entries
+        val labels = arrayOf("跟随系统 / System", "简体中文", "English")
+        val selected = languages.indexOf(LanguageManager.current(this))
+        AlertDialog.Builder(this)
+            .setTitle(R.string.language)
+            .setSingleChoiceItems(labels, selected) { dialog, which ->
+                val language = languages[which]
+                dialog.dismiss()
+                if (language != LanguageManager.current(this)) {
+                    LanguageManager.set(this, language)
+                    recreate()
+                }
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
     }
 
     private fun chooseImageSource() {

@@ -1,6 +1,7 @@
 package app.flowtype
 
 import android.app.Application
+import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import app.flowtype.data.AppDatabase
@@ -29,6 +30,11 @@ import java.util.concurrent.CopyOnWriteArraySet
 
 class FlowTypeApplication : Application(), SyncClient.Listener {
     enum class ImageTransferState { IDLE, SENDING, SUCCESS, FAILED }
+
+    private data class LocalizedText(val resourceId: Int, val arguments: List<Any> = emptyList()) {
+        fun resolve(context: Context): String =
+            context.getString(resourceId, *arguments.toTypedArray())
+    }
 
     data class UiState(
         val text: String,
@@ -66,7 +72,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val observers = CopyOnWriteArraySet<(UiState) -> Unit>()
     private var currentBinding: ComputerBinding? = null
-    private var statusText = ""
+    private var statusText = LocalizedText(R.string.status_unpaired)
     private var connected = false
     private var showSyncFullText = false
     private var targetState: TargetState? = null
@@ -79,12 +85,15 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
     private var autoSelectionTargetPcId: String? = null
     private var pendingAutoStart: SnapshotMessage? = null
     private var pendingAutoLatest: SnapshotMessage? = null
-    private var autoSelectionError: String? = null
+    private var autoSelectionError: LocalizedText? = null
     private var manualStartPending = false
+
+    override fun attachBaseContext(base: Context) {
+        super.attachBaseContext(LanguageManager.wrap(base))
+    }
 
     override fun onCreate() {
         super.onCreate()
-        statusText = getString(R.string.status_unpaired)
         database = AppDatabase(this)
         bindings = BindingStore(this, database)
         history = HistoryStore(database)
@@ -106,7 +115,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         }
         currentBinding = bindings.load()
         currentBinding?.let {
-            statusText = getString(R.string.status_connecting, it.pcName)
+            statusText = text(R.string.status_connecting, it.pcName)
             syncClient.connect(it)
         }
         refreshControlClients()
@@ -130,7 +139,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         finishing = session.finishing,
         activeSession = session.sessionId != null,
         binding = currentBinding,
-        status = statusText,
+        status = statusText.resolve(this),
         connected = connected,
         showSyncFullText = showSyncFullText ||
             (session.sessionId == null && session.currentText.isNotEmpty()),
@@ -193,7 +202,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
 
     fun finish() {
         session.finish()?.let {
-            statusText = getString(R.string.sync_status_syncing)
+            statusText = text(R.string.sync_status_syncing)
             saveDraftNow()
             if (autoSelecting || pendingAutoStart != null) pendingAutoLatest = it else syncClient.send(it)
             notifyChanged()
@@ -212,9 +221,9 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         drafts.clear()
         showSyncFullText = false
         statusText = currentBinding?.let {
-            if (connected) getString(R.string.status_connected, it.pcName)
-            else getString(R.string.status_reconnecting, it.pcName)
-        } ?: getString(R.string.status_unpaired)
+            if (connected) text(R.string.status_connected, it.pcName)
+            else text(R.string.status_reconnecting, it.pcName)
+        } ?: text(R.string.status_unpaired)
         if (settings.autoSelectComputer) beginAutoSelection()
         notifyChanged()
     }
@@ -230,9 +239,9 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         drafts.clear()
         showSyncFullText = false
         statusText = currentBinding?.let {
-            if (connected) getString(R.string.status_connected, it.pcName)
-            else getString(R.string.status_reconnecting, it.pcName)
-        } ?: getString(R.string.status_unpaired)
+            if (connected) text(R.string.status_connected, it.pcName)
+            else text(R.string.status_reconnecting, it.pcName)
+        } ?: text(R.string.status_unpaired)
         if (settings.autoSelectComputer) beginAutoSelection()
         notifyChanged()
     }
@@ -244,11 +253,11 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         val snapshots = session.restartAtCurrentCursor()
         if (snapshots.isEmpty()) {
             drafts.clear()
-            statusText = currentBinding?.let { getString(R.string.status_connected, it.pcName) }
-                ?: getString(R.string.status_unpaired)
+            statusText = currentBinding?.let { text(R.string.status_connected, it.pcName) }
+                ?: text(R.string.status_unpaired)
         } else {
             snapshots.forEach(syncClient::send)
-            statusText = getString(R.string.sync_status_syncing)
+            statusText = text(R.string.sync_status_syncing)
             saveDraftNow()
         }
         notifyChanged()
@@ -267,8 +276,8 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         }
         manualStartPending = false
         showSyncFullText = false
-        statusText = currentBinding?.let { getString(R.string.status_connecting, it.pcName) }
-            ?: getString(R.string.status_unpaired)
+        statusText = currentBinding?.let { text(R.string.status_connecting, it.pcName) }
+            ?: text(R.string.status_unpaired)
         scheduleDraftSave()
         notifyChanged()
     }
@@ -327,7 +336,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
             connected = false
             currentBinding?.let(::connect) ?: run {
                 refreshControlClients()
-                statusText = getString(R.string.status_unpaired)
+                statusText = text(R.string.status_unpaired)
                 notifyChanged()
             }
         } else {
@@ -367,9 +376,9 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         targetState = null
         showSyncFullText = manualStartPending || autoSelectionError != null || syncClient.requiresExplicitStart()
         statusText = autoSelectionError ?: if (showSyncFullText) {
-            getString(R.string.status_place_cursor)
+            text(R.string.status_place_cursor)
         } else {
-            getString(R.string.status_connected, binding.pcName)
+            text(R.string.status_connected, binding.pcName)
         }
         if (autoSelecting && autoSelectionTargetPcId == binding.pcId) {
             val start = pendingAutoStart
@@ -381,7 +390,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
             autoSelectionError = null
             manualStartPending = false
             showSyncFullText = false
-            statusText = getString(R.string.status_connected, binding.pcName)
+            statusText = text(R.string.status_connected, binding.pcName)
             start?.let(syncClient::send)
             if (latest != null && latest != start) syncClient.send(latest)
         }
@@ -395,8 +404,8 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
             session.reset()
             drafts.clear()
             showSyncFullText = false
-            statusText = currentBinding?.let { getString(R.string.status_connected, it.pcName) }
-                ?: getString(R.string.status_unpaired)
+            statusText = currentBinding?.let { text(R.string.status_connected, it.pcName) }
+                ?: text(R.string.status_unpaired)
         } else {
             scheduleDraftSave()
         }
@@ -409,15 +418,15 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
             resetFailedSession()
         }
         statusText = when (target.targetState) {
-            TargetState.ACTIVE -> getString(
+            TargetState.ACTIVE -> text(
                 R.string.status_target,
                 target.targetName ?: getString(R.string.default_computer),
             )
-            TargetState.NOT_FOREGROUND -> getString(
+            TargetState.NOT_FOREGROUND -> text(
                 R.string.status_target_waiting,
                 target.targetName ?: getString(R.string.default_computer),
             )
-            TargetState.INVALID -> getString(R.string.status_target_invalid)
+            TargetState.INVALID -> text(R.string.status_target_invalid)
         }
         showSyncFullText = syncClient.requiresExplicitStart()
         scheduleDraftSave()
@@ -438,14 +447,14 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
     override fun onDisconnected(binding: ComputerBinding) = onMain {
         connected = false
         targetState = null
-        statusText = getString(R.string.status_reconnecting, binding.pcName)
+        statusText = text(R.string.status_reconnecting, binding.pcName)
         notifyChanged()
     }
 
     override fun onFailure(binding: ComputerBinding) = onMain {
         connected = false
         targetState = null
-        statusText = getString(R.string.status_reconnecting, binding.pcName)
+        statusText = text(R.string.status_reconnecting, binding.pcName)
         notifyChanged()
     }
 
@@ -455,9 +464,9 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         targetState = null
         showSyncFullText = true
         statusText = when (error.code) {
-            ErrorCode.INJECTOR_UNAVAILABLE -> getString(R.string.status_input_service_unavailable)
-            ErrorCode.TARGET_MODIFIED -> getString(R.string.status_target_modified)
-            else -> getString(R.string.status_sync_stopped)
+            ErrorCode.INJECTOR_UNAVAILABLE -> text(R.string.status_input_service_unavailable)
+            ErrorCode.TARGET_MODIFIED -> text(R.string.status_target_modified)
+            else -> text(R.string.status_sync_stopped)
         }
         scheduleDraftSave()
         notifyChanged()
@@ -470,7 +479,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         PhoneIdentity().delete(binding.pcId)
         currentBinding = bindings.load()
         refreshControlClients()
-        statusText = getString(R.string.status_binding_invalid)
+        statusText = text(R.string.status_binding_invalid)
         currentBinding?.let(::connect) ?: notifyChanged()
     }
 
@@ -489,7 +498,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         refreshControlClients()
         connected = false
         showSyncFullText = false
-        statusText = getString(R.string.status_connecting, binding.pcName)
+        statusText = text(R.string.status_connecting, binding.pcName)
         syncClient.connect(binding)
         notifyChanged()
     }
@@ -534,7 +543,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         }
         val candidates = bindings.list().filter { it.pairingToken == null }
         if (candidates.isEmpty()) {
-            failAutoSelection(getString(R.string.status_auto_no_computer), currentBinding)
+            failAutoSelection(R.string.status_auto_no_computer, currentBinding)
             return
         }
         val generation = ++autoSelectionGeneration
@@ -544,7 +553,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         pendingAutoStart = initial
         pendingAutoLatest = initial
         autoSelectionTargetPcId = null
-        statusText = getString(R.string.status_auto_selecting)
+        statusText = text(R.string.status_auto_selecting)
         val fallback = currentBinding
         // Closing the socket alone leaves the old Windows injector session
         // active. Release it before selecting the next target so a later
@@ -566,7 +575,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
                 if (generation != autoSelectionGeneration || !autoSelecting) return@onMain
                 val winner = TargetSelector.choose(results, fallback?.pcId)
                 if (winner == null) {
-                    failAutoSelection(getString(R.string.status_auto_ambiguous), fallback)
+                    failAutoSelection(R.string.status_auto_ambiguous, fallback)
                 } else {
                     autoSelectionTargetPcId = winner.binding.pcId
                     recentActivityPcId = winner.binding.pcId
@@ -576,7 +585,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         }
     }
 
-    private fun failAutoSelection(message: String, fallback: ComputerBinding?) {
+    private fun failAutoSelection(messageResource: Int, fallback: ComputerBinding?) {
         autoSelecting = false
         autoSelectionTargetPcId = null
         pendingAutoStart = null
@@ -587,12 +596,16 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
             session.reset()
             session.replaceLocalDraft(text)
         }
+        val message = text(messageResource)
         autoSelectionError = message
         showSyncFullText = text.isNotEmpty()
         fallback?.let(::connect)
         statusText = message
         notifyChanged()
     }
+
+    private fun text(resourceId: Int, vararg arguments: Any) =
+        LocalizedText(resourceId, arguments.toList())
 
     private fun clearAutoSelection() {
         autoSelectionGeneration += 1
