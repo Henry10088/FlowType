@@ -12,6 +12,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     RDW_UPDATENOW, RedrawWindow, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow, WHITE_BRUSH,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::SystemServices::SS_NOPREFIX;
 use windows_sys::Win32::UI::Controls::{
     DRAWITEMSTRUCT, ICC_PROGRESS_CLASS, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX,
     InitCommonControlsEx, ODS_FOCUS, ODS_SELECTED, PBM_SETPOS, PBM_SETRANGE32, PBS_SMOOTH,
@@ -73,7 +74,6 @@ enum Page {
 enum ButtonKind {
     Navigation(Page),
     Secondary,
-    Text,
     Back,
     Checkbox,
     Language,
@@ -256,7 +256,7 @@ impl UiContext {
             558,
             28,
             132,
-            42,
+            34,
             ButtonKind::Secondary,
         );
         if snapshot.phones.is_empty() {
@@ -273,20 +273,22 @@ impl UiContext {
             let y = 102 + index as i32 * 84;
             self.text(&phone.phone_name, 268, y, 260, 28, self.heading_font);
             let connected = snapshot.status.connected_phone.as_deref() == Some(&phone.phone_name);
-            let state_text = if connected {
-                tr("已连接", "Connected")
-            } else {
-                tr("未连接", "Offline")
-            };
-            self.text(state_text, 288, y + 34, 90, 24, self.body_font);
-            let detail = if connected {
-                tr("刚刚连接", "Connected now")
+            let status = if connected {
+                tr("已连接", "Connected").to_owned()
             } else if phone.last_connected.is_some() {
-                tr("最近连接过", "Previously connected")
+                format!(
+                    "{} · {}",
+                    tr("未连接", "Offline"),
+                    tr("最近连接过", "Connected previously")
+                )
             } else {
-                tr("尚未连接过", "Never connected")
+                format!(
+                    "{} · {}",
+                    tr("未连接", "Offline"),
+                    tr("尚未连接过", "Never connected")
+                )
             };
-            self.muted_text(detail, 380, y + 34, 190, 24, self.body_font);
+            self.muted_text(&status, 288, y + 34, 300, 24, self.body_font);
             self.owner_button(
                 tr("解除绑定", "Unpair"),
                 ID_UNPAIR_BASE + index,
@@ -294,7 +296,7 @@ impl UiContext {
                 y + 13,
                 94,
                 34,
-                ButtonKind::Text,
+                ButtonKind::Secondary,
             );
             self.phone_ids.push(phone_id.clone());
         }
@@ -347,7 +349,7 @@ impl UiContext {
             tr("保存设置", "Save settings"),
             ID_SAVE_SETTINGS,
             578,
-            34,
+            28,
             112,
             34,
             ButtonKind::Secondary,
@@ -411,27 +413,27 @@ impl UiContext {
         self.update_repository = self.owner_button(
             tr("GitHub 仓库", "GitHub"),
             ID_UPDATE_REPOSITORY,
-            370,
+            364,
             476,
-            112,
+            96,
             32,
             ButtonKind::Secondary,
         );
         self.update_history = self.owner_button(
             tr("查看更新", "Release history"),
             ID_UPDATE_HISTORY,
-            490,
+            468,
             476,
-            112,
+            120,
             32,
             ButtonKind::Secondary,
         );
         self.update_action = self.owner_button(
             tr("检查更新", "Check now"),
             ID_UPDATE_ACTION,
-            610,
+            596,
             474,
-            112,
+            138,
             34,
             ButtonKind::Secondary,
         );
@@ -554,7 +556,7 @@ impl UiContext {
         self.control(
             "STATIC",
             value,
-            WS_CHILD | WS_VISIBLE,
+            WS_CHILD | WS_VISIBLE | SS_NOPREFIX,
             0,
             x,
             y,
@@ -655,7 +657,7 @@ impl UiContext {
             "语言 / Language",
             ID_LANGUAGE_MENU,
             708,
-            18,
+            28,
             34,
             34,
             ButtonKind::Language,
@@ -1093,17 +1095,6 @@ impl UiContext {
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                 );
             }
-            ButtonKind::Text => {
-                fill(item.hDC, &rect, COLOR_WHITE);
-                draw_label(
-                    item.hDC,
-                    &text,
-                    rect,
-                    self.body_font,
-                    COLOR_TEXT,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                );
-            }
             ButtonKind::Back => {
                 fill(
                     item.hDC,
@@ -1278,9 +1269,9 @@ impl UiContext {
                     );
                     let icon_rect = RECT {
                         left: self.scale(222),
-                        top: self.scale(y - 69),
+                        top: self.scale(y - 62),
                         right: self.scale(256),
-                        bottom: self.scale(y - 29),
+                        bottom: self.scale(y - 22),
                     };
                     draw_label(
                         dc,
