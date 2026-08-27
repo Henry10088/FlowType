@@ -43,10 +43,13 @@ jobs:
       - name: Run Android instrumented tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 35
+          api-level: 36
           target: google_apis
           arch: x86_64
           profile: pixel_2
+          force-avd-creation: true
+          disable-animations: true
+          emulator-options: -no-snapshot -no-window -noaudio -no-boot-anim
           working-directory: android
           script: ./gradlew connectedDebugAndroidTest
 
