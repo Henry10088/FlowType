@@ -14,14 +14,15 @@ use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use flowtype_core::ipc::{InjectorRequest, InjectorResponse};
 use flowtype_core::protocol::{
-    Ack, Cancel, ClientMessage, ClientSessionState, ErrorCode, ProbeResult, ProbeState,
-    ProtocolError, Resume, ServerMessage, ServerSessionState, SwitchComputer, Target, TargetState,
+    Ack, Cancel, ClientMessage, ClientSessionState, ErrorCode, HealthAck, ProbeResult, ProbeState,
+    ProtocolError, Resume, ServerMessage, ServerSessionState, SwitchAck, SwitchComputer, Target,
+    TargetState,
 };
 use futures_util::{SinkExt, StreamExt};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
@@ -73,6 +74,8 @@ struct AuthMessage {
     public_key_spki: Option<String>,
     #[serde(default)]
     connection_mode: Option<String>,
+    #[serde(default)]
+    capabilities: Vec<String>,
     signature: String,
 }
 
@@ -93,6 +96,7 @@ struct ReadyMessage<'a> {
     pc_id: &'a str,
     pc_name: &'a str,
     candidate_endpoints: Vec<String>,
+    capabilities: &'static [&'static str],
 }
 
 #[derive(Deserialize)]
@@ -169,11 +173,18 @@ struct OnlineConnection {
 struct SwitchRequest {
     pc_id: String,
     pc_name: String,
+    request_id: String,
+}
+
+struct PendingSwitch {
+    pc_id: String,
+    request_id: String,
 }
 
 struct SwitchChannel {
     sender: UnboundedSender<SwitchRequest>,
     is_control: bool,
+    supports_switch_ack: bool,
 }
 
 struct AppState {
@@ -185,6 +196,7 @@ struct AppState {
     active_connection: Mutex<Option<ActiveConnection>>,
     online_connections: Mutex<HashMap<u64, OnlineConnection>>,
     switch_channels: Mutex<HashMap<u64, SwitchChannel>>,
+    pending_switch: Mutex<Option<PendingSwitch>>,
     runtime_status: Mutex<RuntimeStatus>,
     ui_hwnd: Arc<AtomicIsize>,
     update: update::UpdateManager,
@@ -243,6 +255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         active_connection: Mutex::new(None),
         online_connections: Mutex::new(HashMap::new()),
         switch_channels: Mutex::new(HashMap::new()),
+        pending_switch: Mutex::new(None),
         runtime_status: Mutex::new(RuntimeStatus {
             summary: tr("等待手机连接", "Waiting for phone").to_owned(),
             connected_phone: None,
@@ -467,15 +480,17 @@ impl AppState {
         });
     }
 
-    fn request_switch_to_current(&self) {
+    fn request_switch_to_current(self: &Arc<Self>) {
         let pc_name = self
             .pc_name
             .lock()
             .map(|name| name.clone())
             .unwrap_or_else(|_| self.identity.pc_name.clone());
+        let request_id = random_token();
         let request = SwitchRequest {
             pc_id: self.identity.pc_id.clone(),
             pc_name,
+            request_id: request_id.clone(),
         };
         let preferred_id = self
             .active_connection
@@ -484,7 +499,12 @@ impl AppState {
             .and_then(|active| active.as_ref().map(|connection| connection.connection_id));
         let mut channels = match self.switch_channels.lock() {
             Ok(channels) => channels,
-            Err(_) => return,
+            Err(_) => {
+                self.update_status(|status| {
+                    status.summary = tr("手机未响应", "Phone did not respond").to_owned();
+                });
+                return;
+            }
         };
         let candidate_id = preferred_id
             .filter(|id| channels.contains_key(id))
@@ -506,13 +526,92 @@ impl AppState {
                     .copied()
             });
         let Some(candidate_id) = candidate_id else {
+            drop(channels);
+            self.update_status(|status| {
+                status.summary = tr("手机未连接", "Phone is not connected").to_owned();
+            });
             return;
         };
-        if channels
+        let supports_switch_ack = channels
             .get(&candidate_id)
-            .is_some_and(|channel| channel.sender.send(request).is_err())
-        {
+            .is_some_and(|channel| channel.supports_switch_ack);
+        let sent = channels
+            .get(&candidate_id)
+            .is_some_and(|channel| channel.sender.send(request).is_ok());
+        if !sent {
             channels.remove(&candidate_id);
+            drop(channels);
+            self.update_status(|status| {
+                status.summary = tr("手机未响应", "Phone did not respond").to_owned();
+            });
+            return;
+        }
+        drop(channels);
+        if !supports_switch_ack {
+            self.update_status(|status| {
+                status.summary = tr("已发送切换请求", "Switch request sent").to_owned();
+            });
+            return;
+        }
+        if let Ok(mut pending) = self.pending_switch.lock() {
+            *pending = Some(PendingSwitch {
+                pc_id: self.identity.pc_id.clone(),
+                request_id: request_id.clone(),
+            });
+        }
+        self.update_status(|status| {
+            status.summary = tr("正在切换手机输入", "Switching phone input").to_owned();
+        });
+        let state = Arc::downgrade(self);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(2_500));
+            let Some(state) = state.upgrade() else { return };
+            let timed_out = state
+                .pending_switch
+                .lock()
+                .map(|mut pending| {
+                    if pending
+                        .as_ref()
+                        .is_some_and(|value| value.request_id == request_id)
+                    {
+                        *pending = None;
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
+            if timed_out {
+                state.update_status(|status| {
+                    status.summary = tr("手机未响应", "Phone did not respond").to_owned();
+                });
+            }
+        });
+    }
+
+    fn acknowledge_switch(&self, ack: &SwitchAck) {
+        let matched = self
+            .pending_switch
+            .lock()
+            .map(|mut pending| {
+                if pending.as_ref().is_some_and(|value| {
+                    value.request_id == ack.request_id && value.pc_id == ack.pc_id
+                }) {
+                    *pending = None;
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
+        if matched {
+            self.update_status(|status| {
+                status.summary = if ack.accepted {
+                    tr("已切换到此电脑", "Switched to this computer").to_owned()
+                } else {
+                    tr("手机未找到这台电脑", "Computer is not paired on the phone").to_owned()
+                };
+            });
         }
     }
 
@@ -521,9 +620,17 @@ impl AppState {
         connection_id: u64,
         sender: UnboundedSender<SwitchRequest>,
         is_control: bool,
+        supports_switch_ack: bool,
     ) {
         if let Ok(mut channels) = self.switch_channels.lock() {
-            channels.insert(connection_id, SwitchChannel { sender, is_control });
+            channels.insert(
+                connection_id,
+                SwitchChannel {
+                    sender,
+                    is_control,
+                    supports_switch_ack,
+                },
+            );
         }
     }
 
@@ -713,6 +820,7 @@ async fn serve_connection(
             pc_id: &state.identity.pc_id,
             pc_name: &pc_name,
             candidate_endpoints: endpoint_urls(None),
+            capabilities: &["health_check", "switch_ack"],
         },
     )
     .await?;
@@ -725,7 +833,12 @@ async fn serve_connection(
         }
     });
     let (switch_tx, mut switch_rx) = unbounded_channel();
-    state.register_switch_channel(connection_id, switch_tx, is_control);
+    state.register_switch_channel(
+        connection_id,
+        switch_tx,
+        is_control,
+        auth.capabilities.iter().any(|value| value == "switch_ack"),
+    );
     let _switch_lease = SwitchChannelLease {
         state: Arc::clone(&state),
         connection_id,
@@ -743,6 +856,7 @@ async fn serve_connection(
                         protocol_version: flowtype_core::PROTOCOL_VERSION,
                         pc_id: request.pc_id,
                         pc_name: request.pc_name,
+                        request_id: request.request_id,
                     }),
                 ).await?;
             }
@@ -754,12 +868,16 @@ async fn serve_connection(
                     return Err("message too large".into());
                 }
                 let value: serde_json::Value = serde_json::from_str(&text)?;
-                let is_probe =
-                    value.get("type").and_then(serde_json::Value::as_str) == Some("probe");
+                let message_type = value.get("type").and_then(serde_json::Value::as_str);
+                let is_probe = message_type == Some("probe");
+                let is_control_message = matches!(
+                    message_type,
+                    Some("probe" | "health_check" | "switch_ack")
+                );
                 if is_probe {
                     state.mark_probe_connection(connection_id);
                 }
-                if !is_probe && active_lease.is_none() {
+                if !is_control_message && active_lease.is_none() {
                     active_lease = Some(claim_active_connection(
                         &state,
                         &auth.phone_id,
@@ -1075,6 +1193,31 @@ async fn handle_client_message<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    if let ClientMessage::HealthCheck(health) = &message {
+        health.validate().map_err(|_| "invalid health check")?;
+        if health.phone_id != authenticated_phone_id {
+            return Err("health check phone does not match".into());
+        }
+        send_json(
+            websocket,
+            &ServerMessage::HealthAck(HealthAck {
+                protocol_version: flowtype_core::PROTOCOL_VERSION,
+            }),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    if let ClientMessage::SwitchAck(ack) = &message {
+        ack.validate()
+            .map_err(|_| "invalid switch acknowledgement")?;
+        if ack.pc_id != state.identity.pc_id {
+            return Err("switch acknowledgement computer does not match".into());
+        }
+        state.acknowledge_switch(ack);
+        return Ok(());
+    }
+
     if let ClientMessage::Probe(probe) = &message {
         probe.validate().map_err(|_| "invalid probe")?;
         if probe.phone_id != authenticated_phone_id {
@@ -1128,7 +1271,9 @@ where
         ClientMessage::Finish(value) => ("finish", value),
         ClientMessage::Resume(value) => return handle_resume(websocket, state, value).await,
         ClientMessage::Cancel(value) => return handle_cancel(state, value),
-        ClientMessage::Probe(_) => unreachable!(),
+        ClientMessage::Probe(_) | ClientMessage::HealthCheck(_) | ClientMessage::SwitchAck(_) => {
+            unreachable!()
+        }
     };
     snapshot.validate().map_err(|_| "invalid snapshot")?;
     if snapshot.phone_id != authenticated_phone_id {
@@ -1582,6 +1727,7 @@ mod tests {
             pairing_token: None,
             public_key_spki: None,
             connection_mode: None,
+            capabilities: Vec::new(),
             signature: STANDARD.encode(signature.to_der()),
         };
         let point = signing_key.verifying_key().to_encoded_point(false);

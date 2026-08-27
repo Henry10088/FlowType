@@ -7,27 +7,27 @@ import org.junit.Test
 
 class TargetSelectorTest {
     @Test
-    fun rotatesThroughComputerEndpointsWithoutChangingIdentity() {
+    fun onlyRotatesCandidateEndpointsDuringPairing() {
         val first = ComputerBinding(
             pcId = "pc",
             pcName = "Office",
             endpoint = "wss://100.0.0.13:32187/v1/sync",
             tlsSpkiSha256 = "hash",
-            pairingToken = null,
+            pairingToken = "one-time-token",
             endpoints = listOf(
                 "wss://100.0.0.13:32187/v1/sync",
                 "wss://192.168.1.20:32187/v1/sync",
             ),
         )
 
-        val second = first.nextEndpoint()
+        val second = first.nextPairingEndpoint()
         assertEquals("pc", second.pcId)
         assertEquals("wss://192.168.1.20:32187/v1/sync", second.endpoint)
-        assertEquals(first.endpoint, second.nextEndpoint().endpoint)
-        assertEquals(
-            "wss://10.0.0.20:32187/v1/sync",
-            first.withCandidateEndpoints(listOf("wss://10.0.0.20:32187/v1/sync")).endpoints[1],
-        )
+        assertEquals(first.endpoint, second.nextPairingEndpoint().endpoint)
+
+        val paired = second.pairedAtCurrentEndpoint()
+        assertEquals(second.endpoint, paired.nextPairingEndpoint().endpoint)
+        assertEquals(listOf(second.endpoint), paired.endpoints)
     }
 
     @Test

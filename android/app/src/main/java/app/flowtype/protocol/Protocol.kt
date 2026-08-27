@@ -55,6 +55,18 @@ data class ProbeMessage(
     val protocolVersion: Int = PROTOCOL_VERSION,
 )
 
+data class HealthCheckMessage(
+    val phoneId: String,
+    val protocolVersion: Int = PROTOCOL_VERSION,
+)
+
+data class SwitchAckMessage(
+    val requestId: String,
+    val pcId: String,
+    val accepted: Boolean,
+    val protocolVersion: Int = PROTOCOL_VERSION,
+)
+
 enum class ServerSessionState(val wireName: String) {
     ACTIVE("active"),
     FINISHED("finished"),
@@ -85,6 +97,7 @@ data class TargetMessage(
 data class SwitchComputerMessage(
     val pcId: String,
     val pcName: String,
+    val requestId: String?,
     val protocolVersion: Int = PROTOCOL_VERSION,
 )
 
@@ -98,6 +111,10 @@ data class ProbeResultMessage(
     val targetState: ProbeState,
     val targetName: String?,
     val activityAgeMs: Long?,
+    val protocolVersion: Int = PROTOCOL_VERSION,
+)
+
+data class HealthAckMessage(
     val protocolVersion: Int = PROTOCOL_VERSION,
 )
 
@@ -128,6 +145,7 @@ sealed interface ServerMessage {
     data class Target(val value: TargetMessage) : ServerMessage
     data class SwitchComputer(val value: SwitchComputerMessage) : ServerMessage
     data class ProbeResult(val value: ProbeResultMessage) : ServerMessage
+    data class HealthAck(val value: HealthAckMessage) : ServerMessage
     data class Error(val value: ErrorMessage) : ServerMessage
 }
 
@@ -163,6 +181,20 @@ object ProtocolCodec {
         .put("protocol_version", message.protocolVersion)
         .put("type", "probe")
         .put("phone_id", message.phoneId)
+        .toString()
+
+    fun encode(message: HealthCheckMessage): String = JSONObject()
+        .put("protocol_version", message.protocolVersion)
+        .put("type", "health_check")
+        .put("phone_id", message.phoneId)
+        .toString()
+
+    fun encode(message: SwitchAckMessage): String = JSONObject()
+        .put("protocol_version", message.protocolVersion)
+        .put("type", "switch_ack")
+        .put("request_id", message.requestId)
+        .put("pc_id", message.pcId)
+        .put("accepted", message.accepted)
         .toString()
 
     fun decodeSnapshot(json: String): SnapshotMessage {
@@ -203,6 +235,7 @@ object ProtocolCodec {
                 SwitchComputerMessage(
                     pcId = value.getString("pc_id"),
                     pcName = value.getString("pc_name"),
+                    requestId = value.optString("request_id").ifEmpty { null },
                     protocolVersion = version,
                 ),
             )
@@ -214,6 +247,7 @@ object ProtocolCodec {
                     protocolVersion = version,
                 ),
             )
+            "health_ack" -> ServerMessage.HealthAck(HealthAckMessage(protocolVersion = version))
             "error" -> ServerMessage.Error(
                 ErrorMessage(
                     code = ErrorCode.valueOf(value.getString("code")),

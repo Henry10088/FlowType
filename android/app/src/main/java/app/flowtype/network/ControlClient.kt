@@ -6,6 +6,8 @@ import android.os.Looper
 import android.util.Base64
 import app.flowtype.pairing.ComputerBinding
 import app.flowtype.protocol.PROTOCOL_VERSION
+import app.flowtype.protocol.ProtocolCodec
+import app.flowtype.protocol.SwitchAckMessage
 import app.flowtype.security.PhoneIdentity
 import okhttp3.ConnectionSpec
 import okhttp3.OkHttpClient
@@ -15,6 +17,7 @@ import okhttp3.TlsVersion
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import org.json.JSONArray
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.cert.CertificateException
@@ -35,7 +38,7 @@ class ControlClient(
     private val listener: Listener,
 ) {
     interface Listener {
-        fun onSwitchComputer(pcId: String)
+        fun onSwitchComputer(pcId: String, completion: (Boolean) -> Unit)
     }
 
     private val lock = Any()
@@ -45,7 +48,8 @@ class ControlClient(
     private var binding: ComputerBinding? = null
     private var generation = 0L
     private var reconnectAttempt = 0
-    private var retryScheduled = false
+    private var reconnectRunnable: Runnable? = null
+    private var connectTimeoutRunnable: Runnable? = null
     private var stopped = true
 
     fun update(next: ComputerBinding) {
@@ -67,11 +71,22 @@ class ControlClient(
         }
     }
 
+    fun ensureConnected() {
+        synchronized(lock) {
+            if (stopped || binding == null || socket != null) return
+            reconnectRunnable?.let(handler::removeCallbacks)
+            reconnectRunnable = null
+            openSocketLocked()
+        }
+    }
+
     private fun stopLocked() {
         stopped = true
         generation += 1
-        retryScheduled = false
-        handler.removeCallbacksAndMessages(null)
+        reconnectRunnable?.let(handler::removeCallbacks)
+        reconnectRunnable = null
+        connectTimeoutRunnable?.let(handler::removeCallbacks)
+        connectTimeoutRunnable = null
         socket?.close(1000, "control stopped")
         socket = null
         client?.dispatcher?.executorService?.shutdown()
@@ -87,19 +102,27 @@ class ControlClient(
             Request.Builder().url(current.endpoint).build(),
             SocketListener(current, currentGeneration),
         )
+        val timeout = Runnable {
+            synchronized(lock) {
+                connectionLostLocked(current, currentGeneration, cancelSocket = true)
+            }
+        }
+        connectTimeoutRunnable = timeout
+        handler.postDelayed(timeout, CONNECT_TIMEOUT_MS)
     }
 
     private fun scheduleReconnectLocked() {
-        if (stopped || binding == null || retryScheduled) return
-        retryScheduled = true
-        val delay = minOf(10_000L, 250L * (1L shl minOf(reconnectAttempt, 5)))
+        if (stopped || binding == null || reconnectRunnable != null) return
+        val delay = RECONNECT_DELAYS[minOf(reconnectAttempt, RECONNECT_DELAYS.lastIndex)]
         reconnectAttempt += 1
-        handler.postDelayed({
+        val reconnect = Runnable {
             synchronized(lock) {
-                retryScheduled = false
+                reconnectRunnable = null
                 if (!stopped && socket == null) openSocketLocked()
             }
-        }, delay)
+        }
+        reconnectRunnable = reconnect
+        handler.postDelayed(reconnect, delay)
     }
 
     private fun buildClient(binding: ComputerBinding): OkHttpClient {
@@ -132,6 +155,7 @@ class ControlClient(
             .put("phone_id", phoneId)
             .put("phone_name", Build.MODEL.ifBlank { "Android" })
             .put("connection_mode", "control")
+            .put("capabilities", JSONArray(listOf("switch_ack")))
             .put(
                 "signature",
                 Base64.encodeToString(phoneIdentity.sign(current.pcId, payload), Base64.NO_WRAP),
@@ -157,10 +181,27 @@ class ControlClient(
                     val value = JSONObject(text)
                     when (value.getString("type")) {
                         "challenge" -> authenticate(webSocket, current, value)
-                        "ready" -> reconnectAttempt = 0
+                        "ready" -> {
+                            connectTimeoutRunnable?.let(handler::removeCallbacks)
+                            connectTimeoutRunnable = null
+                            reconnectAttempt = 0
+                        }
                         "switch_computer" -> {
                             if (value.optInt("protocol_version", PROTOCOL_VERSION) != PROTOCOL_VERSION) return@runCatching
-                            listener.onSwitchComputer(value.getString("pc_id"))
+                            val pcId = value.getString("pc_id")
+                            val requestId = value.optString("request_id").ifEmpty { null }
+                            listener.onSwitchComputer(pcId) { accepted ->
+                                if (requestId == null) return@onSwitchComputer
+                                synchronized(lock) {
+                                    if (currentGeneration != generation || stopped) return@synchronized
+                                    if (socket?.send(
+                                            ProtocolCodec.encode(SwitchAckMessage(requestId, pcId, accepted)),
+                                        ) != true
+                                    ) {
+                                        connectionLostLocked(current, currentGeneration, cancelSocket = true)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -177,12 +218,29 @@ class ControlClient(
 
         private fun connectionLost() {
             synchronized(lock) {
-                if (currentGeneration != generation || stopped) return
-                socket = null
-                binding = current.nextEndpoint()
-                scheduleReconnectLocked()
+                connectionLostLocked(current, currentGeneration, cancelSocket = false)
             }
         }
+    }
+
+    private fun connectionLostLocked(
+        current: ComputerBinding,
+        currentGeneration: Long,
+        cancelSocket: Boolean,
+    ) {
+        if (currentGeneration != generation || stopped) return
+        generation += 1
+        connectTimeoutRunnable?.let(handler::removeCallbacks)
+        connectTimeoutRunnable = null
+        if (cancelSocket) socket?.cancel()
+        socket = null
+        binding = current
+        scheduleReconnectLocked()
+    }
+
+    private companion object {
+        const val CONNECT_TIMEOUT_MS = 4_000L
+        val RECONNECT_DELAYS = longArrayOf(1_000L, 5_000L, 15_000L, 30_000L, 60_000L)
     }
 
     @Suppress("CustomX509TrustManager")

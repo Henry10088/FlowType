@@ -311,7 +311,10 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
     fun selectComputer(pcId: String): Boolean {
         val binding = bindings.select(pcId) ?: return false
         if (currentBinding?.pcId == binding.pcId) {
-            ensureConnected()
+            connected = false
+            targetState = null
+            statusText = text(R.string.status_connecting, binding.pcName)
+            syncClient.forceReconnect()
             notifyChanged()
             return true
         }
@@ -345,11 +348,14 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         }
     }
 
-    fun ensureConnected() = syncClient.ensureConnected()
+    fun ensureConnected() {
+        syncClient.ensureConnected()
+        controlClients.values.forEach(ControlClient::ensureConnected)
+    }
 
     private fun refreshControlClients() {
         val stored = bindings.list()
-            .filter { it.pairingToken == null }
+            .filter { it.pairingToken == null && it.pcId != currentBinding?.pcId }
             .associateBy { it.pcId }
         controlClients.keys.toList()
             .filter { it !in stored }
@@ -359,8 +365,11 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         stored.values.forEach { binding ->
             controlClients.getOrPut(binding.pcId) {
                 ControlClient(bindings.phoneId, PhoneIdentity(), object : ControlClient.Listener {
-                    override fun onSwitchComputer(pcId: String) = onMain {
-                        this@FlowTypeApplication.onSwitchComputer(pcId)
+                    override fun onSwitchComputer(
+                        pcId: String,
+                        completion: (Boolean) -> Unit,
+                    ) = onMain {
+                        switchFromWindows(pcId, completion)
                     }
                 })
             }.update(binding)
@@ -433,8 +442,17 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         notifyChanged()
     }
 
-    override fun onSwitchComputer(pcId: String) = onMain {
-        val binding = bindings.select(pcId) ?: return@onMain
+    override fun onSwitchComputer(pcId: String, completion: (Boolean) -> Unit) = onMain {
+        switchFromWindows(pcId, completion)
+    }
+
+    private fun switchFromWindows(pcId: String, completion: (Boolean) -> Unit) {
+        val binding = bindings.select(pcId) ?: run {
+            completion(false)
+            return
+        }
+        // Confirm acceptance before switching tears down the control socket that carried the request.
+        completion(true)
         recentActivityPcId = pcId
         if (currentBinding?.pcId == binding.pcId) {
             ensureConnected()
@@ -621,16 +639,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
             onlinePcIds -= pcId
         } else {
             onlinePcIds += pcId
-            val selected = currentBinding
-            val stored = bindings.list().firstOrNull { it.pcId == pcId }
-            if (stored != null && stored.endpoint != endpoint) {
-                bindings.updateEndpoint(pcId, endpoint)
-                if (selected?.pcId == pcId && !session.finishing) {
-                    connect(stored.withPreferredEndpoint(endpoint))
-                }
-            }
         }
-        refreshControlClients()
         notifyChanged()
     }
 

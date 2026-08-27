@@ -19,21 +19,18 @@ data class ComputerBinding(
     val pairingToken: String?,
     val endpoints: List<String> = listOf(endpoint),
 ) {
-    fun withPreferredEndpoint(value: String): ComputerBinding = copy(
-        endpoint = value,
-        endpoints = (listOf(value) + endpoints).distinct(),
-    )
-
-    fun withCandidateEndpoints(values: List<String>): ComputerBinding = copy(
-        endpoints = (listOf(endpoint) + values + endpoints).distinct(),
-    )
-
-    fun nextEndpoint(): ComputerBinding {
+    fun nextPairingEndpoint(): ComputerBinding {
+        if (pairingToken == null) return this
         val candidates = (listOf(endpoint) + endpoints).distinct()
         if (candidates.size < 2) return this
         val next = candidates[(candidates.indexOf(endpoint) + 1).mod(candidates.size)]
         return copy(endpoint = next, endpoints = candidates)
     }
+
+    fun pairedAtCurrentEndpoint(): ComputerBinding = copy(
+        pairingToken = null,
+        endpoints = listOf(endpoint),
+    )
 }
 
 class BindingStore(context: Context, private val database: AppDatabase = AppDatabase(context)) {
@@ -85,20 +82,6 @@ class BindingStore(context: Context, private val database: AppDatabase = AppData
         )
     }
 
-    fun updateEndpoint(pcId: String, endpoint: String) {
-        val binding = get(pcId) ?: return
-        val updated = binding.withPreferredEndpoint(endpoint)
-        database.writableDatabase.update(
-            "computers",
-            ContentValues().apply {
-                put("endpoint", updated.endpoint)
-                put("endpoint_candidates", JSONArray(updated.endpoints).toString())
-            },
-            "pc_id = ?",
-            arrayOf(pcId),
-        )
-    }
-
     fun remove(pcId: String) {
         val wasSelected = load()?.pcId == pcId
         database.writableDatabase.delete("computers", "pc_id = ?", arrayOf(pcId))
@@ -107,7 +90,8 @@ class BindingStore(context: Context, private val database: AppDatabase = AppData
 
     fun clear() = load()?.let { remove(it.pcId) } ?: Unit
 
-    fun markPaired(binding: ComputerBinding): ComputerBinding = binding.copy(pairingToken = null).also(::save)
+    fun markPaired(binding: ComputerBinding): ComputerBinding =
+        binding.pairedAtCurrentEndpoint().also(::save)
 
     private fun get(pcId: String): ComputerBinding? = query("pc_id = ?", arrayOf(pcId)).firstOrNull()
 
@@ -144,7 +128,12 @@ class BindingStore(context: Context, private val database: AppDatabase = AppData
         put("pc_id", binding.pcId)
         put("pc_name", binding.pcName)
         put("endpoint", binding.endpoint)
-        put("endpoint_candidates", JSONArray((listOf(binding.endpoint) + binding.endpoints).distinct()).toString())
+        val endpoints = if (binding.pairingToken == null) {
+            listOf(binding.endpoint)
+        } else {
+            (listOf(binding.endpoint) + binding.endpoints).distinct()
+        }
+        put("endpoint_candidates", JSONArray(endpoints).toString())
         put("tls_spki_sha256", binding.tlsSpkiSha256)
         binding.pairingToken?.let { put("pairing_token", it) } ?: putNull("pairing_token")
         put("selected", if (selected) 1 else 0)

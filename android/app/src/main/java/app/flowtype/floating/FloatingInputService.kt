@@ -69,6 +69,7 @@ class FloatingInputService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action ?: ACTION_START
+        if (action != ACTION_STOP) controller.ensureConnected()
         if (action != ACTION_STOP && controller.settings.floatingInput) {
             startForeground(NOTIFICATION_ID, notification())
         }

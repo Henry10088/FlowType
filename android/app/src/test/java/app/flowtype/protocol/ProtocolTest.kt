@@ -73,10 +73,28 @@ class ProtocolTest {
     @Test
     fun decodesSwitchToCurrentComputer() {
         val message = ProtocolCodec.decodeServer(
-            """{"protocol_version":1,"type":"switch_computer","pc_id":"pc","pc_name":"办公室电脑"}""",
+            """{"protocol_version":1,"type":"switch_computer","pc_id":"pc","pc_name":"办公室电脑","request_id":"request-1"}""",
         )
         require(message is ServerMessage.SwitchComputer)
         assertEquals("pc", message.value.pcId)
         assertEquals("办公室电脑", message.value.pcName)
+        assertEquals("request-1", message.value.requestId)
+    }
+
+    @Test
+    fun encodesHealthCheckAndSwitchAcknowledgement() {
+        val health = ProtocolCodec.encode(HealthCheckMessage("phone"))
+        assertEquals("health_check", org.json.JSONObject(health).getString("type"))
+        require(
+            ProtocolCodec.decodeServer("""{"protocol_version":1,"type":"health_ack"}""")
+                is ServerMessage.HealthAck,
+        )
+
+        val ack = org.json.JSONObject(
+            ProtocolCodec.encode(SwitchAckMessage("request-1", "pc", accepted = true)),
+        )
+        assertEquals("switch_ack", ack.getString("type"))
+        assertEquals("request-1", ack.getString("request_id"))
+        assertEquals(true, ack.getBoolean("accepted"))
     }
 }

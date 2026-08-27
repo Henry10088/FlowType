@@ -11,6 +11,8 @@ pub enum ClientMessage {
     Resume(Resume),
     Cancel(Cancel),
     Probe(Probe),
+    HealthCheck(HealthCheck),
+    SwitchAck(SwitchAck),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +48,20 @@ pub struct Probe {
     pub phone_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthCheck {
+    pub protocol_version: u16,
+    pub phone_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwitchAck {
+    pub protocol_version: u16,
+    pub request_id: String,
+    pub pc_id: String,
+    pub accepted: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientSessionState {
@@ -60,6 +76,7 @@ pub enum ServerMessage {
     Target(Target),
     SwitchComputer(SwitchComputer),
     ProbeResult(ProbeResult),
+    HealthAck(HealthAck),
     Error(ProtocolError),
 }
 
@@ -68,6 +85,13 @@ pub struct SwitchComputer {
     pub protocol_version: u16,
     pub pc_id: String,
     pub pc_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthAck {
+    pub protocol_version: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,11 +241,35 @@ impl Probe {
     }
 }
 
+impl HealthCheck {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.protocol_version != PROTOCOL_VERSION {
+            return Err(ValidationError::UnsupportedProtocol);
+        }
+        if self.phone_id.is_empty() {
+            return Err(ValidationError::MissingIdentifier);
+        }
+        Ok(())
+    }
+}
+
+impl SwitchAck {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.protocol_version != PROTOCOL_VERSION {
+            return Err(ValidationError::UnsupportedProtocol);
+        }
+        if self.request_id.is_empty() || self.pc_id.is_empty() {
+            return Err(ValidationError::MissingIdentifier);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientMessage, ErrorCode, ProtocolError, ServerMessage, Snapshot, SwitchComputer,
-        ValidationError,
+        ClientMessage, ErrorCode, HealthAck, HealthCheck, ProtocolError, ServerMessage, Snapshot,
+        SwitchAck, SwitchComputer, ValidationError,
     };
 
     #[test]
@@ -235,7 +283,11 @@ mod tests {
                 ClientMessage::Start(value)
                 | ClientMessage::Update(value)
                 | ClientMessage::Finish(value) => value,
-                ClientMessage::Resume(_) | ClientMessage::Cancel(_) | ClientMessage::Probe(_) => {
+                ClientMessage::Resume(_)
+                | ClientMessage::Cancel(_)
+                | ClientMessage::Probe(_)
+                | ClientMessage::HealthCheck(_)
+                | ClientMessage::SwitchAck(_) => {
                     unreachable!()
                 }
             };
@@ -312,10 +364,36 @@ mod tests {
             protocol_version: 1,
             pc_id: "pc".into(),
             pc_name: "办公室电脑".into(),
+            request_id: "request-1".into(),
         }))
         .unwrap();
         assert_eq!(value["type"], "switch_computer");
         assert_eq!(value["pc_id"], "pc");
         assert_eq!(value["pc_name"], "办公室电脑");
+        assert_eq!(value["request_id"], "request-1");
+    }
+
+    #[test]
+    fn validates_health_check_and_switch_ack() {
+        let health = ClientMessage::HealthCheck(HealthCheck {
+            protocol_version: 1,
+            phone_id: "phone".into(),
+        });
+        assert!(matches!(health, ClientMessage::HealthCheck(value) if value.validate().is_ok()));
+        let value = serde_json::to_value(ServerMessage::HealthAck(HealthAck {
+            protocol_version: 1,
+        }))
+        .unwrap();
+        assert_eq!(value["type"], "health_ack");
+
+        let ack = ClientMessage::SwitchAck(SwitchAck {
+            protocol_version: 1,
+            request_id: "request-1".into(),
+            pc_id: "pc".into(),
+            accepted: true,
+        });
+        let value = serde_json::to_value(&ack).unwrap();
+        assert_eq!(value["type"], "switch_ack");
+        assert!(matches!(ack, ClientMessage::SwitchAck(value) if value.validate().is_ok()));
     }
 }
