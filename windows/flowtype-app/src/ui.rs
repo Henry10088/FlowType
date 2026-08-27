@@ -107,6 +107,7 @@ struct UiContext {
     update_history: HWND,
     title_font: HFONT,
     heading_font: HFONT,
+    navigation_font: HFONT,
     body_font: HFONT,
     icon_font: HFONT,
     auto_start_checked: bool,
@@ -140,6 +141,7 @@ impl UiContext {
             update_history: null_mut(),
             title_font: null_mut(),
             heading_font: null_mut(),
+            navigation_font: null_mut(),
             body_font: null_mut(),
             icon_font: null_mut(),
             auto_start_checked: false,
@@ -234,6 +236,7 @@ impl UiContext {
         for font in [
             self.title_font,
             self.heading_font,
+            self.navigation_font,
             self.body_font,
             self.icon_font,
         ] {
@@ -243,6 +246,7 @@ impl UiContext {
         }
         self.title_font = create_font(self.scale(22), FW_SEMIBOLD as i32, "Segoe UI");
         self.heading_font = create_font(self.scale(17), FW_SEMIBOLD as i32, "Segoe UI");
+        self.navigation_font = create_font(self.scale(15), FW_SEMIBOLD as i32, "Segoe UI");
         self.body_font = create_font(self.scale(14), FW_NORMAL as i32, "Segoe UI");
         self.icon_font = create_font(self.scale(20), FW_NORMAL as i32, "Segoe Fluent Icons");
     }
@@ -1193,7 +1197,7 @@ impl UiContext {
                     item.hDC,
                     &text,
                     rect,
-                    self.heading_font,
+                    self.navigation_font,
                     COLOR_TEXT,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE,
                 );
@@ -1837,7 +1841,13 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_NCDESTROY => {
-            for font in [ui.title_font, ui.heading_font, ui.body_font, ui.icon_font] {
+            for font in [
+                ui.title_font,
+                ui.heading_font,
+                ui.navigation_font,
+                ui.body_font,
+                ui.icon_font,
+            ] {
                 if !font.is_null() {
                     unsafe { DeleteObject(font) };
                 }
