@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -40,11 +41,10 @@ jobs:
       - name: Build Android release APK
         shell: bash
         run: ./gradlew packageFlowTypeRelease
-      # GitHub-hosted emulator startup is occasionally unable to answer adb
-      # property queries (reported as "Unknown API Level"). Keep this
-      # environment check visible without blocking release artifacts.
-      - name: Run Android instrumented tests (non-blocking)
-        continue-on-error: true
+      # Emulator startup is a slow, runner-dependent check. Keep it available
+      # for manual validation without blocking normal build CI.
+      - name: Run Android instrumented tests (manual)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 36
