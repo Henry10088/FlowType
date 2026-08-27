@@ -22,16 +22,20 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
-use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+use windows_sys::Win32::Security::{
+    GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    TokenUser,
+};
 use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, PIPE_READMODE_BYTE,
     PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW,
 };
 
 use crate::target::TargetWindow;
@@ -57,9 +61,10 @@ fn main() -> io::Result<()> {
     speech::initialize_com().map_err(io::Error::other)?;
     let tips = TipRegistry::start();
     speech::ensure_flowtype_active().map_err(io::Error::other)?;
+    let pipe_sddl = pipe_security_sddl()?;
     let mut session = None;
     loop {
-        let mut pipe = match accept_pipe() {
+        let mut pipe = match accept_pipe(&pipe_sddl) {
             Ok(pipe) => pipe,
             Err(error) if error.kind() == io::ErrorKind::PermissionDenied => continue,
             Err(error) => return Err(error),
@@ -73,13 +78,9 @@ fn main() -> io::Result<()> {
     }
 }
 
-fn accept_pipe() -> io::Result<File> {
+fn accept_pipe(sddl: &[u16]) -> io::Result<File> {
     let name: Vec<u16> = PIPE_NAME.encode_utf16().chain(Some(0)).collect();
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-    let sddl: Vec<u16> = "D:P(A;;GA;;;OW)(A;;GA;;;SY)(A;;GA;;;BA)"
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
     let converted = unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl.as_ptr(),
@@ -125,6 +126,56 @@ fn accept_pipe() -> io::Result<File> {
         ));
     }
     Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+fn pipe_security_sddl() -> io::Result<Vec<u16>> {
+    let mut token = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let result = (|| {
+        let mut length = 0_u32;
+        unsafe {
+            GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut length);
+        }
+        if length < size_of::<TOKEN_USER>() as u32 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut buffer = vec![0_u8; length as usize];
+        if unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                length,
+                &mut length,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let user = unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<TOKEN_USER>()) };
+        let mut sid_text = std::ptr::null_mut();
+        if unsafe { ConvertSidToStringSidW(user.User.Sid, &mut sid_text) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let sid = unsafe {
+            let mut length = 0;
+            while *sid_text.add(length) != 0 {
+                length += 1;
+            }
+            String::from_utf16_lossy(std::slice::from_raw_parts(sid_text, length))
+        };
+        unsafe { LocalFree(sid_text.cast()) };
+        Ok(format!("D:P(A;;GA;;;{sid})(A;;GA;;;SY)(A;;GA;;;BA)")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect())
+    })();
+    unsafe { CloseHandle(token) };
+    result
 }
 
 fn is_expected_client(pipe: HANDLE) -> io::Result<bool> {
