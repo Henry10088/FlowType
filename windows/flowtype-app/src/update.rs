@@ -197,6 +197,48 @@ impl UpdateManager {
         }
     }
 
+    pub fn refresh_language(&self) {
+        if let Ok(mut state) = self.shared.lock() {
+            let action = state.snapshot.action;
+            let version = state.snapshot.version.clone();
+            match action {
+                UpdateAction::Check => state.snapshot = UpdateSnapshot::idle(),
+                UpdateAction::Download => {
+                    state.snapshot.message = version
+                        .as_ref()
+                        .map(|value| {
+                            format!(
+                                "{}{}{}",
+                                tr("发现新版本 ", "Version "),
+                                value,
+                                tr("", " is available")
+                            )
+                        })
+                        .unwrap_or_else(|| tr("发现新版本", "Update available").to_owned());
+                    state.snapshot.action_label = tr("下载更新", "Download update").to_owned();
+                }
+                UpdateAction::Cancel => {
+                    state.snapshot.message =
+                        tr("正在下载更新…", "Downloading update...").to_owned();
+                    state.snapshot.action_label = tr("取消", "Cancel").to_owned();
+                }
+                UpdateAction::Install => {
+                    state.snapshot.message = tr("更新已下载", "Update downloaded").to_owned();
+                    state.snapshot.action_label = tr("安装更新", "Install update").to_owned();
+                }
+                UpdateAction::None => {
+                    state.snapshot.message =
+                        tr("更新状态不可用", "Update status unavailable").to_owned();
+                    state.snapshot.action_label.clear();
+                }
+            }
+        }
+        let window = self.ui_hwnd.load(Ordering::Acquire);
+        if window != 0 {
+            unsafe { PostMessageW(window as HWND, WM_APP_UPDATE, 0, 0) };
+        }
+    }
+
     pub fn open_repository(&self) -> io::Result<()> {
         shell_open("open", REPOSITORY_URL)
     }

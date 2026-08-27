@@ -1,6 +1,13 @@
-use std::sync::OnceLock;
+use std::fs;
+use std::io;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use windows_sys::Win32::Globalization::GetUserDefaultUILanguage;
+
+const LANGUAGE_FILE: &str = "language-v1.txt";
+const UNINITIALIZED: u8 = 0;
+const CHINESE: u8 = 1;
+const ENGLISH: u8 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Language {
@@ -8,10 +15,55 @@ enum Language {
     English,
 }
 
-static LANGUAGE: OnceLock<Language> = OnceLock::new();
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LanguageChoice {
+    System,
+    Chinese,
+    English,
+}
+
+static LANGUAGE: AtomicU8 = AtomicU8::new(UNINITIALIZED);
 
 fn current() -> Language {
-    *LANGUAGE.get_or_init(|| language_from_id(unsafe { GetUserDefaultUILanguage() }))
+    match LANGUAGE.load(Ordering::Acquire) {
+        CHINESE => Language::Chinese,
+        ENGLISH => Language::English,
+        _ => {
+            let language = resolve(language_choice());
+            LANGUAGE.store(language_code(language), Ordering::Release);
+            language
+        }
+    }
+}
+
+pub fn language_choice() -> LanguageChoice {
+    crate::identity::data_dir()
+        .ok()
+        .and_then(|path| fs::read_to_string(path.join(LANGUAGE_FILE)).ok())
+        .map(|value| parse_choice(value.trim()))
+        .unwrap_or(LanguageChoice::System)
+}
+
+pub fn set_language_choice(choice: LanguageChoice) -> io::Result<()> {
+    let path = crate::identity::data_dir()?.join(LANGUAGE_FILE);
+    fs::write(path, choice_value(choice))?;
+    LANGUAGE.store(language_code(resolve(choice)), Ordering::Release);
+    Ok(())
+}
+
+fn resolve(choice: LanguageChoice) -> Language {
+    match choice {
+        LanguageChoice::System => language_from_id(unsafe { GetUserDefaultUILanguage() }),
+        LanguageChoice::Chinese => Language::Chinese,
+        LanguageChoice::English => Language::English,
+    }
+}
+
+const fn language_code(language: Language) -> u8 {
+    match language {
+        Language::Chinese => CHINESE,
+        Language::English => ENGLISH,
+    }
 }
 
 const fn language_from_id(language_id: u16) -> Language {
@@ -19,6 +71,22 @@ const fn language_from_id(language_id: u16) -> Language {
         Language::Chinese
     } else {
         Language::English
+    }
+}
+
+const fn choice_value(choice: LanguageChoice) -> &'static str {
+    match choice {
+        LanguageChoice::System => "system",
+        LanguageChoice::Chinese => "zh-CN",
+        LanguageChoice::English => "en",
+    }
+}
+
+fn parse_choice(value: &str) -> LanguageChoice {
+    match value {
+        "zh-CN" => LanguageChoice::Chinese,
+        "en" => LanguageChoice::English,
+        _ => LanguageChoice::System,
     }
 }
 
@@ -52,5 +120,12 @@ mod tests {
     fn falls_back_to_english() {
         assert_eq!(language_from_id(0x0409), Language::English);
         assert_eq!(language_from_id(0x0411), Language::English);
+    }
+
+    #[test]
+    fn parses_saved_language_choices() {
+        assert_eq!(parse_choice("zh-CN"), LanguageChoice::Chinese);
+        assert_eq!(parse_choice("en"), LanguageChoice::English);
+        assert_eq!(parse_choice("unknown"), LanguageChoice::System);
     }
 }

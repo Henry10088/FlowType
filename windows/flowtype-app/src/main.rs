@@ -597,6 +597,19 @@ impl AppState {
         Ok(())
     }
 
+    fn language_changed(&self) {
+        if let Ok(mut status) = self.runtime_status.lock() {
+            status.summary = status
+                .connected_phone
+                .as_ref()
+                .map(|phone| format!("{}{phone}", tr("已连接：", "Connected: ")))
+                .unwrap_or_else(|| tr("等待手机连接", "Waiting for phone").to_owned());
+            status.last_error = None;
+        }
+        self.update.refresh_language();
+        self.notify_ui();
+    }
+
     fn perform_update_action(&self, action: update::UpdateAction) {
         self.update.perform(action);
     }

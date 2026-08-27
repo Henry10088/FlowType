@@ -15,6 +15,8 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
     DRAWITEMSTRUCT, ICC_PROGRESS_CLASS, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX,
     InitCommonControlsEx, ODS_FOCUS, ODS_SELECTED, PBM_SETPOS, PBM_SETRANGE32, PBS_SMOOTH,
+    TOOLTIPS_CLASSW, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTS_ALWAYSTIP, TTS_NOPREFIX,
+    TTTOOLINFOW,
 };
 use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
@@ -26,7 +28,9 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::i18n::{is_chinese, product_name, tr};
+use crate::i18n::{
+    LanguageChoice, is_chinese, language_choice, product_name, set_language_choice, tr,
+};
 use crate::{AppState, PORT, WM_APP_STATE, settings, update};
 
 #[path = "ui_commands.rs"]
@@ -48,6 +52,9 @@ const WM_APP_SHOW: u32 = 0x8003;
 const WM_APP_FLOATING_HIDE: u32 = 0x8004;
 const TRAY_ID: u32 = 1;
 const NOTICE_TIMER: usize = 2;
+const ID_LANGUAGE_SYSTEM: usize = 4101;
+const ID_LANGUAGE_CHINESE: usize = 4102;
+const ID_LANGUAGE_ENGLISH: usize = 4103;
 
 struct SaveNotice {
     success: bool,
@@ -69,6 +76,7 @@ enum ButtonKind {
     Text,
     Back,
     Checkbox,
+    Language,
 }
 
 struct UiContext {
@@ -84,6 +92,8 @@ struct UiContext {
     name_edit: HWND,
     auto_start: HWND,
     show_floating: HWND,
+    language_button: HWND,
+    language_tooltip_text: Vec<u16>,
     update_status: HWND,
     update_progress: HWND,
     update_action: HWND,
@@ -114,6 +124,8 @@ impl UiContext {
             name_edit: null_mut(),
             auto_start: null_mut(),
             show_floating: null_mut(),
+            language_button: null_mut(),
+            language_tooltip_text: Vec::new(),
             update_status: null_mut(),
             update_progress: null_mut(),
             update_action: null_mut(),
@@ -164,6 +176,7 @@ impl UiContext {
         self.name_edit = null_mut();
         self.auto_start = null_mut();
         self.show_floating = null_mut();
+        self.language_button = null_mut();
         self.update_status = null_mut();
         self.update_progress = null_mut();
         self.update_action = null_mut();
@@ -176,6 +189,7 @@ impl UiContext {
             Page::Settings => self.build_settings(),
             Page::Pairing => self.build_pairing(),
         }
+        self.create_language_button();
         self.update_tray();
         unsafe {
             SendMessageW(self.hwnd, WM_SETREDRAW, 1, 0);
@@ -239,7 +253,7 @@ impl UiContext {
         self.owner_button(
             tr("绑定手机", "Pair phone"),
             ID_PAIR,
-            590,
+            558,
             28,
             132,
             42,
@@ -332,7 +346,7 @@ impl UiContext {
         self.owner_button(
             tr("保存设置", "Save settings"),
             ID_SAVE_SETTINGS,
-            610,
+            578,
             34,
             112,
             34,
@@ -633,6 +647,120 @@ impl UiContext {
             self.state.cancel_pairing();
         }
         self.page = page;
+        self.rebuild_page();
+    }
+
+    fn create_language_button(&mut self) {
+        self.language_button = self.owner_button(
+            "语言 / Language",
+            ID_LANGUAGE_MENU,
+            708,
+            18,
+            34,
+            34,
+            ButtonKind::Language,
+        );
+        self.language_tooltip_text = wide("语言 / Language");
+        let tooltip = unsafe {
+            CreateWindowExW(
+                WS_EX_TOPMOST,
+                TOOLTIPS_CLASSW,
+                null(),
+                WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                self.hwnd,
+                null_mut(),
+                GetModuleHandleW(null()),
+                null(),
+            )
+        };
+        if tooltip.is_null() {
+            return;
+        }
+        let mut tool = TTTOOLINFOW {
+            cbSize: size_of::<TTTOOLINFOW>() as u32,
+            uFlags: TTF_IDISHWND | TTF_SUBCLASS,
+            hwnd: self.hwnd,
+            uId: self.language_button as usize,
+            lpszText: self.language_tooltip_text.as_mut_ptr(),
+            ..Default::default()
+        };
+        unsafe {
+            SendMessageW(
+                tooltip,
+                TTM_ADDTOOLW,
+                0,
+                (&mut tool as *mut TTTOOLINFOW) as isize,
+            );
+        }
+        self.controls.push(tooltip);
+    }
+
+    fn show_language_menu(&mut self) {
+        let menu = unsafe { CreatePopupMenu() };
+        if menu.is_null() {
+            return;
+        }
+        let selected = language_choice();
+        unsafe {
+            append_checked_menu(
+                menu,
+                ID_LANGUAGE_SYSTEM,
+                "跟随系统 / System",
+                selected == LanguageChoice::System,
+            );
+            append_checked_menu(
+                menu,
+                ID_LANGUAGE_CHINESE,
+                "简体中文",
+                selected == LanguageChoice::Chinese,
+            );
+            append_checked_menu(
+                menu,
+                ID_LANGUAGE_ENGLISH,
+                "English",
+                selected == LanguageChoice::English,
+            );
+            let mut button_rect: RECT = zeroed();
+            GetWindowRect(self.language_button, &mut button_rect);
+            SetForegroundWindow(self.hwnd);
+            let command = TrackPopupMenu(
+                menu,
+                TPM_RIGHTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
+                button_rect.right,
+                button_rect.bottom,
+                0,
+                self.hwnd,
+                null(),
+            );
+            DestroyMenu(menu);
+            let choice = match command as usize {
+                ID_LANGUAGE_SYSTEM => Some(LanguageChoice::System),
+                ID_LANGUAGE_CHINESE => Some(LanguageChoice::Chinese),
+                ID_LANGUAGE_ENGLISH => Some(LanguageChoice::English),
+                _ => None,
+            };
+            if let Some(choice) = choice {
+                self.apply_language(choice);
+            }
+        }
+    }
+
+    fn apply_language(&mut self, choice: LanguageChoice) {
+        if set_language_choice(choice).is_err() {
+            message_box(
+                self.hwnd,
+                tr("无法保存语言设置", "Could not save the language setting"),
+                product_name(),
+                MB_OK | MB_ICONERROR,
+            );
+            return;
+        }
+        self.state.language_changed();
+        unsafe { SetWindowTextW(self.hwnd, wide(product_name()).as_ptr()) };
         self.rebuild_page();
     }
 
@@ -1037,6 +1165,26 @@ impl UiContext {
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE,
                 );
             }
+            ButtonKind::Language => {
+                fill(
+                    item.hDC,
+                    &rect,
+                    if pressed {
+                        COLOR_TEAL_PALE
+                    } else {
+                        COLOR_WHITE
+                    },
+                );
+                outline_round_rect(item.hDC, rect, COLOR_LINE, self.scale(4));
+                draw_label(
+                    item.hDC,
+                    "\u{e774}",
+                    rect,
+                    self.icon_font,
+                    COLOR_TEAL,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                );
+            }
         }
         if focused && !matches!(kind, ButtonKind::Navigation(_)) {
             let focus = if matches!(kind, ButtonKind::Checkbox) {
@@ -1421,6 +1569,7 @@ unsafe extern "system" fn window_proc(
                 Some(UiCommand::OpenUpdateHistory) => {
                     let _ = ui.state.open_update_history();
                 }
+                Some(UiCommand::OpenLanguageMenu) => ui.show_language_menu(),
                 Some(UiCommand::Exit) => {
                     unsafe { DestroyWindow(hwnd) };
                 }

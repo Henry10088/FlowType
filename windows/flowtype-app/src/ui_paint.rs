@@ -10,8 +10,8 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, GetWindowTextLengthW, GetWindowTextW, HICON, HMENU, LoadIconW, MF_STRING,
-    MessageBoxW,
+    AppendMenuW, GetWindowTextLengthW, GetWindowTextW, HICON, HMENU, LoadIconW, MF_CHECKED,
+    MF_STRING, MessageBoxW,
 };
 
 pub(super) fn create_font(pixel_height: i32, weight: i32, face: &str) -> HFONT {
@@ -164,6 +164,12 @@ pub(super) fn message_box(hwnd: HWND, text: &str, title: &str, flags: u32) -> i3
 pub(super) unsafe fn append_menu(menu: HMENU, id: usize, text: &str) {
     let text = wide(text);
     unsafe { AppendMenuW(menu, MF_STRING, id, text.as_ptr()) };
+}
+
+pub(super) unsafe fn append_checked_menu(menu: HMENU, id: usize, text: &str, checked: bool) {
+    let text = wide(text);
+    let flags = MF_STRING | if checked { MF_CHECKED } else { 0 };
+    unsafe { AppendMenuW(menu, flags, id, text.as_ptr()) };
 }
 
 pub(super) fn copy_wide<const N: usize>(destination: &mut [u16; N], value: &str) {
