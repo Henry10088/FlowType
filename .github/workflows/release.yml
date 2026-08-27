@@ -213,6 +213,23 @@ jobs:
         run: |
           $pfxPath = Join-Path $env:RUNNER_TEMP "flowtype-authenticode.pfx"
           [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:FLOWTYPE_WINDOWS_CERT_BASE64))
+          # The release certificate is intentionally private to the project and
+          # may not chain to a public CA. Trust its leaf in this runner's
+          # current-user root store so signature verification checks the actual
+          # Authenticode signature instead of failing only on public trust.
+          $signingCert = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            $pfxPath,
+            $env:FLOWTYPE_WINDOWS_CERT_PASSWORD,
+            [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet)
+          $rootStore = [Security.Cryptography.X509Certificates.X509Store]::new("Root", "CurrentUser")
+          $rootStore.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+          try {
+            if (-not ($rootStore.Certificates | Where-Object Thumbprint -eq $signingCert.Thumbprint)) {
+              $rootStore.Add($signingCert)
+            }
+          } finally {
+            $rootStore.Close()
+          }
           $expected = if ([string]::IsNullOrWhiteSpace($env:FLOWTYPE_WINDOWS_CERT_SHA256)) { $null } else { $env:FLOWTYPE_WINDOWS_CERT_SHA256.Replace(":", "").ToLowerInvariant() }
           $signTool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
             Sort-Object FullName |
