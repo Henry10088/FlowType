@@ -73,7 +73,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Verify release versions
         shell: pwsh
-        run: pwsh -File ..\scripts\verify-version.ps1
+        run: pwsh -File ..\scripts\verify-version.ps1 -Development
       - name: Build Windows release
         shell: pwsh
         run: |

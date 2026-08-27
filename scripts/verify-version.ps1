@@ -1,5 +1,6 @@
 param(
-    [string]$ExpectedTag = ""
+    [string]$ExpectedTag = "",
+    [switch]$Development
 )
 
 $ErrorActionPreference = "Stop"
@@ -93,7 +94,7 @@ if ($ExpectedTag) {
     }
 }
 
-if ($latestTag -and $exactTag -ne $latestTag -and $latestTag -match '^v(\d+\.\d+\.\d+)$') {
+if (!$Development -and $latestTag -and $exactTag -ne $latestTag -and $latestTag -match '^v(\d+\.\d+\.\d+)$') {
     $latestReleasedVersion = [Version]$Matches[1]
     if ([Version]$cargoVersion -le $latestReleasedVersion) {
         throw "Version $cargoVersion must be greater than latest released version $latestTag before building a new distributable."
