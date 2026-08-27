@@ -209,6 +209,7 @@ struct UiSnapshot {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ui_preview = std::env::args().any(|argument| argument == "--ui-preview");
     if std::env::args().any(|argument| argument == "--enable-auto-start") {
         settings::set_auto_start(true)?;
         return Ok(());
@@ -252,26 +253,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         next_connection_id: AtomicU64::new(1),
     });
 
-    let network_state = Arc::clone(&state);
-    let network_error_state = Arc::clone(&state);
-    std::thread::Builder::new()
-        .name("flowtype-network".to_owned())
-        .spawn(move || {
-            let runtime = tokio::runtime::Runtime::new().expect("cannot create network runtime");
-            if let Err(error) = runtime.block_on(run_network(network_state, endpoint_host)) {
-                eprintln!("network stopped: {error}");
-                network_error_state.update_status(|status| {
-                    status.summary = tr("连接服务不可用", "Connection unavailable").to_owned();
-                    status.last_error = Some(format!(
-                        "{}{error}",
-                        tr(
-                            "无法启动局域网连接：",
-                            "Could not start the local connection: "
-                        )
-                    ));
-                });
-            }
-        })?;
+    if !ui_preview {
+        let network_state = Arc::clone(&state);
+        let network_error_state = Arc::clone(&state);
+        std::thread::Builder::new()
+            .name("flowtype-network".to_owned())
+            .spawn(move || {
+                let runtime =
+                    tokio::runtime::Runtime::new().expect("cannot create network runtime");
+                if let Err(error) = runtime.block_on(run_network(network_state, endpoint_host)) {
+                    eprintln!("network stopped: {error}");
+                    network_error_state.update_status(|status| {
+                        status.summary = tr("连接服务不可用", "Connection unavailable").to_owned();
+                        status.last_error = Some(format!(
+                            "{}{error}",
+                            tr(
+                                "无法启动局域网连接：",
+                                "Could not start the local connection: "
+                            )
+                        ));
+                    });
+                }
+            })?;
+    }
     let show_requested = std::env::args().any(|argument| argument == "--show");
     ui::run(state, endpoint_host, first_run || show_requested)?;
     Ok(())

@@ -7,9 +7,9 @@ use qrcode::{Color, QrCode};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, COLOR_WINDOW, CreateSolidBrush, DT_CENTER, DT_LEFT, DT_SINGLELINE, DT_VCENTER,
-    DeleteObject, DrawFocusRect, EndPaint, FW_NORMAL, FW_SEMIBOLD, FillRect, GetStockObject,
-    HBRUSH, HFONT, InvalidateRect, PAINTSTRUCT, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE,
-    RDW_UPDATENOW, RedrawWindow, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow, WHITE_BRUSH,
+    DeleteObject, EndPaint, FW_NORMAL, FW_SEMIBOLD, FillRect, GetStockObject, HBRUSH, HFONT,
+    InvalidateRect, PAINTSTRUCT, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW,
+    RedrawWindow, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow, WHITE_BRUSH,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::SS_NOPREFIX;
@@ -36,14 +36,20 @@ use crate::{AppState, PORT, WM_APP_STATE, settings, update};
 
 #[path = "ui_commands.rs"]
 mod ui_commands;
+#[path = "ui_direct2d.rs"]
+mod ui_direct2d;
 #[path = "ui_floating.rs"]
 mod ui_floating;
+#[path = "ui_layout.rs"]
+mod ui_layout;
 #[path = "ui_paint.rs"]
 mod ui_paint;
 #[path = "ui_theme.rs"]
 mod ui_theme;
 
 use ui_commands::*;
+use ui_direct2d::{Direct2dPainter, PhonePaintRow};
+use ui_layout::{PhonesLayout, Rect as LayoutRect};
 use ui_paint::*;
 use ui_theme::*;
 
@@ -107,6 +113,7 @@ struct UiContext {
     floating_enabled_checked: bool,
     ball_hwnd: HWND,
     save_notice: Option<SaveNotice>,
+    direct2d: Option<Direct2dPainter>,
 }
 
 impl UiContext {
@@ -139,12 +146,58 @@ impl UiContext {
             floating_enabled_checked: settings::floating_enabled(),
             ball_hwnd: null_mut(),
             save_notice: None,
+            direct2d: None,
         }
     }
 
     fn scale(&self, value: i32) -> i32 {
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96);
         value * dpi as i32 / 96
+    }
+
+    fn client_size(&self) -> (i32, i32) {
+        let mut client: RECT = unsafe { zeroed() };
+        unsafe { GetClientRect(self.hwnd, &mut client) };
+        (client.right.max(1), client.bottom.max(1))
+    }
+
+    fn logical_client_width(&self) -> f32 {
+        let (width, _) = self.client_size();
+        width as f32 * 96.0 / unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32
+    }
+
+    fn phones_layout(&self) -> PhonesLayout {
+        PhonesLayout::new(self.logical_client_width(), self.phone_ids.len())
+    }
+
+    fn reposition_phone_controls(&self) {
+        let layout = self.phones_layout();
+        for (control, _) in &self.buttons {
+            let id = unsafe { GetDlgCtrlID(*control) } as usize;
+            let bounds = if id == ID_PAIR {
+                Some(layout.pair_action)
+            } else if id == ID_LANGUAGE_MENU {
+                Some(layout.language_action)
+            } else if (ID_UNPAIR_BASE..ID_UNPAIR_BASE + layout.rows.len()).contains(&id) {
+                Some(layout.rows[id - ID_UNPAIR_BASE].action)
+            } else {
+                None
+            };
+            if let Some(bounds) = bounds {
+                unsafe {
+                    SetWindowPos(
+                        *control,
+                        null_mut(),
+                        self.scale(bounds.left as i32),
+                        self.scale(bounds.top as i32),
+                        self.scale(bounds.width() as i32),
+                        self.scale((bounds.bottom - bounds.top) as i32),
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+            }
+        }
+        unsafe { InvalidateRect(self.hwnd, null(), 0) };
     }
 
     fn rebuild_fonts(&mut self) {
@@ -249,30 +302,46 @@ impl UiContext {
 
     fn build_phones(&mut self) {
         let snapshot = self.state.snapshot();
-        self.title(tr("已绑定手机", "Paired phones"));
+        let layout = PhonesLayout::new(self.logical_client_width(), snapshot.phones.len());
+        self.text(
+            tr("已绑定手机", "Paired phones"),
+            layout.title.left as i32,
+            layout.title.top as i32,
+            layout.title.width() as i32,
+            (layout.title.bottom - layout.title.top) as i32,
+            self.title_font,
+        );
         self.owner_button(
             tr("绑定手机", "Pair phone"),
             ID_PAIR,
-            558,
-            28,
-            132,
-            34,
+            layout.pair_action.left as i32,
+            layout.pair_action.top as i32,
+            layout.pair_action.width() as i32,
+            (layout.pair_action.bottom - layout.pair_action.top) as i32,
             ButtonKind::Secondary,
         );
         if snapshot.phones.is_empty() {
             self.muted_text(
                 tr("还没有绑定手机", "No phones paired"),
-                220,
-                112,
-                420,
-                30,
+                layout.empty_message.left as i32,
+                layout.empty_message.top as i32,
+                layout.empty_message.width() as i32,
+                (layout.empty_message.bottom - layout.empty_message.top) as i32,
                 self.body_font,
             );
         }
         for (index, (phone_id, phone)) in snapshot.phones.iter().enumerate() {
-            let y = 102 + index as i32 * 84;
-            self.text(&phone.phone_name, 268, y, 260, 28, self.heading_font);
-            let connected = snapshot.status.connected_phone.as_deref() == Some(&phone.phone_name);
+            let row = layout.rows[index];
+            self.text(
+                &phone.phone_name,
+                row.name.left as i32,
+                row.name.top as i32,
+                row.name.width() as i32,
+                (row.name.bottom - row.name.top) as i32,
+                self.heading_font,
+            );
+            let connected =
+                snapshot.status.connected_phone.as_deref() == Some(phone.phone_name.as_str());
             let status = if connected {
                 tr("已连接", "Connected").to_owned()
             } else if phone.last_connected.is_some() {
@@ -288,14 +357,21 @@ impl UiContext {
                     tr("尚未连接过", "Never connected")
                 )
             };
-            self.muted_text(&status, 288, y + 34, 300, 24, self.body_font);
+            self.muted_text(
+                &status,
+                row.status.left as i32,
+                row.status.top as i32,
+                row.status.width() as i32,
+                (row.status.bottom - row.status.top) as i32,
+                self.body_font,
+            );
             self.owner_button(
                 tr("解除绑定", "Unpair"),
                 ID_UNPAIR_BASE + index,
-                620,
-                y + 13,
-                94,
-                34,
+                row.action.left as i32,
+                row.action.top as i32,
+                row.action.width() as i32,
+                (row.action.bottom - row.action.top) as i32,
                 ButtonKind::Secondary,
             );
             self.phone_ids.push(phone_id.clone());
@@ -653,13 +729,18 @@ impl UiContext {
     }
 
     fn create_language_button(&mut self) {
+        let bounds = if self.page == Page::Phones {
+            self.phones_layout().language_action
+        } else {
+            LayoutRect::from_xywh(708.0, 28.0, 34.0, 34.0)
+        };
         self.language_button = self.owner_button(
             "语言 / Language",
             ID_LANGUAGE_MENU,
-            708,
-            28,
-            34,
-            34,
+            bounds.left as i32,
+            bounds.top as i32,
+            bounds.width() as i32,
+            (bounds.bottom - bounds.top) as i32,
             ButtonKind::Language,
         );
         self.language_tooltip_text = wide("语言 / Language");
@@ -1195,7 +1276,7 @@ impl UiContext {
                     bottom: item.rcItem.bottom - self.scale(3),
                 }
             };
-            unsafe { DrawFocusRect(item.hDC, &focus) };
+            outline_round_rect(item.hDC, focus, COLOR_TEAL, self.scale(4));
         }
     }
 
@@ -1207,11 +1288,31 @@ impl UiContext {
         }
     }
 
-    fn paint(&self) {
+    fn paint(&mut self) {
         let mut paint: PAINTSTRUCT = unsafe { zeroed() };
         let dc = unsafe { BeginPaint(self.hwnd, &mut paint) };
         let mut client: RECT = unsafe { zeroed() };
         unsafe { GetClientRect(self.hwnd, &mut client) };
+        if self.page == Page::Phones {
+            let snapshot = self.state.snapshot();
+            let layout = self.phones_layout();
+            let rows = snapshot
+                .phones
+                .iter()
+                .map(|(_, phone)| {
+                    let connected = snapshot.status.connected_phone.as_deref()
+                        == Some(phone.phone_name.as_str());
+                    PhonePaintRow { connected }
+                })
+                .collect::<Vec<_>>();
+            if let Some(painter) = self.direct2d.as_ref() {
+                let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32;
+                let logical_height = client.bottom as f32 * 96.0 / dpi;
+                let _ = painter.paint_phones(logical_height, &layout, &rows);
+                unsafe { EndPaint(self.hwnd, &paint) };
+                return;
+            }
+        }
         fill(dc, &client, COLOR_WHITE);
         let sidebar = RECT {
             right: self.scale(180),
@@ -1255,45 +1356,7 @@ impl UiContext {
                     );
                 }
             }
-            Page::Phones => {
-                let snapshot = self.state.snapshot();
-                for index in 0..self.phone_ids.len() {
-                    let y = 174 + index as i32 * 84;
-                    draw_line(
-                        dc,
-                        self.scale(220),
-                        self.scale(y),
-                        self.scale(716),
-                        self.scale(y),
-                        COLOR_LINE,
-                    );
-                    let icon_rect = RECT {
-                        left: self.scale(222),
-                        top: self.scale(y - 62),
-                        right: self.scale(256),
-                        bottom: self.scale(y - 22),
-                    };
-                    draw_label(
-                        dc,
-                        "\u{e8ea}",
-                        icon_rect,
-                        self.icon_font,
-                        COLOR_TEXT,
-                        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                    );
-                    let dot = RECT {
-                        left: self.scale(268),
-                        top: self.scale(y - 40),
-                        right: self.scale(278),
-                        bottom: self.scale(y - 30),
-                    };
-                    let connected = snapshot.phones.get(index).is_some_and(|(_, phone)| {
-                        snapshot.status.connected_phone.as_deref()
-                            == Some(phone.phone_name.as_str())
-                    });
-                    fill_ellipse(dc, dot, if connected { COLOR_TEAL } else { 0x00cc_cccc });
-                }
-            }
+            Page::Phones => {}
             Page::Settings => {
                 draw_line(
                     dc,
@@ -1523,6 +1586,8 @@ unsafe extern "system" fn window_proc(
     match message {
         WM_CREATE => {
             ui.rebuild_fonts();
+            let (width, height) = ui.client_size();
+            ui.direct2d = Direct2dPainter::new(hwnd, width as u32, height as u32).ok();
             ui.rebuild_page();
             ui.add_tray();
             if ui.floating_enabled_checked {
@@ -1610,6 +1675,22 @@ unsafe extern "system" fn window_proc(
         }
         WM_PAINT => {
             ui.paint();
+            0
+        }
+        WM_SIZE => {
+            if let Some(painter) = ui.direct2d.as_ref() {
+                let (width, height) = ui.client_size();
+                painter.resize(width as u32, height as u32);
+            }
+            if ui.page == Page::Phones && wparam != SIZE_MINIMIZED as usize {
+                ui.reposition_phone_controls();
+            }
+            0
+        }
+        WM_EXITSIZEMOVE => {
+            if ui.page == Page::Phones {
+                ui.rebuild_page();
+            }
             0
         }
         WM_DRAWITEM => {

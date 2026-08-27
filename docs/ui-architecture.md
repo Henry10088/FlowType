@@ -24,10 +24,14 @@ The Win32 message loop and `UiContext` remain the lifecycle boundary. UI-only co
 - `ui_commands.rs`: command IDs and conversion from `WM_COMMAND` IDs to typed actions.
 - `ui_theme.rs`: palette constants used by every page.
 - `ui_paint.rs`: GDI fonts, text, shapes, icons, menus and UTF-16 helpers.
+- `ui_layout.rs`: DPI-independent constraints and page geometry.
+- `ui_direct2d.rs`: Direct2D/DirectWrite rendering backed only by Windows system DLLs.
 - `ui.rs`: page composition, control ownership, Win32 lifecycle and state-driven layout.
 - The file transfer page owns file chooser and drag/drop actions; file enumeration, manifests, transfer state and recovery remain outside Win32 painting code.
 
 Network, pairing, persistence and injector code remain outside the UI modules. The UI reads `AppState::snapshot()` and posts commands back to the existing state methods; it does not mutate protocol state directly.
+
+The Windows management window uses a hybrid rendering boundary. Direct2D draws page surfaces, separators, indicators and decorative icons; native child controls remain responsible for editable fields, commands and meaningful text so keyboard behavior, Unicode font fallback and UI Automation semantics are preserved. Run `flowtype.exe --ui-preview --show` for visual review without opening the LAN listener.
 
 ## Refactoring Rules
 
