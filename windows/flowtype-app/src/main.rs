@@ -209,7 +209,8 @@ struct UiSnapshot {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ui_preview = std::env::args().any(|argument| argument == "--ui-preview");
+    let pairing_preview = std::env::args().any(|argument| argument == "--ui-preview-pairing");
+    let ui_preview = pairing_preview || std::env::args().any(|argument| argument == "--ui-preview");
     if std::env::args().any(|argument| argument == "--enable-auto-start") {
         settings::set_auto_start(true)?;
         return Ok(());
@@ -277,7 +278,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })?;
     }
     let show_requested = std::env::args().any(|argument| argument == "--show");
-    ui::run(state, endpoint_host, first_run || show_requested)?;
+    ui::run(
+        state,
+        endpoint_host,
+        first_run || show_requested || pairing_preview,
+        pairing_preview,
+    )?;
     Ok(())
 }
 

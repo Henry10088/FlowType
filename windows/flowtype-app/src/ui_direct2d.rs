@@ -17,7 +17,7 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
 use windows::core::w;
 
-use super::ui_layout::{PhonesLayout, Rect, SettingsLayout, StatusLayout};
+use super::ui_layout::{PairingLayout, PhonesLayout, Rect, SettingsLayout, StatusLayout};
 
 pub(super) struct PhonePaintRow {
     pub connected: bool,
@@ -164,6 +164,43 @@ impl Direct2dPainter {
             };
             self.target
                 .FillEllipse(&ellipse(status), &self.brush(color)?);
+            self.target.EndDraw(None, None)
+        }
+    }
+
+    pub(super) fn paint_pairing(
+        &self,
+        client_height: f32,
+        layout: &PairingLayout,
+        qr: Option<(usize, &[bool])>,
+    ) -> windows::core::Result<()> {
+        unsafe {
+            let _line = self.begin_shell(client_height)?;
+            let teal = self.brush(rgb(0, 186, 184))?;
+            self.target.FillEllipse(&ellipse(layout.waiting_dot), &teal);
+
+            if let Some((width, modules)) = qr {
+                let black = self.brush(rgb(0, 0, 0))?;
+                let module = (220.0 / (width as f32 + 8.0)).floor().max(2.0);
+                let quiet = 4.0;
+                for row in 0..width {
+                    for column in 0..width {
+                        if modules[row * width + column] {
+                            let left = layout.qr_origin.0 + (column as f32 + quiet) * module;
+                            let top = layout.qr_origin.1 + (row as f32 + quiet) * module;
+                            self.target.FillRectangle(
+                                &D2D_RECT_F {
+                                    left,
+                                    top,
+                                    right: left + module,
+                                    bottom: top + module,
+                                },
+                                &black,
+                            );
+                        }
+                    }
+                }
+            }
             self.target.EndDraw(None, None)
         }
     }

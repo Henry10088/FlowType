@@ -85,6 +85,44 @@ pub(super) struct SettingsLayout {
     pub update_action: Rect,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PairingLayout {
+    pub shell: ShellLayout,
+    pub back_action: Rect,
+    pub title: Rect,
+    pub qr_origin: (f32, f32),
+    pub info_left: f32,
+    pub open_instruction: Rect,
+    pub scan_instruction: Rect,
+    pub computer: Rect,
+    pub waiting: Rect,
+    pub note: Rect,
+    pub waiting_dot: Rect,
+}
+
+impl PairingLayout {
+    pub(super) fn new(client_width: f32) -> Self {
+        let shell = ShellLayout::new(client_width);
+        let info_left = (shell.content_left + 250.0)
+            .min(shell.content_right - 250.0)
+            .max(shell.content_left + 230.0);
+        let info_width = (shell.content_right - info_left).max(200.0);
+        Self {
+            shell,
+            back_action: Rect::from_xywh(shell.content_left - 18.0, 32.0, 34.0, 34.0),
+            title: Rect::from_xywh(shell.content_left + 26.0, 34.0, 300.0, 34.0),
+            qr_origin: (shell.content_left, 130.0),
+            info_left,
+            open_instruction: Rect::from_xywh(info_left, 145.0, info_width, 44.0),
+            scan_instruction: Rect::from_xywh(info_left, 201.0, info_width, 30.0),
+            computer: Rect::from_xywh(info_left, 260.0, info_width, 28.0),
+            waiting: Rect::from_xywh(info_left + 16.0, 298.0, info_width - 16.0, 26.0),
+            note: Rect::from_xywh(info_left, 342.0, info_width, 60.0),
+            waiting_dot: Rect::from_xywh(info_left, 307.0, 8.0, 8.0),
+        }
+    }
+}
+
 impl SettingsLayout {
     pub(super) fn new(client_width: f32) -> Self {
         let shell = ShellLayout::new(client_width);
@@ -213,5 +251,12 @@ mod tests {
         assert_eq!(layout.repair_action.right, layout.shell.content_right);
         assert_eq!(layout.update_action.right, layout.shell.content_right);
         assert!(layout.update_repository.left >= layout.shell.content_left);
+    }
+
+    #[test]
+    fn pairing_columns_remain_separate_at_minimum_width() {
+        let layout = PairingLayout::new(680.0);
+        assert!(layout.info_left >= layout.qr_origin.0 + 220.0);
+        assert!(layout.info_left + 200.0 <= layout.shell.content_right + 20.0);
     }
 }

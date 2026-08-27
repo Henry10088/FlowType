@@ -49,7 +49,7 @@ mod ui_theme;
 
 use ui_commands::*;
 use ui_direct2d::{Direct2dPainter, PhonePaintRow};
-use ui_layout::{PhonesLayout, SettingsLayout, ShellLayout, StatusLayout};
+use ui_layout::{PairingLayout, PhonesLayout, SettingsLayout, ShellLayout, StatusLayout};
 use ui_paint::*;
 use ui_theme::*;
 
@@ -574,46 +574,55 @@ impl UiContext {
     }
 
     fn build_pairing(&mut self) {
-        self.owner_button("", ID_NAV_PHONES, 202, 32, 34, 34, ButtonKind::Back);
+        let layout = PairingLayout::new(self.logical_client_width());
+        self.owner_button(
+            "",
+            ID_NAV_PHONES,
+            layout.back_action.left as i32,
+            layout.back_action.top as i32,
+            layout.back_action.width() as i32,
+            (layout.back_action.bottom - layout.back_action.top) as i32,
+            ButtonKind::Back,
+        );
         self.text(
             tr("绑定手机", "Pair phone"),
-            246,
-            34,
-            300,
-            34,
+            layout.title.left as i32,
+            layout.title.top as i32,
+            layout.title.width() as i32,
+            (layout.title.bottom - layout.title.top) as i32,
             self.heading_font,
         );
         self.text(
             tr("在手机上打开说写，", "Open FlowType on your phone"),
-            470,
-            145,
-            250,
-            30,
+            layout.open_instruction.left as i32,
+            layout.open_instruction.top as i32,
+            layout.open_instruction.width() as i32,
+            (layout.open_instruction.bottom - layout.open_instruction.top) as i32,
             self.heading_font,
         );
         self.text(
             tr("扫描此二维码", "Scan this QR code"),
-            470,
-            178,
-            220,
-            30,
+            layout.scan_instruction.left as i32,
+            layout.scan_instruction.top as i32,
+            layout.scan_instruction.width() as i32,
+            (layout.scan_instruction.bottom - layout.scan_instruction.top) as i32,
             self.heading_font,
         );
         let pc_name = self.state.snapshot().pc_name;
         self.text(
             &format!("{}{pc_name}", tr("此电脑：", "Computer: ")),
-            470,
-            252,
-            250,
-            28,
+            layout.computer.left as i32,
+            layout.computer.top as i32,
+            layout.computer.width() as i32,
+            (layout.computer.bottom - layout.computer.top) as i32,
             self.body_font,
         );
         self.text(
             tr("等待手机扫描", "Waiting for scan"),
-            486,
-            294,
-            180,
-            26,
+            layout.waiting.left as i32,
+            layout.waiting.top as i32,
+            layout.waiting.width() as i32,
+            (layout.waiting.bottom - layout.waiting.top) as i32,
             self.body_font,
         );
         self.muted_text(
@@ -621,10 +630,10 @@ impl UiContext {
                 "二维码仅用于本次绑定，绑定成功后立即失效",
                 "This QR code expires after pairing",
             ),
-            470,
-            334,
-            270,
-            48,
+            layout.note.left as i32,
+            layout.note.top as i32,
+            layout.note.width() as i32,
+            (layout.note.bottom - layout.note.top) as i32,
             self.body_font,
         );
         match self.state.begin_pairing(self.host) {
@@ -641,7 +650,7 @@ impl UiContext {
                 Err(_) => {
                     self.text(
                         tr("二维码生成失败", "Could not create QR code"),
-                        220,
+                        layout.qr_origin.0 as i32,
                         140,
                         250,
                         30,
@@ -655,7 +664,7 @@ impl UiContext {
                         "无法开始绑定，请重新打开此页面",
                         "Could not start pairing. Reopen this page.",
                     ),
-                    220,
+                    layout.qr_origin.0 as i32,
                     140,
                     430,
                     30,
@@ -1370,6 +1379,15 @@ impl UiContext {
                     &SettingsLayout::new(self.logical_client_width()),
                     self.state.snapshot().injector_ready,
                 )),
+                Page::Pairing => Some(
+                    painter.paint_pairing(
+                        logical_height,
+                        &PairingLayout::new(self.logical_client_width()),
+                        self.qr
+                            .as_ref()
+                            .map(|(width, modules)| (*width, modules.as_slice())),
+                    ),
+                ),
                 _ => None,
             };
             if painted.is_some_and(|result| result.is_ok()) {
@@ -1558,6 +1576,7 @@ pub fn run(
     state: Arc<AppState>,
     host: IpAddr,
     visible: bool,
+    pairing_preview: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let controls = INITCOMMONCONTROLSEX {
@@ -1580,7 +1599,7 @@ pub fn run(
     if unsafe { RegisterClassW(&class) } == 0 {
         return Err(std::io::Error::last_os_error().into());
     }
-    let page = if visible && state.snapshot().phones.is_empty() {
+    let page = if pairing_preview || visible && state.snapshot().phones.is_empty() {
         Page::Pairing
     } else {
         Page::Status
@@ -1746,7 +1765,7 @@ unsafe extern "system" fn window_proc(
                 let (width, height) = ui.client_size();
                 painter.resize(width as u32, height as u32);
             }
-            if ui.page != Page::Pairing && wparam != SIZE_MINIMIZED as usize {
+            if wparam != SIZE_MINIMIZED as usize {
                 ui.reposition_responsive_controls();
             }
             0

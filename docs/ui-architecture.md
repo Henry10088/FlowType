@@ -31,7 +31,7 @@ The Win32 message loop and `UiContext` remain the lifecycle boundary. UI-only co
 
 Network, pairing, persistence and injector code remain outside the UI modules. The UI reads `AppState::snapshot()` and posts commands back to the existing state methods; it does not mutate protocol state directly.
 
-The Windows management window uses a hybrid rendering boundary. Direct2D draws page surfaces, separators, indicators and decorative icons; native child controls remain responsible for editable fields, commands and meaningful text so keyboard behavior, Unicode font fallback and UI Automation semantics are preserved. Run `flowtype.exe --ui-preview --show` for visual review without opening the LAN listener.
+The Windows management window uses a hybrid rendering boundary. Direct2D draws page surfaces, separators, indicators and decorative icons; native child controls remain responsible for editable fields, commands and meaningful text so keyboard behavior, Unicode font fallback and UI Automation semantics are preserved. Run `flowtype.exe --ui-preview --show` for visual review without opening the LAN listener, or `flowtype.exe --ui-preview-pairing` to open the pairing page directly.
 
 ## Refactoring Rules
 
