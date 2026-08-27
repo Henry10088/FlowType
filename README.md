@@ -8,7 +8,7 @@ Use your phone's voice input to type on Windows in real time. FlowType uses the 
 
 ## Current Version
 
-The current version is `0.2.0` and remains an internal V1 release. Its data path is:
+The current version is `0.2.1` and remains an internal V1 release. Its data path is:
 
 ```text
 Android input method -> local WSS connection -> Windows input location

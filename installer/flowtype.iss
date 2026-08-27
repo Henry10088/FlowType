@@ -1,5 +1,5 @@
 #define AppName "FlowType"
-#define AppVersion "0.2.0"
+#define AppVersion "0.2.1"
 #define AppPublisher "FlowType"
 #ifndef BuildDir
 #define BuildDir "..\windows\target\release"
