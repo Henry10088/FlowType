@@ -17,7 +17,7 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
 use windows::core::w;
 
-use super::ui_layout::{PhonesLayout, Rect};
+use super::ui_layout::{PhonesLayout, Rect, SettingsLayout, StatusLayout};
 
 pub(super) struct PhonePaintRow {
     pub connected: bool,
@@ -77,32 +77,11 @@ impl Direct2dPainter {
         rows: &[PhonePaintRow],
     ) -> windows::core::Result<()> {
         unsafe {
-            let sidebar = self.brush(rgb(251, 251, 251))?;
-            let line = self.brush(rgb(223, 223, 223))?;
+            let line = self.begin_shell(client_height)?;
             let text = self.brush(rgb(31, 31, 31))?;
             let teal = self.brush(rgb(0, 186, 184))?;
             let offline = self.brush(rgb(204, 204, 204))?;
 
-            self.target.BeginDraw();
-            self.target.Clear(Some(&rgb(255, 255, 255)));
-            self.target.FillRectangle(
-                &D2D_RECT_F {
-                    left: 0.0,
-                    top: 0.0,
-                    right: 180.0,
-                    bottom: client_height,
-                },
-                &sidebar,
-            );
-            self.target.FillRectangle(
-                &D2D_RECT_F {
-                    left: 179.5,
-                    top: 0.0,
-                    right: 180.5,
-                    bottom: client_height,
-                },
-                &line,
-            );
             for (row, row_layout) in rows.iter().zip(&layout.rows) {
                 self.target.FillRectangle(
                     &D2D_RECT_F {
@@ -129,6 +108,95 @@ impl Direct2dPainter {
             }
             self.target.EndDraw(None, None)
         }
+    }
+
+    pub(super) fn paint_status(
+        &self,
+        client_height: f32,
+        layout: &StatusLayout,
+    ) -> windows::core::Result<()> {
+        unsafe {
+            let line = self.begin_shell(client_height)?;
+            let teal = self.brush(rgb(0, 186, 184))?;
+            let white = self.brush(rgb(255, 255, 255))?;
+            for y in layout.separators {
+                self.target.FillRectangle(
+                    &D2D_RECT_F {
+                        left: layout.shell.content_left,
+                        top: y - 0.5,
+                        right: layout.shell.content_right - 34.0,
+                        bottom: y + 0.5,
+                    },
+                    &line,
+                );
+            }
+            let icon = layout.status_icon;
+            self.target.FillEllipse(&ellipse(icon), &teal);
+            self.draw_text("\u{e73e}", icon, &self.icon, &white);
+            self.target.EndDraw(None, None)
+        }
+    }
+
+    pub(super) fn paint_settings(
+        &self,
+        client_height: f32,
+        layout: &SettingsLayout,
+        service_ready: bool,
+    ) -> windows::core::Result<()> {
+        unsafe {
+            let line = self.begin_shell(client_height)?;
+            for y in layout.separators {
+                self.target.FillRectangle(
+                    &D2D_RECT_F {
+                        left: layout.shell.content_left - 16.0,
+                        top: y - 0.5,
+                        right: layout.shell.content_right - 20.0,
+                        bottom: y + 0.5,
+                    },
+                    &line,
+                );
+            }
+            let status = Rect::from_xywh(layout.shell.content_left, 339.0, 12.0, 12.0);
+            let color = if service_ready {
+                rgb(0, 186, 184)
+            } else {
+                rgb(209, 63, 63)
+            };
+            self.target
+                .FillEllipse(&ellipse(status), &self.brush(color)?);
+            self.target.EndDraw(None, None)
+        }
+    }
+
+    unsafe fn begin_shell(
+        &self,
+        client_height: f32,
+    ) -> windows::core::Result<ID2D1SolidColorBrush> {
+        let sidebar = unsafe { self.brush(rgb(251, 251, 251))? };
+        let line = unsafe { self.brush(rgb(223, 223, 223))? };
+        unsafe {
+            self.target.BeginDraw();
+            self.target.Clear(Some(&rgb(255, 255, 255)));
+            self.target.FillRectangle(
+                &D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 180.0,
+                    bottom: client_height,
+                },
+                &sidebar,
+            );
+            self.target.FillRectangle(
+                &D2D_RECT_F {
+                    left: 179.5,
+                    top: 0.0,
+                    right: 180.5,
+                    bottom: client_height,
+                },
+                &line,
+            );
+        }
+        Ok(line)
     }
 
     unsafe fn brush(&self, color: D2D1_COLOR_F) -> windows::core::Result<ID2D1SolidColorBrush> {
@@ -158,6 +226,17 @@ impl Direct2dPainter {
                 DWRITE_MEASURING_MODE_NATURAL,
             );
         }
+    }
+}
+
+fn ellipse(rect: Rect) -> windows::Win32::Graphics::Direct2D::D2D1_ELLIPSE {
+    windows::Win32::Graphics::Direct2D::D2D1_ELLIPSE {
+        point: windows_numerics::Vector2 {
+            X: (rect.left + rect.right) / 2.0,
+            Y: (rect.top + rect.bottom) / 2.0,
+        },
+        radiusX: rect.width() / 2.0,
+        radiusY: (rect.bottom - rect.top) / 2.0,
     }
 }
 

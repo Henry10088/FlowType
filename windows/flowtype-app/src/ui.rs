@@ -49,7 +49,7 @@ mod ui_theme;
 
 use ui_commands::*;
 use ui_direct2d::{Direct2dPainter, PhonePaintRow};
-use ui_layout::{PhonesLayout, Rect as LayoutRect};
+use ui_layout::{PhonesLayout, SettingsLayout, ShellLayout, StatusLayout};
 use ui_paint::*;
 use ui_theme::*;
 
@@ -170,16 +170,32 @@ impl UiContext {
         PhonesLayout::new(self.logical_client_width(), self.phone_ids.len())
     }
 
-    fn reposition_phone_controls(&self) {
-        let layout = self.phones_layout();
+    fn reposition_responsive_controls(&self) {
+        let phone_layout = self.phones_layout();
+        let settings_layout = SettingsLayout::new(self.logical_client_width());
+        let shell = ShellLayout::new(self.logical_client_width());
         for (control, _) in &self.buttons {
             let id = unsafe { GetDlgCtrlID(*control) } as usize;
-            let bounds = if id == ID_PAIR {
-                Some(layout.pair_action)
-            } else if id == ID_LANGUAGE_MENU {
-                Some(layout.language_action)
-            } else if (ID_UNPAIR_BASE..ID_UNPAIR_BASE + layout.rows.len()).contains(&id) {
-                Some(layout.rows[id - ID_UNPAIR_BASE].action)
+            let bounds = if id == ID_LANGUAGE_MENU {
+                Some(shell.language_action)
+            } else if self.page == Page::Phones && id == ID_PAIR {
+                Some(phone_layout.pair_action)
+            } else if self.page == Page::Status && id == ID_PAIR {
+                Some(StatusLayout::new(self.logical_client_width()).pair_action)
+            } else if self.page == Page::Settings && id == ID_SAVE_SETTINGS {
+                Some(settings_layout.save_action)
+            } else if self.page == Page::Settings && id == ID_REPAIR {
+                Some(settings_layout.repair_action)
+            } else if self.page == Page::Settings && id == ID_UPDATE_REPOSITORY {
+                Some(settings_layout.update_repository)
+            } else if self.page == Page::Settings && id == ID_UPDATE_HISTORY {
+                Some(settings_layout.update_history)
+            } else if self.page == Page::Settings && id == ID_UPDATE_ACTION {
+                Some(settings_layout.update_action)
+            } else if self.page == Page::Phones
+                && (ID_UNPAIR_BASE..ID_UNPAIR_BASE + phone_layout.rows.len()).contains(&id)
+            {
+                Some(phone_layout.rows[id - ID_UNPAIR_BASE].action)
             } else {
                 None
             };
@@ -195,6 +211,20 @@ impl UiContext {
                         SWP_NOZORDER | SWP_NOACTIVATE,
                     );
                 }
+            }
+        }
+        if self.page == Page::Settings && !self.name_edit.is_null() {
+            let bounds = settings_layout.name_edit;
+            unsafe {
+                SetWindowPos(
+                    self.name_edit,
+                    null_mut(),
+                    self.scale(bounds.left as i32),
+                    self.scale(bounds.top as i32),
+                    self.scale(bounds.width() as i32),
+                    self.scale((bounds.bottom - bounds.top) as i32),
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
             }
         }
         unsafe { InvalidateRect(self.hwnd, null(), 0) };
@@ -257,7 +287,15 @@ impl UiContext {
 
     fn build_status(&mut self) {
         let snapshot = self.state.snapshot();
-        self.text(&snapshot.status.summary, 258, 43, 430, 34, self.title_font);
+        let layout = StatusLayout::new(self.logical_client_width());
+        self.text(
+            &snapshot.status.summary,
+            layout.summary.left as i32,
+            layout.summary.top as i32,
+            layout.summary.width() as i32,
+            (layout.summary.bottom - layout.summary.top) as i32,
+            self.title_font,
+        );
         self.label_value(
             tr("手机", "Phone"),
             snapshot
@@ -292,10 +330,10 @@ impl UiContext {
         self.owner_button(
             tr("绑定手机", "Pair phone"),
             ID_PAIR,
-            220,
-            348,
-            142,
-            42,
+            layout.pair_action.left as i32,
+            layout.pair_action.top as i32,
+            layout.pair_action.width() as i32,
+            (layout.pair_action.bottom - layout.pair_action.top) as i32,
             ButtonKind::Secondary,
         );
     }
@@ -380,7 +418,15 @@ impl UiContext {
 
     fn build_settings(&mut self) {
         let snapshot = self.state.snapshot();
-        self.title(tr("设置", "Settings"));
+        let layout = SettingsLayout::new(self.logical_client_width());
+        self.text(
+            tr("设置", "Settings"),
+            layout.shell.title.left as i32,
+            layout.shell.title.top as i32,
+            layout.shell.title.width() as i32,
+            (layout.shell.title.bottom - layout.shell.title.top) as i32,
+            self.title_font,
+        );
         self.text(tr("常规", "General"), 220, 92, 120, 26, self.heading_font);
         self.text(
             tr("电脑名称", "Computer name"),
@@ -395,10 +441,10 @@ impl UiContext {
             &snapshot.pc_name,
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL as u32,
             ID_NAME,
-            350,
-            132,
-            270,
-            27,
+            layout.name_edit.left as i32,
+            layout.name_edit.top as i32,
+            layout.name_edit.width() as i32,
+            (layout.name_edit.bottom - layout.name_edit.top) as i32,
             self.body_font,
         );
         self.auto_start_checked = settings::auto_start_enabled();
@@ -424,10 +470,10 @@ impl UiContext {
         self.owner_button(
             tr("保存设置", "Save settings"),
             ID_SAVE_SETTINGS,
-            578,
-            28,
-            112,
-            34,
+            layout.save_action.left as i32,
+            layout.save_action.top as i32,
+            layout.save_action.width() as i32,
+            (layout.save_action.bottom - layout.save_action.top) as i32,
             ButtonKind::Secondary,
         );
 
@@ -448,10 +494,10 @@ impl UiContext {
         self.owner_button(
             tr("修复输入服务", "Repair input"),
             ID_REPAIR,
-            610,
-            298,
-            112,
-            38,
+            layout.repair_action.left as i32,
+            layout.repair_action.top as i32,
+            layout.repair_action.width() as i32,
+            (layout.repair_action.bottom - layout.repair_action.top) as i32,
             ButtonKind::Secondary,
         );
         self.text(
@@ -489,28 +535,28 @@ impl UiContext {
         self.update_repository = self.owner_button(
             tr("GitHub 仓库", "GitHub"),
             ID_UPDATE_REPOSITORY,
-            364,
-            476,
-            96,
-            32,
+            layout.update_repository.left as i32,
+            layout.update_repository.top as i32,
+            layout.update_repository.width() as i32,
+            (layout.update_repository.bottom - layout.update_repository.top) as i32,
             ButtonKind::Secondary,
         );
         self.update_history = self.owner_button(
             tr("查看更新", "Release history"),
             ID_UPDATE_HISTORY,
-            468,
-            476,
-            120,
-            32,
+            layout.update_history.left as i32,
+            layout.update_history.top as i32,
+            layout.update_history.width() as i32,
+            (layout.update_history.bottom - layout.update_history.top) as i32,
             ButtonKind::Secondary,
         );
         self.update_action = self.owner_button(
             tr("检查更新", "Check now"),
             ID_UPDATE_ACTION,
-            596,
-            474,
-            138,
-            34,
+            layout.update_action.left as i32,
+            layout.update_action.top as i32,
+            layout.update_action.width() as i32,
+            (layout.update_action.bottom - layout.update_action.top) as i32,
             ButtonKind::Secondary,
         );
         self.muted_text(
@@ -619,13 +665,17 @@ impl UiContext {
         }
     }
 
-    fn title(&mut self, value: &str) {
-        self.text(value, 220, 34, 360, 40, self.title_font);
-    }
-
     fn label_value(&mut self, label: &str, value: &str, y: i32) {
-        self.muted_text(label, 220, y, 120, 28, self.body_font);
-        self.text(value, 370, y, 320, 28, self.body_font);
+        let shell = ShellLayout::new(self.logical_client_width());
+        self.muted_text(label, shell.content_left as i32, y, 120, 28, self.body_font);
+        self.text(
+            value,
+            (shell.content_left + 150.0) as i32,
+            y,
+            (shell.content_right - shell.content_left - 150.0) as i32,
+            28,
+            self.body_font,
+        );
     }
 
     fn text(&mut self, value: &str, x: i32, y: i32, width: i32, height: i32, font: HFONT) -> HWND {
@@ -729,11 +779,7 @@ impl UiContext {
     }
 
     fn create_language_button(&mut self) {
-        let bounds = if self.page == Page::Phones {
-            self.phones_layout().language_action
-        } else {
-            LayoutRect::from_xywh(708.0, 28.0, 34.0, 34.0)
-        };
+        let bounds = ShellLayout::new(self.logical_client_width()).language_action;
         self.language_button = self.owner_button(
             "语言 / Language",
             ID_LANGUAGE_MENU,
@@ -1293,6 +1339,8 @@ impl UiContext {
         let dc = unsafe { BeginPaint(self.hwnd, &mut paint) };
         let mut client: RECT = unsafe { zeroed() };
         unsafe { GetClientRect(self.hwnd, &mut client) };
+        let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32;
+        let logical_height = client.bottom as f32 * 96.0 / dpi;
         if self.page == Page::Phones {
             let snapshot = self.state.snapshot();
             let layout = self.phones_layout();
@@ -1306,9 +1354,25 @@ impl UiContext {
                 })
                 .collect::<Vec<_>>();
             if let Some(painter) = self.direct2d.as_ref() {
-                let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32;
-                let logical_height = client.bottom as f32 * 96.0 / dpi;
                 let _ = painter.paint_phones(logical_height, &layout, &rows);
+                unsafe { EndPaint(self.hwnd, &paint) };
+                return;
+            }
+        }
+        if let Some(painter) = self.direct2d.as_ref() {
+            let painted = match self.page {
+                Page::Status => Some(painter.paint_status(
+                    logical_height,
+                    &StatusLayout::new(self.logical_client_width()),
+                )),
+                Page::Settings if self.save_notice.is_none() => Some(painter.paint_settings(
+                    logical_height,
+                    &SettingsLayout::new(self.logical_client_width()),
+                    self.state.snapshot().injector_ready,
+                )),
+                _ => None,
+            };
+            if painted.is_some_and(|result| result.is_ok()) {
                 unsafe { EndPaint(self.hwnd, &paint) };
                 return;
             }
@@ -1682,13 +1746,13 @@ unsafe extern "system" fn window_proc(
                 let (width, height) = ui.client_size();
                 painter.resize(width as u32, height as u32);
             }
-            if ui.page == Page::Phones && wparam != SIZE_MINIMIZED as usize {
-                ui.reposition_phone_controls();
+            if ui.page != Page::Pairing && wparam != SIZE_MINIMIZED as usize {
+                ui.reposition_responsive_controls();
             }
             0
         }
         WM_EXITSIZEMOVE => {
-            if ui.page == Page::Phones {
+            if ui.page != Page::Pairing {
                 ui.rebuild_page();
             }
             0
