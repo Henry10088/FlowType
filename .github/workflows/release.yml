@@ -18,7 +18,7 @@ env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
 concurrency:
-  group: flowtype-release-${{ github.ref }}
+  group: flowtype-release-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
