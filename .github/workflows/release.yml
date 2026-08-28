@@ -190,7 +190,7 @@ jobs:
       - name: Build Inno Setup installer
         shell: pwsh
         run: |
-          choco install innosetup --version=6.4.3 --no-progress -y
+          choco install innosetup --version=6.7.1 --no-progress -y
           $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
           if (-not (Test-Path -LiteralPath $iscc)) { throw "ISCC.exe was not found" }
           $buildDir = Join-Path $env:GITHUB_WORKSPACE "windows\target\release"
