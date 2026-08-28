@@ -65,10 +65,10 @@ pub struct TipRegistry {
 }
 
 impl TipRegistry {
-    pub fn start() -> Arc<Self> {
+    pub fn start(pipe_sddl: Vec<u16>) -> Arc<Self> {
         let registry = Arc::new(Self::default());
         let listener_registry = registry.clone();
-        thread::spawn(move || listener_registry.listen());
+        thread::spawn(move || listener_registry.listen(pipe_sddl));
         registry
     }
 
@@ -168,9 +168,9 @@ impl TipRegistry {
             .unwrap_or_default()
     }
 
-    fn listen(self: Arc<Self>) {
+    fn listen(self: Arc<Self>, pipe_sddl: Vec<u16>) {
         loop {
-            let Ok(pipe) = accept_tip_pipe() else {
+            let Ok(pipe) = accept_tip_pipe(&pipe_sddl) else {
                 continue;
             };
             let registry = self.clone();
@@ -237,13 +237,9 @@ impl TipRegistry {
     }
 }
 
-fn accept_tip_pipe() -> io::Result<File> {
+fn accept_tip_pipe(sddl: &[u16]) -> io::Result<File> {
     let name: Vec<u16> = TIP_PIPE_NAME.encode_utf16().chain(Some(0)).collect();
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-    let sddl: Vec<u16> = "D:P(A;;GA;;;OW)(A;;GA;;;SY)(A;;GA;;;BA)"
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
     if unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl.as_ptr(),

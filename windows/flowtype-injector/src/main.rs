@@ -62,7 +62,8 @@ fn main() -> io::Result<()> {
         diagnostics::log(format!("speech com init failed: {error:?}"));
         return Err(io::Error::other(error));
     }
-    let tips = TipRegistry::start();
+    let pipe_sddl = pipe_security_sddl()?;
+    let tips = TipRegistry::start(pipe_sddl.clone());
     if let Err(error) = speech::ensure_flowtype_active() {
         diagnostics::log(format!("speech profile activation failed: {error:?}"));
     }
@@ -72,7 +73,6 @@ fn main() -> io::Result<()> {
         "service instance={instance_id} elevated={elevated} ipc_version={}",
         flowtype_core::INJECTOR_IPC_VERSION
     ));
-    let pipe_sddl = pipe_security_sddl()?;
     let mut session = None;
     let mut completed = None;
     loop {
@@ -624,8 +624,8 @@ mod integration_tests {
     use flowtype_core::tip::{TipCommand, TipResponse};
 
     use super::{
-        CompletedSession, completed_apply_response, speech, target::TargetWindow,
-        tip_broker::TipRegistry,
+        CompletedSession, completed_apply_response, pipe_security_sddl, speech,
+        target::TargetWindow, tip_broker::TipRegistry,
     };
 
     #[test]
@@ -659,7 +659,7 @@ mod integration_tests {
             target.title().to_ascii_lowercase().contains("notepad"),
             "foreground window must be Notepad"
         );
-        let tips = TipRegistry::start();
+        let tips = TipRegistry::start(pipe_security_sddl().unwrap());
         let keyboard_before = speech::active_keyboard_profile().unwrap();
         let target_keyboard_before = speech::thread_keyboard_layout(target.thread_id());
         speech::ensure_flowtype_active().unwrap();
