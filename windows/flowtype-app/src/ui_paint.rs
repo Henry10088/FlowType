@@ -62,6 +62,32 @@ pub(super) fn fill_ellipse(dc: HDC, rect: RECT, color: u32) {
     }
 }
 
+pub(super) fn draw_checkmark(dc: HDC, rect: RECT, color: u32) {
+    let pen = unsafe { CreatePen(PS_SOLID, 2, color) };
+    let old_pen = unsafe { SelectObject(dc, pen as HGDIOBJ) };
+    let mid_y = rect.top + (rect.bottom - rect.top) * 2 / 3;
+    unsafe {
+        MoveToEx(
+            dc,
+            rect.left + (rect.right - rect.left) / 5,
+            mid_y - 1,
+            null_mut(),
+        );
+        LineTo(
+            dc,
+            rect.left + (rect.right - rect.left) * 2 / 5,
+            mid_y + (rect.bottom - rect.top) / 5,
+        );
+        LineTo(
+            dc,
+            rect.left + (rect.right - rect.left) * 4 / 5,
+            rect.top + (rect.bottom - rect.top) / 4,
+        );
+        SelectObject(dc, old_pen);
+        DeleteObject(pen);
+    }
+}
+
 pub(super) fn outline_round_rect(dc: HDC, rect: RECT, color: u32, radius: i32) {
     let pen = unsafe { CreatePen(PS_SOLID, 1, color) };
     let hollow = unsafe { GetStockObject(5) };

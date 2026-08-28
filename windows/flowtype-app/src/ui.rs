@@ -1372,14 +1372,7 @@ impl UiContext {
                     self.scale(2),
                 );
                 if checked {
-                    draw_label(
-                        item.hDC,
-                        "\u{e73e}",
-                        box_rect,
-                        self.icon_font,
-                        COLOR_WHITE,
-                        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                    );
+                    draw_checkmark(item.hDC, box_rect, COLOR_WHITE);
                 }
                 rect.left += box_size + self.scale(10);
                 draw_label(
@@ -1617,11 +1610,15 @@ impl UiContext {
             };
         }
         if let Some(notice) = self.save_notice.as_ref() {
+            let notice_width = self.scale(222);
+            let notice_right = self
+                .scale(self.logical_client_width() as i32)
+                .saturating_sub(self.scale(18));
             let toast = RECT {
-                left: self.scale(500),
-                top: self.scale(430),
-                right: self.scale(722),
-                bottom: self.scale(478),
+                left: notice_right.saturating_sub(notice_width),
+                top: self.scale(76),
+                right: notice_right,
+                bottom: self.scale(120),
             };
             let accent = if notice.success {
                 COLOR_TEAL

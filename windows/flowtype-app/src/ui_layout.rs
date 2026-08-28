@@ -68,7 +68,7 @@ impl StatusLayout {
             status_icon: Rect::from_xywh(shell.content_left, 44.0, 28.0, 28.0),
             summary: Rect::from_xywh(shell.content_left + 38.0, 38.0, 360.0, 40.0),
             separators: [140.0, 194.0, 248.0, 292.0],
-            pair_action: Rect::from_xywh(shell.content_left, 348.0, 142.0, 42.0),
+            pair_action: shell.action_before_language(132.0),
         }
     }
 }
@@ -254,6 +254,16 @@ mod tests {
         assert_eq!(layout.service_status_dot.right, 238.0);
         assert_eq!(layout.update_action.right, layout.shell.content_right);
         assert!(layout.update_repository.left >= layout.shell.content_left);
+    }
+
+    #[test]
+    fn status_pair_action_shares_the_header_action_row() {
+        let layout = StatusLayout::new(820.0);
+        assert_eq!(layout.pair_action.top, layout.shell.language_action.top);
+        assert_eq!(
+            layout.pair_action.right + 12.0,
+            layout.shell.language_action.left
+        );
     }
 
     #[test]
