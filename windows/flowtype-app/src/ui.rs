@@ -96,6 +96,13 @@ struct UiContext {
     phone_ids: Vec<String>,
     qr: Option<(usize, Vec<bool>)>,
     name_edit: HWND,
+    status_summary: HWND,
+    status_phone: HWND,
+    status_target: HWND,
+    status_address: HWND,
+    status_error: HWND,
+    phone_statuses: Vec<HWND>,
+    service_status: HWND,
     auto_start: HWND,
     show_floating: HWND,
     language_button: HWND,
@@ -130,6 +137,13 @@ impl UiContext {
             phone_ids: Vec::new(),
             qr: None,
             name_edit: null_mut(),
+            status_summary: null_mut(),
+            status_phone: null_mut(),
+            status_target: null_mut(),
+            status_address: null_mut(),
+            status_error: null_mut(),
+            phone_statuses: Vec::new(),
+            service_status: null_mut(),
             auto_start: null_mut(),
             show_floating: null_mut(),
             language_button: null_mut(),
@@ -261,6 +275,13 @@ impl UiContext {
         self.muted_controls.clear();
         self.qr = None;
         self.name_edit = null_mut();
+        self.status_summary = null_mut();
+        self.status_phone = null_mut();
+        self.status_target = null_mut();
+        self.status_address = null_mut();
+        self.status_error = null_mut();
+        self.phone_statuses.clear();
+        self.service_status = null_mut();
         self.auto_start = null_mut();
         self.show_floating = null_mut();
         self.language_button = null_mut();
@@ -292,7 +313,7 @@ impl UiContext {
     fn build_status(&mut self) {
         let snapshot = self.state.snapshot();
         let layout = StatusLayout::new(self.logical_client_width());
-        self.text(
+        self.status_summary = self.text(
             &snapshot.status.summary,
             layout.summary.left as i32,
             layout.summary.top as i32,
@@ -300,7 +321,7 @@ impl UiContext {
             (layout.summary.bottom - layout.summary.top) as i32,
             self.title_font,
         );
-        self.label_value(
+        self.status_phone = self.label_value(
             tr("手机", "Phone"),
             snapshot
                 .status
@@ -314,7 +335,7 @@ impl UiContext {
             tr("等待手机输入", "Waiting for phone input"),
             151,
         );
-        self.label_value(
+        self.status_target = self.label_value(
             tr("输入位置", "Input location"),
             snapshot
                 .status
@@ -323,14 +344,19 @@ impl UiContext {
                 .unwrap_or(tr("尚未选择", "Not selected")),
             205,
         );
-        self.label_value(
+        self.status_address = self.label_value(
             tr("连接地址", "Address"),
             &format!("{}:{PORT}", self.host),
             259,
         );
-        if let Some(error) = snapshot.status.last_error.as_deref() {
-            self.muted_text(error, 220, 302, 470, 42, self.body_font);
-        }
+        self.status_error = self.muted_text(
+            snapshot.status.last_error.as_deref().unwrap_or_default(),
+            220,
+            302,
+            470,
+            42,
+            self.body_font,
+        );
         self.owner_button(
             tr("绑定手机", "Pair phone"),
             ID_PAIR,
@@ -399,7 +425,7 @@ impl UiContext {
                     tr("尚未连接过", "Never connected")
                 )
             };
-            self.muted_text(
+            let status_control = self.muted_text(
                 &status,
                 row.status.left as i32,
                 row.status.top as i32,
@@ -407,6 +433,7 @@ impl UiContext {
                 (row.status.bottom - row.status.top) as i32,
                 self.body_font,
             );
+            self.phone_statuses.push(status_control);
             self.owner_button(
                 tr("解除绑定", "Unpair"),
                 ID_UNPAIR_BASE + index,
@@ -494,7 +521,7 @@ impl UiContext {
         } else {
             tr("输入服务不可用", "Input unavailable")
         };
-        self.text(service, 246, 308, 180, 28, self.body_font);
+        self.service_status = self.text(service, 246, 308, 180, 28, self.body_font);
         self.owner_button(
             tr("修复输入服务", "Repair input"),
             ID_REPAIR,
@@ -678,7 +705,7 @@ impl UiContext {
         }
     }
 
-    fn label_value(&mut self, label: &str, value: &str, y: i32) {
+    fn label_value(&mut self, label: &str, value: &str, y: i32) -> HWND {
         let shell = ShellLayout::new(self.logical_client_width());
         self.muted_text(label, shell.content_left as i32, y, 120, 28, self.body_font);
         self.text(
@@ -688,7 +715,7 @@ impl UiContext {
             (shell.content_right - shell.content_left - 150.0) as i32,
             28,
             self.body_font,
-        );
+        )
     }
 
     fn text(&mut self, value: &str, x: i32, y: i32, width: i32, height: i32, font: HFONT) -> HWND {
@@ -1005,8 +1032,76 @@ impl UiContext {
     fn update_from_state(&mut self) {
         if self.page == Page::Pairing && self.state.current_pairing_uri(self.host).is_none() {
             self.page = Page::Status;
+            self.rebuild_page();
+            return;
         }
-        self.rebuild_page();
+        let snapshot = self.state.snapshot();
+        if self.page == Page::Phones && self.phone_statuses.len() != snapshot.phones.len() {
+            self.rebuild_page();
+            return;
+        }
+        match self.page {
+            Page::Status => {
+                set_control_text(self.status_summary, &snapshot.status.summary);
+                set_control_text(
+                    self.status_phone,
+                    snapshot
+                        .status
+                        .connected_phone
+                        .as_deref()
+                        .unwrap_or(tr("尚未连接", "Not connected")),
+                );
+                set_control_text(
+                    self.status_target,
+                    snapshot
+                        .status
+                        .target_name
+                        .as_deref()
+                        .unwrap_or(tr("尚未选择", "Not selected")),
+                );
+                set_control_text(self.status_address, &format!("{}:{PORT}", self.host));
+                set_control_text(
+                    self.status_error,
+                    snapshot.status.last_error.as_deref().unwrap_or_default(),
+                );
+            }
+            Page::Phones => {
+                for (index, (_, phone)) in snapshot.phones.iter().enumerate() {
+                    let connected = snapshot.status.connected_phone.as_deref()
+                        == Some(phone.phone_name.as_str());
+                    let status = if connected {
+                        tr("已连接", "Connected").to_owned()
+                    } else if phone.last_connected.is_some() {
+                        format!(
+                            "{} · {}",
+                            tr("未连接", "Offline"),
+                            tr("最近连接过", "Connected previously")
+                        )
+                    } else {
+                        format!(
+                            "{} · {}",
+                            tr("未连接", "Offline"),
+                            tr("尚未连接过", "Never connected")
+                        )
+                    };
+                    set_control_text(self.phone_statuses[index], &status);
+                }
+            }
+            Page::Settings => {
+                set_control_text(
+                    self.service_status,
+                    if snapshot.injector_ready {
+                        tr("正常运行", "Running")
+                    } else {
+                        tr("输入服务不可用", "Input unavailable")
+                    },
+                );
+                self.refresh_update_controls();
+            }
+            Page::Pairing => {}
+        }
+        unsafe { InvalidateRect(self.hwnd, null(), 0) };
+        self.update_tray();
         ui_floating::refresh(self.ball_hwnd);
     }
 
@@ -1650,6 +1745,16 @@ pub fn run(
     Ok(())
 }
 
+fn set_control_text(control: HWND, value: &str) {
+    if control.is_null() {
+        return;
+    }
+    let value = wide(value);
+    unsafe {
+        SetWindowTextW(control, value.as_ptr());
+    }
+}
+
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     message: u32,
@@ -1723,6 +1828,7 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_APP_STATE => {
+            ui.state.begin_ui_update();
             ui.update_from_state();
             0
         }

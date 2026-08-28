@@ -12,7 +12,7 @@ mod update;
 use std::collections::HashMap;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -199,6 +199,7 @@ struct AppState {
     pending_switch: Mutex<Option<PendingSwitch>>,
     runtime_status: Mutex<RuntimeStatus>,
     ui_hwnd: Arc<AtomicIsize>,
+    ui_update_pending: AtomicBool,
     update: update::UpdateManager,
     next_connection_id: AtomicU64,
 }
@@ -263,6 +264,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             last_error: None,
         }),
         ui_hwnd,
+        ui_update_pending: AtomicBool::new(false),
         update,
         next_connection_id: AtomicU64::new(1),
     });
@@ -401,9 +403,15 @@ impl AppState {
 
     fn notify_ui(&self) {
         let hwnd = self.ui_hwnd.load(Ordering::Acquire);
-        if hwnd != 0 {
-            unsafe { PostMessageW(hwnd as _, WM_APP_STATE, 0, 0) };
+        if hwnd != 0 && !self.ui_update_pending.swap(true, Ordering::AcqRel) {
+            if unsafe { PostMessageW(hwnd as _, WM_APP_STATE, 0, 0) } == 0 {
+                self.ui_update_pending.store(false, Ordering::Release);
+            }
         }
+    }
+
+    fn begin_ui_update(&self) {
+        self.ui_update_pending.store(false, Ordering::Release);
     }
 
     fn mark_online_connection(&self, phone_id: &str, phone_name: &str, connection_id: u64) {
