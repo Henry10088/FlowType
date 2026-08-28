@@ -58,9 +58,14 @@ struct CompletedSession {
 fn main() -> io::Result<()> {
     diagnostics::log("startup");
     diagnostics::log(format!("input_monitor ready={}", input_monitor::start()));
-    speech::initialize_com().map_err(io::Error::other)?;
+    if let Err(error) = speech::initialize_com() {
+        diagnostics::log(format!("speech com init failed: {error:?}"));
+        return Err(io::Error::other(error));
+    }
     let tips = TipRegistry::start();
-    speech::ensure_flowtype_active().map_err(io::Error::other)?;
+    if let Err(error) = speech::ensure_flowtype_active() {
+        diagnostics::log(format!("speech profile activation failed: {error:?}"));
+    }
     let instance_id = service_instance_id();
     let elevated = is_elevated()?;
     diagnostics::log(format!(
