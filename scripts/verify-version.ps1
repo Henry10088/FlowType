@@ -38,13 +38,14 @@ $previousTagPattern = switch ($Platform) {
     default { '^v(\d+\.\d+\.\d+)$' }
 }
 $applicationVersion = if ($Platform -eq "Android") { $androidVersion } else { $cargoVersion }
-$exactTag = ""
+$exactTags = @()
 try {
-    $exactTag = (& git -C $root describe --tags --exact-match HEAD 2>$null).Trim()
+    $exactTags = @(& git -C $root tag --points-at HEAD 2>$null) |
+        ForEach-Object { $_.ToString().Trim() } |
+        Where-Object { $_ }
 } catch {
     # An untagged development commit is the normal state before publishing.
 }
-
 if ($Platform -eq "Windows") {
     if ($installerVersion -ne $cargoVersion) {
         throw "Windows version mismatch: Cargo=$cargoVersion, Installer=$installerVersion"
@@ -86,8 +87,8 @@ if ($ExpectedTag) {
     if ($tagVersion -ne $applicationVersion) {
         throw "Release tag $ExpectedTag does not match $Platform version $applicationVersion"
     }
-    if ($exactTag -and $exactTag -ne $ExpectedTag) {
-        throw "HEAD is tagged as $exactTag, not expected release tag $ExpectedTag"
+    if ($exactTags.Count -gt 0 -and $ExpectedTag -notin $exactTags) {
+        throw "HEAD does not point to expected release tag $ExpectedTag; exact tags: $($exactTags -join ', ')"
     }
 
     $stableTagPattern = switch ($Platform) {
@@ -122,7 +123,7 @@ if ($ExpectedTag) {
     }
 }
 
-if (!$Development -and $latestTag -and $exactTag -ne $latestTag -and $latestTag -match $previousTagPattern) {
+if (!$Development -and $latestTag -and $latestTag -notin $exactTags -and $latestTag -match $previousTagPattern) {
     $latestReleasedVersion = [Version]$Matches[1]
     if ([Version]$applicationVersion -le $latestReleasedVersion) {
         throw "Version $applicationVersion must be greater than latest released version $latestTag before building a new distributable."
