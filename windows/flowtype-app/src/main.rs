@@ -403,10 +403,11 @@ impl AppState {
 
     fn notify_ui(&self) {
         let hwnd = self.ui_hwnd.load(Ordering::Acquire);
-        if hwnd != 0 && !self.ui_update_pending.swap(true, Ordering::AcqRel) {
-            if unsafe { PostMessageW(hwnd as _, WM_APP_STATE, 0, 0) } == 0 {
-                self.ui_update_pending.store(false, Ordering::Release);
-            }
+        if hwnd != 0
+            && !self.ui_update_pending.swap(true, Ordering::AcqRel)
+            && unsafe { PostMessageW(hwnd as _, WM_APP_STATE, 0, 0) } == 0
+        {
+            self.ui_update_pending.store(false, Ordering::Release);
         }
     }
 

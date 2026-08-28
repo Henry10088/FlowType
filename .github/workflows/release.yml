@@ -279,9 +279,10 @@ jobs:
     name: Create GitHub Release
     needs: [android, windows]
     if: >-
-      ${{ always() &&
-      (((github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'android-v')) || (github.event_name == 'push' && startsWith(github.ref_name, 'android-v'))) && needs.android.result == 'success') ||
-       (((github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'windows-v')) || (github.event_name == 'push' && startsWith(github.ref_name, 'windows-v'))) && needs.windows.result == 'success')) }}
+      ${{ always() && (
+      (startsWith(env.RELEASE_TAG, 'android-v') && needs.android.result == 'success') ||
+      (startsWith(env.RELEASE_TAG, 'windows-v') && needs.windows.result == 'success')
+      ) }}
     runs-on: ubuntu-24.04
     environment: release
     permissions:
