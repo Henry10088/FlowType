@@ -278,11 +278,7 @@ jobs:
   publish:
     name: Create GitHub Release
     needs: [android, windows]
-    if: >-
-      ${{ always() && (
-      (startsWith(env.RELEASE_TAG, 'android-v') && needs.android.result == 'success') ||
-      (startsWith(env.RELEASE_TAG, 'windows-v') && needs.windows.result == 'success')
-      ) }}
+    if: ${{ always() && (needs.android.result == 'success' || needs.windows.result == 'success') }}
     runs-on: ubuntu-24.04
     environment: release
     permissions:
