@@ -1777,6 +1777,7 @@ unsafe extern "system" fn window_proc(
     let ui = unsafe { &mut *context };
     match message {
         WM_CREATE => {
+            crate::diagnostics::log("window create");
             ui.rebuild_fonts();
             let (width, height) = ui.client_size();
             let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
@@ -1820,6 +1821,7 @@ unsafe extern "system" fn window_proc(
                 }
                 Some(UiCommand::OpenLanguageMenu) => ui.show_language_menu(),
                 Some(UiCommand::Exit) => {
+                    crate::diagnostics::log(format!("window command exit id={id}"));
                     unsafe { DestroyWindow(hwnd) };
                 }
                 Some(UiCommand::Unpair(index)) => ui.confirm_unpair(index),
@@ -1935,6 +1937,7 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_CLOSE => {
+            crate::diagnostics::log("window close -> hide");
             if ui.page == Page::Pairing {
                 ui.state.cancel_pairing();
             }
@@ -1942,6 +1945,7 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_DESTROY => {
+            crate::diagnostics::log("window destroy");
             if !ui.ball_hwnd.is_null() {
                 unsafe { DestroyWindow(ui.ball_hwnd) };
                 ui.ball_hwnd = null_mut();
@@ -1952,6 +1956,7 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_NCDESTROY => {
+            crate::diagnostics::log("window nc_destroy");
             for font in [
                 ui.title_font,
                 ui.heading_font,

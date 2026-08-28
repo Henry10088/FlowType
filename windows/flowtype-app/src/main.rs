@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod clipboard;
+mod diagnostics;
 mod i18n;
 mod identity;
 mod injector;
@@ -222,6 +223,7 @@ struct UiSnapshot {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    diagnostics::log("startup");
     let pairing_preview = std::env::args().any(|argument| argument == "--ui-preview-pairing");
     let ui_preview = pairing_preview || std::env::args().any(|argument| argument == "--ui-preview");
     if std::env::args().any(|argument| argument == "--enable-auto-start") {
@@ -233,6 +235,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let Some(_instance) = SingleInstance::acquire()? else {
+        diagnostics::log("startup existing_instance");
         ui::show_existing_window();
         return Ok(());
     };
@@ -293,12 +296,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })?;
     }
     let show_requested = std::env::args().any(|argument| argument == "--show");
-    ui::run(
+    diagnostics::log("ui run");
+    let result = ui::run(
         state,
         endpoint_host,
         first_run || show_requested || pairing_preview,
         pairing_preview,
-    )?;
+    );
+    diagnostics::log(format!("ui exit result={result:?}"));
+    result?;
     Ok(())
 }
 

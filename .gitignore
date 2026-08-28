@@ -21,5 +21,9 @@ captures/
 *.ilk
 installer/output/
 
+# Local release packages
+dist-local/
+FlowType-*-local-package.zip
+
 # Local release signing material
 signing/

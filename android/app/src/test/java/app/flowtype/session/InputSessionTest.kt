@@ -45,6 +45,27 @@ class InputSessionTest {
     }
 
     @Test
+    fun completedSessionCanStartNextVoiceSessionWithoutReusingText() {
+        val session = session()
+        session.onTextChanged("第一")
+        val submitted = session.onTextChanged("第一句\n")!!
+        val finish = session.finish()!!
+        assertEquals(2L, submitted.sequence)
+        assertEquals(submitted.sequence, finish.sequence)
+
+        session.acknowledge(
+            AckMessage(finish.sessionId, finish.sequence, ServerSessionState.FINISHED),
+        )
+        assertTrue(session.finished)
+
+        session.reset()
+        val next = session.onTextChanged("第二句")!!
+        assertEquals(SnapshotType.START, next.type)
+        assertEquals(1L, next.sequence)
+        assertEquals("第二句", next.fullText)
+    }
+
+    @Test
     fun restoresAnUnfinishedSessionWithoutChangingItsSequence() {
         val session = session()
         session.restore(
