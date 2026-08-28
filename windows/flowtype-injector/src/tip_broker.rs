@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io;
 use std::mem::size_of;
@@ -27,6 +27,7 @@ use crate::diagnostics;
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 const TIP_RESPONSE_TIMEOUT: Duration = Duration::from_millis(1_500);
+const TIP_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TipKey {
@@ -73,14 +74,10 @@ impl TipRegistry {
         timeout: Duration,
     ) -> io::Result<TipKey> {
         let deadline = Instant::now() + timeout;
-        let mut tried = HashSet::new();
         loop {
             let mut candidates = self.candidates(process_id);
             candidates.sort_by_key(|client| client.key.thread_id != preferred_thread_id);
             for client in candidates {
-                if !tried.insert(client.key) {
-                    continue;
-                }
                 let response = self.send_to(
                     &client,
                     TipCommand::Begin {
@@ -106,10 +103,10 @@ impl TipRegistry {
                 ));
             }
             let state = self.state.lock().map_err(poisoned)?;
-            let _ = self
-                .changed
-                .wait_timeout(state, deadline.saturating_duration_since(now))
-                .map_err(poisoned)?;
+            let wait = deadline
+                .saturating_duration_since(now)
+                .min(TIP_RETRY_INTERVAL);
+            let _ = self.changed.wait_timeout(state, wait).map_err(poisoned)?;
         }
     }
 
@@ -168,10 +165,10 @@ impl TipRegistry {
         let Ok(hello) = read_message::<TipHello>(&mut pipe) else {
             return;
         };
-        if hello.ipc_version != flowtype_core::TIP_IPC_VERSION {
+        if !hello_is_compatible(&hello) {
             diagnostics::log(format!(
-                "tip_client rejected pid={} thread={} reason=protocol_version version={}",
-                hello.process_id, hello.thread_id, hello.ipc_version
+                "tip_client rejected pid={} thread={} reason=component_mismatch ipc={} component={}",
+                hello.process_id, hello.thread_id, hello.ipc_version, hello.component_version
             ));
             return;
         }
@@ -282,4 +279,81 @@ fn pipe_client_matches(pipe: &File, expected_process_id: u32) -> bool {
 
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> io::Error {
     io::Error::other("TSF registry state unavailable")
+}
+
+fn hello_is_compatible(hello: &TipHello) -> bool {
+    hello.ipc_version == flowtype_core::TIP_IPC_VERSION
+        && hello.component_version == env!("CARGO_PKG_VERSION")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    use flowtype_core::tip::{TipHello, TipResponse};
+
+    use super::{BrokerRequest, Client, TipKey, TipRegistry, hello_is_compatible};
+
+    #[test]
+    fn rejects_a_tip_with_a_different_component_identity() {
+        let mut hello = TipHello {
+            ipc_version: flowtype_core::TIP_IPC_VERSION,
+            component_version: env!("CARGO_PKG_VERSION").to_owned(),
+            process_id: 1,
+            thread_id: 2,
+        };
+        assert!(hello_is_compatible(&hello));
+
+        hello.component_version = "stale-component".to_owned();
+        assert!(!hello_is_compatible(&hello));
+        hello.component_version = env!("CARGO_PKG_VERSION").to_owned();
+        hello.ipc_version -= 1;
+        assert!(!hello_is_compatible(&hello));
+    }
+
+    #[test]
+    fn retries_the_preferred_tip_client_until_it_accepts_begin() {
+        let registry = TipRegistry::default();
+        let key = TipKey {
+            process_id: 10,
+            thread_id: 20,
+            generation: 1,
+        };
+        let (sender, receiver) = mpsc::sync_channel::<BrokerRequest>(8);
+        registry
+            .state
+            .lock()
+            .unwrap()
+            .clients
+            .insert((key.process_id, key.thread_id), Client { key, sender });
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let worker_attempts = attempts.clone();
+        let worker = std::thread::spawn(move || {
+            for request in receiver {
+                let attempt = worker_attempts.fetch_add(1, Ordering::Relaxed);
+                let response = if attempt == 0 {
+                    TipResponse::SessionMismatch
+                } else {
+                    TipResponse::Begun {
+                        session_id: "voice".to_owned(),
+                    }
+                };
+                request.response.send(Ok(response)).unwrap();
+                if attempt > 0 {
+                    break;
+                }
+            }
+        });
+
+        assert_eq!(
+            registry
+                .begin_for_target(10, 20, "voice", Duration::from_millis(500))
+                .unwrap(),
+            key,
+        );
+        worker.join().unwrap();
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    }
 }

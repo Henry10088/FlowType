@@ -148,6 +148,13 @@ impl Controller {
     }
 
     fn begin(&self, session_id: String) -> TipResponse {
+        if self.composition.session_id().as_deref() == Some(&session_id) {
+            return if self.composition.is_terminated() {
+                TipResponse::CompositionTerminated
+            } else {
+                TipResponse::Begun { session_id }
+            };
+        }
         if self.composition.session_id().is_some() {
             // The injector owns the active session. If it is asking for a new
             // session, any state left here belongs to a previous injector

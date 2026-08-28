@@ -43,16 +43,14 @@
 │ flowtype-injector.exe            │
 │ 当前用户高权限 Rust 进程           │
 │ 目标锁定 / Speech TIP 生命周期 / 路由 │
-└──────────┬─────────────┬─────────┘
-           │             │ Unicode SendInput
-           │ TIP 管道    └──────────────────────┐
-           ▼                                    ▼
+└──────────┬───────────────────────┘
+           │ TIP 管道 / TSF Composition
+           ▼
 ┌──────────────────────────────────┐
 │ flowtype_tip.dll                 │
 │ 目标进程内 TSF Speech Text Service │
 │ 组合范围 / 全文替换 / 本地编辑监听    │
 └──────────────────────────────────┘
-                                      目标窗口兼容输入后端
 ```
 
 Android 是当前文本的来源。注入助手持有 Windows 当前会话、目标窗口、输入租约和最后已应用序号；支持 TSF 时，目标 TIP 额外持有组合范围。普通 Windows 主程序只在当前后端确认状态已应用后向 Android 返回 ACK。
@@ -177,7 +175,7 @@ V1 使用成熟的 ZXing Android 扫描组件，避免自行承担 Camera2 兼�
 - `rustls`：TLS 1.3。
 - `serde` / `serde_json`：业务协议。
 - `windows` 的 TSF 接口：目标组合范围和 Unicode 全文替换。
-- `windows-sys`：Unicode `SendInput` 兼容后端和真实键鼠输入监测。
+- `windows-sys`：真实键鼠输入监测和 Windows 系统接口。
 - `qrcode`：绑定二维码。
 - 证书生成使用经过审查、与 `rustls` 兼容的最小依赖实现。
 
@@ -222,7 +220,7 @@ cancel_invalid_session(session_id)
 
 `cancel_invalid_session` 只清理助手内存状态，不向目标窗口发送删除或恢复操作。
 
-本地协议与 Android 网络协议独立演进：Android-Windows WSS 使用 `protocol_version = 1`，主程序到助手使用 `flowtype-input-v2` / `INJECTOR_IPC_VERSION = 2`，助手到 TIP 使用 `flowtype-tip-v2` / `TIP_IPC_VERSION = 2`。V1 尚未发布，不保留旧本地管道或旧消息兼容分支；不匹配的进程不能接入新管道。
+本地协议与 Android 网络协议独立演进：Android-Windows WSS 使用 `protocol_version = 1`，主程序到助手使用 `flowtype-input-v3` / `INJECTOR_IPC_VERSION = 3`，助手到 TIP 使用 `flowtype-tip-v3` / `TIP_IPC_VERSION = 3`。TIP 握手同时核对组件版本，旧进程或旧 DLL 不能接入新管道。
 
 ## 7. 输入后端与会话租约
 
@@ -234,14 +232,13 @@ cancel_invalid_session(session_id)
 - 每个 TIP 实例通过受限命名管道上报 PID 和线程 ID；助手只向锁定目标的实例发送有界类型化命令。
 - V1 同时发布 x64 和 x86 DLL。
 
-### 7.2 双后端状态应用
+### 7.2 TSF 状态应用
 
 1. `begin_session` 捕获当前前台 HWND、PID 和 GUI 线程 ID。
-2. 注入助手优先在目标 TIP 的焦点 `ITfContext` 调用 `StartComposition`；短时间内无法建立时使用 Unicode `SendInput`，不维护应用名称白名单。
-3. TSF 后端通过 `ITfRange::SetText` 替换组合范围；兼容后端只对已确认的末尾变化发送退格和新增文本，中间变化才保守重写本会话文本。
-4. 两个后端都承载中文、换行、emoji 和非 BMP 字符，不切换用户当前键盘输入法。
-5. `finish_session` 提交 TSF 组合或释放兼容后端状态，FlowType Speech Profile 保持激活和空闲。
-6. TSF ACK 表示范围编辑已成功；兼容后端 ACK 表示全部 `SendInput` 事件已被系统接受，无法证明目标应用已经持久化文本。
+2. 注入助手在目标 TIP 的焦点 `ITfContext` 调用 `StartComposition`；在 1.5 秒发现窗口内重试首选目标线程。仍无法建立时明确停止本次同步并保留手机全文，不使用按键回退。
+3. TSF 通过 `ITfRange::SetText` 替换组合范围，承载中文、换行、emoji 和非 BMP 字符，不切换用户当前键盘输入法。
+4. `finish_session` 提交 TSF 组合，FlowType Speech Profile 保持激活和空闲。
+5. ACK 只在 TSF 组合范围编辑成功后返回；不能确认目标状态时不得 ACK，也不得改用另一种注入方式继续写入。
 
 同一序号与同一全文是幂等重复；同一序号对应不同全文立即终止会话。生产路径不使用剪贴板粘贴、UI Automation 或应用专用插件。
 

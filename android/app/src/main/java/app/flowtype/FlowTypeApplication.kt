@@ -23,6 +23,7 @@ import app.flowtype.protocol.SnapshotMessage
 import app.flowtype.protocol.SnapshotType
 import app.flowtype.security.PhoneIdentity
 import app.flowtype.security.SecureDraftStore
+import app.flowtype.session.ComputerSessions
 import app.flowtype.session.InputSession
 import app.flowtype.update.UpdateManager
 import java.util.UUID
@@ -64,7 +65,9 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         private set
 
     private lateinit var drafts: SecureDraftStore
-    private lateinit var session: InputSession
+    private lateinit var sessions: ComputerSessions
+    private val session: InputSession
+        get() = sessions.current
     private lateinit var syncClient: SyncClient
     private lateinit var targetProbeClient: app.flowtype.network.TargetProbeClient
     private lateinit var discovery: ComputerDiscovery
@@ -99,7 +102,13 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         history = HistoryStore(database)
         settings = SettingsStore(database)
         drafts = SecureDraftStore(this)
-        session = InputSession(bindings.phoneId) { UUID.randomUUID().toString() }
+        sessions = ComputerSessions(
+            phoneId = bindings.phoneId,
+            sessionIdFactory = { UUID.randomUUID().toString() },
+            load = drafts::load,
+            save = drafts::save,
+            clear = drafts::clear,
+        )
         updates = UpdateManager(this) {
             session.sessionId != null || imageTransfer == ImageTransferState.SENDING
         }
@@ -107,13 +116,8 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         targetProbeClient = app.flowtype.network.TargetProbeClient(bindings.phoneId, PhoneIdentity())
         discovery = ComputerDiscovery(this, bindings, ::onComputerDiscovered)
 
-        drafts.load()?.let { stored ->
-            session.restore(stored.session)
-            session.recoverySnapshot()?.let {
-                syncClient.restore(it, stored.session.acknowledgedSequence, stored.remoteStarted)
-            }
-        }
         currentBinding = bindings.load()
+        currentBinding?.let(::restoreSessionFor)
         currentBinding?.let {
             statusText = text(R.string.status_connecting, it.pcName)
             syncClient.connect(it)
@@ -216,9 +220,8 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         clearAutoSelection()
         syncClient.abandonSession(sessionId)
         currentBinding?.let { history.add(it, text) }
-        session.reset()
+        sessions.clearCurrent()
         targetState = null
-        drafts.clear()
         showSyncFullText = false
         statusText = currentBinding?.let {
             if (connected) text(R.string.status_connected, it.pcName)
@@ -234,9 +237,8 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         clearAutoSelection()
         if (sessionId != null) syncClient.abandonSession(sessionId)
         if (text.isNotEmpty()) currentBinding?.let { history.add(it, text) }
-        session.reset()
+        sessions.clearCurrent()
         targetState = null
-        drafts.clear()
         showSyncFullText = false
         statusText = currentBinding?.let {
             if (connected) text(R.string.status_connected, it.pcName)
@@ -252,7 +254,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         targetState = null
         val snapshots = session.restartAtCurrentCursor()
         if (snapshots.isEmpty()) {
-            drafts.clear()
+            sessions.clearCurrent()
             statusText = currentBinding?.let { text(R.string.status_connected, it.pcName) }
                 ?: text(R.string.status_unpaired)
         } else {
@@ -331,13 +333,21 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
 
     fun unbindComputer(pcId: String) {
         val selected = currentBinding?.pcId == pcId
+        if (selected) {
+            session.sessionId?.let(syncClient::abandonSession)
+            syncClient.shutdown()
+        }
+        sessions.remove(pcId)
         bindings.remove(pcId)
         PhoneIdentity().delete(pcId)
         if (selected) {
-            syncClient.shutdown()
             currentBinding = bindings.load()
             connected = false
-            currentBinding?.let(::connect) ?: run {
+            currentBinding?.let { binding ->
+                syncClient.resetForTargetSelection()
+                restoreSessionFor(binding)
+                connect(binding)
+            } ?: run {
                 refreshControlClients()
                 statusText = text(R.string.status_unpaired)
                 notifyChanged()
@@ -410,8 +420,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         session.acknowledge(ack)
         if (session.finished) {
             currentBinding?.let { history.add(it, session.currentText) }
-            session.reset()
-            drafts.clear()
+            sessions.clearCurrent()
             showSyncFullText = false
             statusText = currentBinding?.let { text(R.string.status_connected, it.pcName) }
                 ?: text(R.string.status_unpaired)
@@ -494,12 +503,17 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
     override fun onPairingInvalid(binding: ComputerBinding) = onMain {
         connected = false
         targetState = null
+        sessions.remove(binding.pcId)
         bindings.remove(binding.pcId)
         PhoneIdentity().delete(binding.pcId)
         currentBinding = bindings.load()
         refreshControlClients()
         statusText = text(R.string.status_binding_invalid)
-        currentBinding?.let(::connect) ?: notifyChanged()
+        currentBinding?.let {
+            syncClient.resetForTargetSelection()
+            restoreSessionFor(it)
+            connect(it)
+        } ?: notifyChanged()
     }
 
     override fun onImageTransferred(transferId: String) = onMain {
@@ -523,16 +537,12 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
     }
 
     private fun switchToComputer(binding: ComputerBinding) {
-        val text = session.currentText
-        val oldSessionId = session.sessionId
-        oldSessionId?.let(syncClient::abandonSession)
+        saveDraftNow()
         syncClient.resetForTargetSelection()
-        if (oldSessionId != null || session.finishing) {
-            session.reset()
-            session.replaceLocalDraft(text)
-        }
+        restoreSessionFor(binding)
         clearAutoSelection()
-        manualStartPending = text.isNotEmpty()
+        targetState = null
+        manualStartPending = session.sessionId == null && session.currentText.isNotEmpty()
         connect(binding)
     }
 
@@ -574,10 +584,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         autoSelectionTargetPcId = null
         statusText = text(R.string.status_auto_selecting)
         val fallback = currentBinding
-        // Closing the socket alone leaves the old Windows injector session
-        // active. Release it before selecting the next target so a later
-        // automatic switch can start a clean session.
-        initial?.let { syncClient.abandonSession(it.sessionId) }
+        saveDraftNow()
         syncClient.resetForTargetSelection()
         if (candidates.size == 1) {
             // With one selected computer there is no ambiguity to resolve.
@@ -586,6 +593,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
             // external editor behind it.
             autoSelectionTargetPcId = candidates.single().pcId
             recentActivityPcId = candidates.single().pcId
+            restoreSessionFor(candidates.single())
             connect(candidates.single())
             return
         }
@@ -598,6 +606,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
                 } else {
                     autoSelectionTargetPcId = winner.binding.pcId
                     recentActivityPcId = winner.binding.pcId
+                    restoreSessionFor(winner.binding)
                     connect(winner.binding)
                 }
             }
@@ -609,16 +618,13 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         autoSelectionTargetPcId = null
         pendingAutoStart = null
         pendingAutoLatest = null
-        val text = session.currentText
-        val hadSession = session.sessionId != null
-        if (hadSession || session.finishing) {
-            session.reset()
-            session.replaceLocalDraft(text)
-        }
         val message = text(messageResource)
         autoSelectionError = message
-        showSyncFullText = text.isNotEmpty()
-        fallback?.let(::connect)
+        showSyncFullText = session.currentText.isNotEmpty()
+        fallback?.let {
+            restoreSessionFor(it)
+            connect(it)
+        }
         statusText = message
         notifyChanged()
     }
@@ -651,7 +657,14 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
 
     private fun saveDraftNow() {
         mainHandler.removeCallbacks(saveDraft)
-        drafts.save(session.state(), syncClient.remoteStarted())
+        sessions.saveCurrent(syncClient.remoteStarted())
+    }
+
+    private fun restoreSessionFor(binding: ComputerBinding) {
+        val restored = sessions.activate(binding.pcId) ?: return
+        session.recoverySnapshot()?.let {
+            syncClient.restore(it, restored.state.acknowledgedSequence, restored.remoteStarted)
+        }
     }
 
     private fun notifyChanged() {

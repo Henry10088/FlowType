@@ -1,7 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod diagnostics;
-mod inject;
 mod input_monitor;
 mod speech;
 mod target;
@@ -46,18 +45,13 @@ struct ActiveSession {
     sequence: i64,
     text: String,
     target: TargetWindow,
-    mode: InputMode,
+    tip: TipKey,
     input_epoch: u64,
 }
 
 struct CompletedSession {
     id: String,
     sequence: i64,
-}
-
-enum InputMode {
-    Tsf(TipKey),
-    Legacy,
 }
 
 fn main() -> io::Result<()> {
@@ -239,6 +233,26 @@ fn handle_request(
             elevated,
         },
         InjectorRequest::BeginSession { session_id } => {
+            if let Some(active) = session.as_ref().filter(|active| active.id == session_id) {
+                diagnostics::log(format!(
+                    "begin existing=active pid={} seq={}",
+                    active.target.process_id(),
+                    active.sequence
+                ));
+                return InjectorResponse::SessionBegun {
+                    target_name: active.target.title(),
+                };
+            }
+            if let Some(finished) = completed
+                .as_ref()
+                .filter(|finished| finished.id == session_id)
+            {
+                diagnostics::log(format!("begin existing=finished seq={}", finished.sequence));
+                return InjectorResponse::SessionFinished {
+                    session_id,
+                    sequence: finished.sequence,
+                };
+            }
             if session.is_some() {
                 // A new START is the recovery boundary after a lost socket or
                 // a rejected resume. Do not let an orphaned injector session
@@ -274,22 +288,22 @@ fn handle_request(
                 target.thread_id(),
                 target.title().chars().count()
             ));
-            let mode = match tips.begin_for_target(
+            let tip = match tips.begin_for_target(
                 target.process_id(),
                 target.thread_id(),
                 &session_id,
-                Duration::from_millis(250),
+                Duration::from_millis(1_500),
             ) {
                 Ok(tip) => {
                     diagnostics::log(format!(
                         "begin mode=tsf pid={} thread={}",
                         tip.process_id, tip.thread_id
                     ));
-                    InputMode::Tsf(tip)
+                    tip
                 }
                 Err(error) => {
-                    diagnostics::log(format!("begin mode=legacy_unicode_input reason={error}"));
-                    InputMode::Legacy
+                    diagnostics::log(format!("begin rejected=tsf_unavailable reason={error}"));
+                    return InjectorResponse::TsfUnavailable;
                 }
             };
             let target_name = target.title();
@@ -299,7 +313,7 @@ fn handle_request(
                 sequence: 0,
                 text: String::new(),
                 target,
-                mode,
+                tip,
                 input_epoch: input_monitor::epoch(),
             });
             diagnostics::log("begin accepted");
@@ -365,10 +379,9 @@ fn handle_request(
                 .as_ref()
                 .is_some_and(|active| active.id == session_id)
                 && let Some(active) = session.take()
-                && let InputMode::Tsf(tip) = active.mode
             {
                 let _ = tips.send(
-                    tip,
+                    active.tip,
                     TipCommand::Cancel {
                         session_id: session_id.clone(),
                     },
@@ -460,42 +473,9 @@ fn apply_state(
     }
 
     let text_len = full_text.chars().count();
-    if matches!(&active.mode, InputMode::Legacy) {
-        if !active.target.activate_for_input() {
-            let target_name = active.target.title();
-            diagnostics::log(format!(
-                "update pid={} seq={} text_len={} mode=legacy result=target_activation_failed",
-                active.target.process_id(),
-                sequence,
-                text_len
-            ));
-            end_failed_session(session, tips);
-            return InjectorResponse::TargetNotForeground { target_name };
-        }
-        let result = inject::replace_text(&active.text, &full_text);
-        diagnostics::log(format!(
-            "update pid={} seq={} text_len={} mode=legacy result={:?}",
-            active.target.process_id(),
-            sequence,
-            text_len,
-            result
-                .as_ref()
-                .map(|_| "ok")
-                .map_err(|error| error.to_string())
-        ));
-        if result.is_err() {
-            end_failed_session(session, tips);
-            return InjectorResponse::InjectionUnknown;
-        }
-        active.sequence = sequence;
-        active.text = full_text;
-        return InjectorResponse::Applied { sequence };
-    }
-    let InputMode::Tsf(tip) = &active.mode else {
-        unreachable!("legacy mode returned above");
-    };
+    let tip = active.tip;
     let response = tips.send(
-        *tip,
+        tip,
         TipCommand::Update {
             session_id: session_id.to_owned(),
             sequence,
@@ -556,20 +536,9 @@ fn finish_session(
     if active.id != session_id || active.sequence != sequence {
         return InjectorResponse::InvalidRequest;
     }
-    if matches!(&active.mode, InputMode::Legacy) {
-        let target_pid = active.target.process_id();
-        session.take();
-        diagnostics::log(format!(
-            "finish pid={} seq={} mode=legacy result=ok",
-            target_pid, sequence
-        ));
-        return InjectorResponse::Finished { sequence };
-    }
-    let InputMode::Tsf(tip) = &active.mode else {
-        unreachable!("legacy mode returned above");
-    };
+    let tip = active.tip;
     let response = tips.send(
-        *tip,
+        tip,
         TipCommand::Finish {
             session_id: session_id.to_owned(),
             sequence,
@@ -602,11 +571,9 @@ fn finish_session(
 }
 
 fn end_failed_session(session: &mut Option<ActiveSession>, tips: &TipRegistry) {
-    if let Some(active) = session.take()
-        && let InputMode::Tsf(tip) = active.mode
-    {
+    if let Some(active) = session.take() {
         let _ = tips.send(
-            tip,
+            active.tip,
             TipCommand::Cancel {
                 session_id: active.id,
             },

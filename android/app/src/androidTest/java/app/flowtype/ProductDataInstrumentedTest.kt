@@ -8,6 +8,7 @@ import app.flowtype.data.HistoryStore
 import app.flowtype.pairing.BindingStore
 import app.flowtype.pairing.ComputerBinding
 import app.flowtype.security.SecureDraftStore
+import app.flowtype.session.ComputerSessions
 import app.flowtype.session.InputSession
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -64,16 +65,35 @@ class ProductDataInstrumentedTest {
     }
 
     @Test
-    fun draftRoundTripsWithoutPlaintextInPreferences() {
+    fun independentDraftsRoundTripWithoutPlaintextInPreferences() {
         val preferencesName = "flowtype-test-draft-${UUID.randomUUID()}"
         val store = SecureDraftStore(context, preferencesName, "flowtype-test-key-${UUID.randomUUID()}")
-        val marker = "加密草稿-${UUID.randomUUID()}"
-        store.save(InputSession.State("session", marker, 1, 0, false), remoteStarted = false)
+        val markerA = "电脑A草稿-${UUID.randomUUID()}"
+        val markerB = "电脑B草稿-${UUID.randomUUID()}"
+        store.save(
+            "pc-a",
+            ComputerSessions.ParkedSession(
+                InputSession.State("session-a", markerA, 2, 1, false),
+                remoteStarted = true,
+            ),
+        )
+        store.save(
+            "pc-b",
+            ComputerSessions.ParkedSession(
+                InputSession.State("session-b", markerB, 1, 0, false),
+                remoteStarted = false,
+            ),
+        )
         val raw = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
-            .getString("encrypted_state", "").orEmpty()
-        assertFalse(raw.contains(marker))
-        assertEquals(marker, store.load()?.session?.text)
-        store.clear()
+            .all.values.joinToString()
+        assertFalse(raw.contains(markerA))
+        assertFalse(raw.contains(markerB))
+        assertEquals(markerA, store.load("pc-a")?.state?.text)
+        assertEquals(markerB, store.load("pc-b")?.state?.text)
+        assertTrue(store.load("pc-a")?.remoteStarted == true)
+        store.clear("pc-a")
+        assertEquals(markerB, store.load("pc-b")?.state?.text)
+        store.clear("pc-b")
         context.deleteSharedPreferences(preferencesName)
     }
 

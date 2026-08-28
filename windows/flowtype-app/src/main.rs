@@ -1234,9 +1234,10 @@ fn reconcile_injector_request(
                 ReconcileDecision::Retry => client
                     .request(request.clone())
                     .map_err(|_| ReconcileFailure::Unavailable),
-                ReconcileDecision::Finished | ReconcileDecision::Unknown => {
-                    Err(ReconcileFailure::Unconfirmed)
-                }
+                ReconcileDecision::Finished => Ok(InjectorResponse::Finished {
+                    sequence: *sequence,
+                }),
+                ReconcileDecision::Unknown => Err(ReconcileFailure::Unconfirmed),
             }
         }
         InjectorRequest::FinishSession {
@@ -1282,6 +1283,12 @@ fn classify_apply_recovery(
     state: &InjectorResponse,
 ) -> ReconcileDecision {
     match state {
+        InjectorResponse::SessionFinished {
+            session_id: finished_session,
+            sequence: finished_sequence,
+        } if finished_session == session_id && *finished_sequence == sequence => {
+            ReconcileDecision::Finished
+        }
         InjectorResponse::SessionActive {
             session_id: active_session,
             sequence: active_sequence,
@@ -1580,6 +1587,10 @@ where
         Err(error) => return send_injector_failure(websocket, &resume.session_id, error).await,
     };
     match applied {
+        InjectorResponse::Finished { sequence } => {
+            state.mark_input_finished();
+            send_ack(websocket, &resume.session_id, sequence, true).await
+        }
         InjectorResponse::Applied { sequence }
             if resume.session_state == ClientSessionState::Finishing =>
         {
@@ -1708,6 +1719,18 @@ where
                 &ServerMessage::Error(ProtocolError {
                     protocol_version: flowtype_core::PROTOCOL_VERSION,
                     code: ErrorCode::TargetUnavailable,
+                    session_id: Some(session_id.to_owned()),
+                }),
+            )
+            .await;
+        }
+        InjectorResponse::TsfUnavailable => {
+            mark_injector_unavailable(state);
+            return send_json(
+                websocket,
+                &ServerMessage::Error(ProtocolError {
+                    protocol_version: flowtype_core::PROTOCOL_VERSION,
+                    code: ErrorCode::InjectorUnavailable,
                     session_id: Some(session_id.to_owned()),
                 }),
             )
@@ -2018,6 +2041,19 @@ mod tests {
         assert_eq!(
             classify_finish_recovery("voice", 7, &active),
             ReconcileDecision::Retry,
+        );
+    }
+
+    #[test]
+    fn recognizes_a_finished_session_after_reconnecting() {
+        let finished = InjectorResponse::SessionFinished {
+            session_id: "voice".to_owned(),
+            sequence: 8,
+        };
+
+        assert_eq!(
+            classify_apply_recovery("voice", 8, "最终正文", &finished),
+            ReconcileDecision::Finished,
         );
     }
 }

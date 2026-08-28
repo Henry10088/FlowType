@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::MAX_MESSAGE_BYTES;
 
-pub const PIPE_NAME: &str = r"\\.\pipe\flowtype-input-v2";
+pub const PIPE_NAME: &str = r"\\.\pipe\flowtype-input-v3";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -70,6 +70,7 @@ pub enum InjectorResponse {
     TargetInvalid,
     TargetModified,
     TargetUnsupported,
+    TsfUnavailable,
     InjectionUnknown,
     InvalidRequest,
 }
@@ -125,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn serializes_the_v2_handshake_and_session_query() {
+    fn serializes_the_v3_handshake_and_session_query() {
         let hello = InjectorResponse::Hello {
             ipc_version: crate::INJECTOR_IPC_VERSION,
             instance_id: "injector-1".to_owned(),

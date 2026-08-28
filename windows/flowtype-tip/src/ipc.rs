@@ -63,6 +63,7 @@ fn run(window: HWND, process_id: u32, thread_id: u32, running: Arc<AtomicBool>) 
         };
         let hello = TipHello {
             ipc_version: flowtype_core::TIP_IPC_VERSION,
+            component_version: env!("CARGO_PKG_VERSION").to_owned(),
             process_id,
             thread_id,
         };

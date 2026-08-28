@@ -3,6 +3,7 @@ package app.flowtype.security
 import android.content.Context
 import android.util.Base64
 import app.flowtype.session.InputSession
+import app.flowtype.session.ComputerSessions
 import org.json.JSONObject
 
 class SecureDraftStore(
@@ -10,17 +11,13 @@ class SecureDraftStore(
     preferencesName: String = "draft-v1",
     keyAlias: String = KEY_ALIAS,
 ) {
-    data class StoredDraft(
-        val session: InputSession.State,
-        val remoteStarted: Boolean,
-    )
-
     private val preferences = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
     private val cipher = SecureTextCipher(keyAlias)
 
-    fun save(state: InputSession.State, remoteStarted: Boolean) {
+    fun save(pcId: String, draft: ComputerSessions.ParkedSession) {
+        val state = draft.state
         if (state.sessionId == null && state.text.isEmpty()) {
-            clear()
+            clear(pcId)
             return
         }
         val plaintext = JSONObject()
@@ -29,21 +26,26 @@ class SecureDraftStore(
             .put("latest_sequence", state.latestSequence)
             .put("acknowledged_sequence", state.acknowledgedSequence)
             .put("finishing", state.finishing)
-            .put("remote_started", remoteStarted)
+            .put("remote_started", draft.remoteStarted)
             .toString()
             .toByteArray(Charsets.UTF_8)
         val encrypted = cipher.encrypt(String(plaintext, Charsets.UTF_8))
         preferences.edit()
-            .putString("encrypted_state", Base64.encodeToString(encrypted, Base64.NO_WRAP))
+            .putString(storageKey(pcId), Base64.encodeToString(encrypted, Base64.NO_WRAP))
             .commit()
     }
 
-    fun load(): StoredDraft? = runCatching {
-        val stored = preferences.getString("encrypted_state", null) ?: return null
+    fun load(pcId: String): ComputerSessions.ParkedSession? = runCatching {
+        val key = storageKey(pcId)
+        val stored = preferences.getString(key, null)
+            ?: preferences.getString(LEGACY_KEY, null)?.also {
+                preferences.edit().putString(key, it).remove(LEGACY_KEY).commit()
+            }
+            ?: return null
         val encrypted = Base64.decode(stored, Base64.NO_WRAP)
         val value = JSONObject(cipher.decrypt(encrypted))
-        StoredDraft(
-            session = InputSession.State(
+        ComputerSessions.ParkedSession(
+            state = InputSession.State(
                 sessionId = value.optString("session_id").ifEmpty { null },
                 text = value.getString("text"),
                 latestSequence = value.getLong("latest_sequence"),
@@ -53,15 +55,21 @@ class SecureDraftStore(
             remoteStarted = value.optBoolean("remote_started", false),
         )
     }.getOrElse {
-        clear()
+        clear(pcId)
         null
     }
 
-    fun clear() {
-        preferences.edit().remove("encrypted_state").commit()
+    fun clear(pcId: String) {
+        preferences.edit().remove(storageKey(pcId)).commit()
     }
+
+    private fun storageKey(pcId: String): String = "encrypted_state_" + Base64.encodeToString(
+        pcId.toByteArray(Charsets.UTF_8),
+        Base64.NO_WRAP or Base64.URL_SAFE,
+    )
 
     companion object {
         private const val KEY_ALIAS = "flowtype-draft-aes-v1"
+        private const val LEGACY_KEY = "encrypted_state"
     }
 }

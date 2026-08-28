@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const TIP_PIPE_NAME: &str = r"\\.\pipe\flowtype-tip-v2";
+pub const TIP_PIPE_NAME: &str = r"\\.\pipe\flowtype-tip-v3";
 pub const CLSID_FLOWTYPE_TIP_VALUE: u128 = 0x9a50b266_9e86_4ff4_871b_8d47ad8c658b;
 pub const GUID_FLOWTYPE_PROFILE_VALUE: u128 = 0x567ab276_3af1_4874_8e2c_d47c31d5e46e;
 pub const FLOWTYPE_LANG_ID: u16 = 0x0804;
@@ -8,6 +8,7 @@ pub const FLOWTYPE_LANG_ID: u16 = 0x0804;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipHello {
     pub ipc_version: u16,
+    pub component_version: String,
     pub process_id: u32,
     pub thread_id: u32,
 }
@@ -58,6 +59,13 @@ pub struct TipSessionModel {
 
 impl TipSessionModel {
     pub fn begin(&mut self, session_id: &str) -> Result<(), TipResponse> {
+        if self.session_id.as_deref() == Some(session_id) {
+            return if self.terminated {
+                Err(TipResponse::CompositionTerminated)
+            } else {
+                Ok(())
+            };
+        }
         if self.session_id.is_some() {
             return Err(TipResponse::SessionMismatch);
         }
@@ -135,12 +143,14 @@ mod tests {
     fn tip_handshake_carries_its_independent_protocol_version() {
         let value = serde_json::to_value(TipHello {
             ipc_version: crate::TIP_IPC_VERSION,
+            component_version: env!("CARGO_PKG_VERSION").to_owned(),
             process_id: 42,
             thread_id: 7,
         })
         .unwrap();
 
         assert_eq!(value["ipc_version"], crate::TIP_IPC_VERSION);
+        assert_eq!(value["component_version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(value["process_id"], 42);
         assert_eq!(value["thread_id"], 7);
     }
@@ -165,6 +175,27 @@ mod tests {
             model.update("voice", 1, "不同内容"),
             Err(TipResponse::SequenceConflict)
         );
+    }
+
+    #[test]
+    fn repeated_begin_for_the_same_session_preserves_the_composition() {
+        let mut model = TipSessionModel::default();
+        model.begin("voice").unwrap();
+        model.update("voice", 1, "已有正文").unwrap();
+
+        model.begin("voice").unwrap();
+
+        assert_eq!(model.update("voice", 2, "修正正文"), Ok(true));
+    }
+
+    #[test]
+    fn a_trailing_newline_remains_ordinary_composition_text() {
+        let mut model = TipSessionModel::default();
+        model.begin("voice").unwrap();
+
+        assert_eq!(model.update("voice", 1, "第一行\n"), Ok(true));
+        assert_eq!(model.update("voice", 2, "第一行\n第二行"), Ok(true));
+        model.finish("voice", 2).unwrap();
     }
 
     #[test]

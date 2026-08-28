@@ -4,7 +4,7 @@ The two clients use the same ownership rule: runtime/session state lives below t
 
 ## Android
 
-`FlowTypeApplication` is the single source of truth for binding, connection, input session, image transfer, file batches and history mutations. `MainActivity` is a lifecycle and navigation coordinator. It owns activity-result contracts, keyboard/window policy, pairing dialogs and input-session actions.
+`FlowTypeApplication` is the single source of truth for binding, connection, the active per-computer input session, image transfer, file batches and history mutations. Parked sessions are encrypted and stored independently by computer; only the selected computer is attached to the live WSS queue. `MainActivity` is a lifecycle and navigation coordinator. It owns activity-result contracts, keyboard/window policy, pairing dialogs and input-session actions.
 
 Page rendering is split into small classes under `android/app/src/main/java/app/flowtype/ui/`:
 
@@ -35,7 +35,7 @@ The Windows management window uses a hybrid rendering boundary. Direct2D draws p
 
 ## Refactoring Rules
 
-1. Keep one authoritative runtime/session state per process.
+1. Keep one authoritative active runtime/session state per process, with at most one encrypted parked session per paired computer.
 2. Keep network and injector behavior independent from screen rendering.
 3. Prefer typed commands and callbacks at UI boundaries.
 4. Keep platform-unsafe code localized to platform UI modules.
