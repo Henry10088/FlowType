@@ -10,6 +10,8 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.text.Editable
@@ -50,6 +52,13 @@ class MainActivity : ComponentActivity() {
     private var waitingForUpdatePermission = false
     private var imeWasVisible = false
     private var ignoreImeDismissUntil = 0L
+    private var keepAwakeUntil = 0L
+    private val keepAwakeHandler = Handler(Looper.getMainLooper())
+    private val clearKeepAwakeTask = Runnable {
+        if (page == Screen.INPUT && SystemClock.uptimeMillis() >= keepAwakeUntil) {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
     private lateinit var input: EditText
     private lateinit var sync: Button
     private lateinit var newSession: Button
@@ -163,6 +172,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        keepAwakeHandler.removeCallbacks(clearKeepAwakeTask)
         imageScreen.shutdown()
         settingsScreen.shutdown()
         super.onDestroy()
@@ -179,6 +189,7 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         controller.saveNow()
         controller.removeObserver(observer)
+        if (page == Screen.INPUT) clearInputWindowSettings()
         if (controller.settings.floatingInput) FloatingInputService.show(this)
         super.onStop()
     }
@@ -186,7 +197,10 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         controller.ensureConnected()
-        if (page == Screen.INPUT) showKeyboard()
+        if (page == Screen.INPUT) {
+            refreshKeepAwake()
+            showKeyboard()
+        }
         if (waitingForOverlayPermission) {
             waitingForOverlayPermission = false
             if (Settings.canDrawOverlays(this)) enableFloating() else controller.settings.floatingInput = false
@@ -197,6 +211,11 @@ class MainActivity : ComponentActivity() {
             if (controller.updates.canRequestPackageInstalls()) installUpdate()
             else if (page == Screen.SETTINGS) showSettings()
         }
+    }
+
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        if (page == Screen.INPUT) refreshKeepAwake()
     }
 
     private fun installUpdate() {
@@ -255,7 +274,10 @@ class MainActivity : ComponentActivity() {
             override fun beforeTextChanged(value: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(value: CharSequence?, start: Int, before: Int, count: Int) = Unit
             override fun afterTextChanged(value: Editable?) {
-                if (!suppressTextChange) controller.textChanged(value?.toString().orEmpty())
+                if (!suppressTextChange) {
+                    refreshKeepAwake()
+                    controller.textChanged(value?.toString().orEmpty())
+                }
             }
         })
         sync.setOnClickListener { controller.sync() }
@@ -495,15 +517,28 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun applyInputWindowSettings() {
-        if (controller.settings.keepScreenOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (controller.settings.keepScreenOn) refreshKeepAwake() else clearKeepAwake()
         window.attributes = window.attributes.apply { screenBrightness = if (controller.settings.extraDim) 0.02f else -1f }
         findViewById<ImageButton>(R.id.toggleDim)?.alpha = if (controller.settings.extraDim) 1f else 0.65f
     }
 
     private fun clearInputWindowSettings() {
-        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        clearKeepAwake()
         window.attributes = window.attributes.apply { screenBrightness = -1f }
+    }
+
+    private fun refreshKeepAwake() {
+        if (!controller.settings.keepScreenOn || page != Screen.INPUT) return
+        keepAwakeUntil = SystemClock.uptimeMillis() + KEEP_AWAKE_WINDOW_MS
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        keepAwakeHandler.removeCallbacks(clearKeepAwakeTask)
+        keepAwakeHandler.postDelayed(clearKeepAwakeTask, KEEP_AWAKE_WINDOW_MS)
+    }
+
+    private fun clearKeepAwake() {
+        keepAwakeUntil = 0L
+        keepAwakeHandler.removeCallbacks(clearKeepAwakeTask)
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     private fun showKeyboard() {
@@ -557,6 +592,7 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val STATE_REOPEN_SETTINGS = "reopen_settings"
         private const val INPUT_RESUME_GRACE_MS = 1_000L
+        private const val KEEP_AWAKE_WINDOW_MS = 10L * 60L * 1_000L
         const val ACTION_OPEN_IMAGE = "app.flowtype.OPEN_IMAGE"
         private const val NOTIFICATION_PERMISSION = 10
     }

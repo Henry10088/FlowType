@@ -45,8 +45,8 @@
     <string name="rename">重命名</string>
     <string name="unbind">解除绑定</string>
     <string name="operation_requires_new_session">请先完成当前输入</string>
-    <string name="keep_screen_on">保持屏幕常亮</string>
-    <string name="keep_screen_on_summary">仅在输入页位于前台时生效</string>
+    <string name="keep_screen_on">操作后保持屏幕亮 10 分钟</string>
+    <string name="keep_screen_on_summary">输入页每次操作都会重新计时 10 分钟</string>
     <string name="floating_input">悬浮输入</string>
     <string name="floating_input_summary">从其他应用上方随时打开输入面板</string>
     <string name="auto_select_summary">开始输入时自动选择最近使用的在线电脑；输入期间不切换</string>
@@ -85,6 +85,7 @@
     <string name="update_install_permission_message">Android 需要允许说写安装由项目发布并已验证签名的更新包。此权限只用于你主动安装更新。</string>
     <string name="update_privacy_summary">检查更新时会连接 GitHub。</string>
     <string name="update_manifest_unavailable">更新信息不可用</string>
+    <string name="update_no_release">暂无 Android 发布版本</string>
     <string name="update_checking">正在检查更新…</string>
     <string name="update_latest">已是最新版本</string>
     <string name="update_check_again">再次检查</string>

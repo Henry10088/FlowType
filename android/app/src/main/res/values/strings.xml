@@ -45,8 +45,8 @@
     <string name="rename">Rename</string>
     <string name="unbind">Unpair</string>
     <string name="operation_requires_new_session">Finish the current input first</string>
-    <string name="keep_screen_on">Keep screen on</string>
-    <string name="keep_screen_on_summary">Only while the input screen is open</string>
+    <string name="keep_screen_on">Keep screen awake for 10 minutes</string>
+    <string name="keep_screen_on_summary">Each interaction starts a new 10-minute timer on the input screen</string>
     <string name="floating_input">Floating input</string>
     <string name="floating_input_summary">Open the input panel over other apps</string>
     <string name="auto_select_summary">Selects the most recently used online computer when you start typing; does not switch while typing</string>
@@ -85,6 +85,7 @@
     <string name="update_install_permission_message">Android must allow FlowType to install verified updates published by this project. This permission is only used when you choose to install an update.</string>
     <string name="update_privacy_summary">Checking for updates connects to GitHub.</string>
     <string name="update_manifest_unavailable">Update information is unavailable</string>
+    <string name="update_no_release">No Android release is available</string>
     <string name="update_checking">Checking for updates…</string>
     <string name="update_latest">FlowType is up to date</string>
     <string name="update_check_again">Check again</string>

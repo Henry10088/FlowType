@@ -170,6 +170,16 @@ class UpdateManager(
                 ))
             }
         } catch (error: Exception) {
+            if (error.message == context.getString(R.string.update_no_release)) {
+                available = null
+                setState(State(
+                    message = error.message.orEmpty(),
+                    action = Action.CHECK,
+                    actionLabel = context.getString(R.string.update_check_again),
+                    releaseUrl = RELEASES_URL,
+                ))
+                return
+            }
             val cached = available ?: loadPersistedManifest()
             if (cached != null && cached.versionCode > currentVersionCode) {
                 available = cached
@@ -220,7 +230,8 @@ class UpdateManager(
                 ?: compareValues(rightVersion.second, leftVersion.second).takeIf { it != 0 }
                 ?: compareValues(rightVersion.third, leftVersion.third)
         }
-        val tag = tags.firstOrNull() ?: throw IllegalStateException("no Android release found")
+        val tag = tags.firstOrNull()
+            ?: throw IllegalStateException(context.getString(R.string.update_no_release))
         return "$RELEASE_DOWNLOAD_PREFIX/$tag/flowtype-update.json"
     }
 
@@ -482,7 +493,7 @@ class UpdateManager(
         private const val RELEASES_URL = "https://github.com/Henry10088/FlowType/releases"
         private const val KEY_ID = "flowtype-update-2026-v2"
         private const val PLATFORM = "android"
-        private const val PUBLIC_KEY = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE81gLLKum3oiKT8hYqGYfnYpgeHmAt/xnfD4F39yrg+5/++M5/UNSUvU2aWA7iLro/+irFe/SwoHQ45WPVLnAdw=="
+        private const val PUBLIC_KEY = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEzT8gs1pM0TpltcRVmcJsgGZWN7zYLie2XMcggyaqUB46hPXrdKJ6KZwhSpjxmlAR1TMdqMak4z/2R3ZMdDOHJA=="
         private const val MAX_MANIFEST_BYTES = 64 * 1024
         private const val MAX_RELEASES_BYTES = 512 * 1024
         private const val MAX_SIGNATURE_BYTES = 1024
