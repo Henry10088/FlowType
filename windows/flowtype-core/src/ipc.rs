@@ -22,6 +22,7 @@ pub enum InjectorRequest {
         sequence: i64,
     },
     QueryStatus,
+    QueryIdentity,
     ProbeTarget,
     CancelInvalidSession {
         session_id: String,
@@ -41,6 +42,10 @@ pub enum InjectorResponse {
         sequence: i64,
     },
     Ready,
+    Identity {
+        protocol_version: u16,
+        executable_path: String,
+    },
     TargetReady {
         target_name: String,
         activity_age_ms: u64,

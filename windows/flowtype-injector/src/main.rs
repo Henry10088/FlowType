@@ -284,6 +284,12 @@ fn handle_request(
             sequence,
         } => finish_session(session, tips, &session_id, sequence),
         InjectorRequest::QueryStatus => InjectorResponse::Ready,
+        InjectorRequest::QueryIdentity => InjectorResponse::Identity {
+            protocol_version: flowtype_core::PROTOCOL_VERSION,
+            executable_path: std::env::current_exe()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        },
         InjectorRequest::ProbeTarget => {
             let Some(target) = TargetWindow::capture_foreground() else {
                 return InjectorResponse::TargetInvalid;
