@@ -239,7 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paired_phones = load_paired_phones()?;
     let first_run = paired_phones.is_empty();
     let pairing_token = first_run.then(random_token);
-    let injector = InjectorClient::connect().ok();
+    let injector = connect_injector().ok();
     let endpoint_host = std::env::var("FLOWTYPE_ENDPOINT_HOST")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -700,7 +700,7 @@ impl AppState {
     }
 
     fn repair_injector(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let repaired = InjectorClient::repair()?;
+        let repaired = connect_injector()?;
         *self
             .injector
             .lock()
@@ -1120,7 +1120,7 @@ fn injector_request(
         .lock()
         .map_err(|_| std::io::Error::other("input service state unavailable"))?;
     if injector.is_none() {
-        *injector = InjectorClient::connect().ok();
+        *injector = connect_injector().ok();
     }
     let result = injector
         .as_mut()
@@ -1133,14 +1133,30 @@ fn injector_request(
         .request(request);
     if result.is_err() {
         *injector = None;
+        let recovered = connect_injector().ok();
+        let recovered_ok = recovered.is_some();
+        *injector = recovered;
         state.update_status(|status| {
-            status.summary =
-                tr("Windows 输入服务不可用", "Windows input is unavailable").to_owned();
-            status.last_error =
-                Some(tr("请在设置中修复输入服务", "Repair input from Settings").to_owned());
+            if recovered_ok {
+                status.last_error = Some(tr(
+                    "输入服务已自动恢复；本次请求未自动重试，请同步全文",
+                    "Input service recovered automatically. The failed request was not retried; sync the full text.",
+                ).to_owned());
+            } else {
+                status.summary =
+                    tr("Windows 输入服务不可用", "Windows input is unavailable").to_owned();
+                status.last_error =
+                    Some(tr("请在设置中修复输入服务", "Repair input from Settings").to_owned());
+            }
         });
+    } else if result.is_ok() {
+        state.update_status(|status| status.last_error = None);
     }
     result
+}
+
+fn connect_injector() -> std::io::Result<InjectorClient> {
+    InjectorClient::connect().or_else(|_| InjectorClient::repair())
 }
 
 impl Drop for ActiveConnectionLease {
