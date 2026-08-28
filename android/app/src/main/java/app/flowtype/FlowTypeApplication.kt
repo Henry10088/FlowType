@@ -483,6 +483,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         showSyncFullText = true
         statusText = when (error.code) {
             ErrorCode.INJECTOR_UNAVAILABLE -> text(R.string.status_input_service_unavailable)
+            ErrorCode.RECOVERY_REQUIRED -> text(R.string.status_input_service_recovered)
             ErrorCode.TARGET_MODIFIED -> text(R.string.status_target_modified)
             else -> text(R.string.status_sync_stopped)
         }

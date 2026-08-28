@@ -2,113 +2,138 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
-use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
-use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
-    TerminateProcess,
-};
+use std::time::{Duration, Instant};
 
 use flowtype_core::ipc::{
     InjectorRequest, InjectorResponse, PIPE_NAME, read_message, write_message,
 };
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::System::Pipes::{GetNamedPipeServerProcessId, PeekNamedPipe};
+use windows_sys::Win32::System::Threading::{
+    CREATE_NO_WINDOW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
 
-pub struct InjectorClient(File);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+// The broker has enough time to time out one TIP edit and its cleanup before
+// the app treats the whole service request as unresponsive.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
+const DEV_INJECTOR_ENV: &str = "FLOWTYPE_DEV_INJECTOR";
+
+pub struct InjectorClient {
+    pipe: File,
+    instance_id: String,
+}
 
 impl InjectorClient {
     pub fn connect() -> io::Result<Self> {
-        if let Ok(file) = open_pipe()
-            && let Ok(client) = Self::connect_existing(file)
-        {
+        if let Ok(client) = open_verified_pipe() {
             return Ok(client);
         }
-        start_injector()?;
-        for _ in 0..30 {
-            if let Ok(file) = open_pipe()
-                && let Ok(client) = Self::connect_existing(file)
-            {
-                return Ok(client);
+
+        activate_injector()?;
+        let deadline = Instant::now() + CONNECT_TIMEOUT;
+        let mut last_error = io::Error::new(
+            io::ErrorKind::NotConnected,
+            "input service did not become ready",
+        );
+        while Instant::now() < deadline {
+            match open_verified_pipe() {
+                Ok(client) => return Ok(client),
+                Err(error) => last_error = error,
             }
             thread::sleep(Duration::from_millis(100));
         }
-        Err(io::Error::new(
-            io::ErrorKind::NotConnected,
-            "input service did not start",
-        ))
+        Err(last_error)
     }
 
     pub fn request(&mut self, request: InjectorRequest) -> io::Result<InjectorResponse> {
-        write_message(&mut self.0, &request)?;
-        let response = read_message(&mut self.0)?;
-        Ok(response)
+        write_message(&mut self.pipe, &request)?;
+        read_response_with_timeout(&mut self.pipe, REQUEST_TIMEOUT)
     }
 
-    pub fn repair() -> io::Result<Self> {
-        let status = Command::new("schtasks.exe")
-            .args(["/Run", "/TN", "FlowType Injector"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .status()?;
-        if !status.success() {
-            return Err(io::Error::other(
-                "registered input service task could not be started",
-            ));
-        }
-        for _ in 0..30 {
-            if let Ok(file) = open_pipe()
-                && let Ok(client) = Self::connect_existing(file)
-            {
-                return Ok(client);
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        Err(io::Error::new(
-            io::ErrorKind::NotConnected,
-            "input service did not become ready",
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+}
+
+fn open_verified_pipe() -> io::Result<InjectorClient> {
+    let pipe = OpenOptions::new().read(true).write(true).open(PIPE_NAME)?;
+    let server_path = server_process_path(&pipe)?;
+    let mut client = InjectorClient {
+        pipe,
+        instance_id: String::new(),
+    };
+    let response = client.request(InjectorRequest::Hello)?;
+    let InjectorResponse::Hello {
+        ipc_version,
+        instance_id,
+        executable_path,
+        elevated,
+    } = response
+    else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "input service returned an invalid handshake",
+        ));
+    };
+    let expected = injector_path()?;
+    if ipc_version != flowtype_core::INJECTOR_IPC_VERSION
+        || !same_path(&server_path, &expected)
+        || !same_path(Path::new(&executable_path), &expected)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "input service identity mismatch",
+        ));
+    }
+    if !dev_injector_enabled() && !elevated {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "input service is not elevated",
+        ));
+    }
+    if instance_id.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "input service instance is missing",
+        ));
+    }
+    client.instance_id = instance_id;
+    Ok(client)
+}
+
+fn activate_injector() -> io::Result<()> {
+    if dev_injector_enabled() {
+        return start_sibling_injector();
+    }
+    let status = Command::new("schtasks.exe")
+        .args(["/Run", "/TN", "FlowType Injector"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "registered input service task could not be started",
         ))
     }
-
-    fn connect_existing(file: File) -> io::Result<Self> {
-        let server_pid = server_process_id(&file).ok();
-        let mut client = Self(file);
-        let response = client.request(InjectorRequest::QueryIdentity);
-        match response {
-            Ok(InjectorResponse::Identity {
-                protocol_version,
-                executable_path,
-            }) if protocol_version == flowtype_core::PROTOCOL_VERSION
-                && same_path(&executable_path, &injector_path()?) =>
-            {
-                Ok(client)
-            }
-            Ok(_) | Err(_) => {
-                drop(client);
-                terminate_stale_injector(server_pid);
-                Err(io::Error::new(
-                    io::ErrorKind::NotConnected,
-                    "input service identity mismatch",
-                ))
-            }
-        }
-    }
 }
 
-fn open_pipe() -> io::Result<File> {
-    OpenOptions::new().read(true).write(true).open(PIPE_NAME)
-}
-
-fn start_injector() -> io::Result<()> {
-    let sibling = injector_path()?;
-    Command::new(sibling)
+fn start_sibling_injector() -> io::Result<()> {
+    Command::new(injector_path()?)
         .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()?;
     Ok(())
+}
+
+fn dev_injector_enabled() -> bool {
+    std::env::var_os(DEV_INJECTOR_ENV).is_some_and(|value| value == "1")
 }
 
 fn injector_path() -> io::Result<PathBuf> {
@@ -119,45 +144,25 @@ fn injector_path() -> io::Result<PathBuf> {
         .unwrap_or_else(|| PathBuf::from("flowtype-injector.exe")))
 }
 
-fn same_path(actual: &str, expected: &std::path::Path) -> bool {
-    std::path::Path::new(actual)
+fn same_path(actual: &Path, expected: &Path) -> bool {
+    actual
         .to_string_lossy()
         .eq_ignore_ascii_case(&expected.to_string_lossy())
 }
 
-fn server_process_id(file: &File) -> io::Result<u32> {
+fn server_process_path(file: &File) -> io::Result<PathBuf> {
     let mut process_id = 0_u32;
     if unsafe { GetNamedPipeServerProcessId(file.as_raw_handle() as HANDLE, &mut process_id) } == 0
     {
         return Err(io::Error::last_os_error());
     }
-    Ok(process_id)
-}
-
-fn terminate_stale_injector(process_id: Option<u32>) {
-    let Some(process_id) = process_id else {
-        return;
-    };
-    let process = unsafe {
-        OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
-            0,
-            process_id,
-        )
-    };
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
     if process.is_null() {
-        return;
+        return Err(io::Error::last_os_error());
     }
-    let path = process_path(process).unwrap_or_default();
-    let is_injector = std::path::Path::new(&path)
-        .file_name()
-        .is_some_and(|name| name.eq_ignore_ascii_case("flowtype-injector.exe"));
-    if is_injector {
-        unsafe {
-            let _ = TerminateProcess(process, 1);
-        }
-    }
+    let result = process_path(process).map(PathBuf::from);
     unsafe { CloseHandle(process) };
+    result
 }
 
 fn process_path(process: HANDLE) -> io::Result<String> {
@@ -167,4 +172,60 @@ fn process_path(process: HANDLE) -> io::Result<String> {
         return Err(io::Error::last_os_error());
     }
     Ok(String::from_utf16_lossy(&path[..length as usize]))
+}
+
+fn read_response_with_timeout(file: &mut File, timeout: Duration) -> io::Result<InjectorResponse> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let mut header = [0_u8; 4];
+        let mut peeked = 0_u32;
+        let mut available = 0_u32;
+        if unsafe {
+            PeekNamedPipe(
+                file.as_raw_handle() as HANDLE,
+                header.as_mut_ptr().cast(),
+                header.len() as u32,
+                &mut peeked,
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if peeked == header.len() as u32 {
+            let payload_len = u32::from_le_bytes(header) as usize;
+            if payload_len > flowtype_core::MAX_MESSAGE_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "input service response is too large",
+                ));
+            }
+            if available as usize >= header.len() + payload_len {
+                return read_message(file);
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "input service response timed out",
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::same_path;
+
+    #[test]
+    fn compares_windows_paths_case_insensitively() {
+        assert!(same_path(
+            Path::new(r"C:\Program Files\FlowType\flowtype-injector.exe"),
+            Path::new(r"c:\program files\flowtype\FLOWTYPE-INJECTOR.EXE"),
+        ));
+    }
 }

@@ -62,6 +62,7 @@ fn run(window: HWND, process_id: u32, thread_id: u32, running: Arc<AtomicBool>) 
             continue;
         };
         let hello = TipHello {
+            ipc_version: flowtype_core::TIP_IPC_VERSION,
             process_id,
             thread_id,
         };

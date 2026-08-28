@@ -188,6 +188,8 @@ V1 使用成熟的 ZXing Android 扫描组件，避免自行承担 Camera2 兼�
 - 首次安装时创建当前用户登录触发的高权限计划任务。
 - 注入助手在交互用户桌面中运行，不作为 Windows Service 运行。
 - 登录后自动启动，不在用户开始输入时再申请 UAC。
+- 正式环境只有计划任务可以启动助手；主程序不直接启动同目录低权限副本。源码目录调试仅在显式设置 `FLOWTYPE_DEV_INJECTOR=1` 时允许直启。
+- 任务允许电池供电时启动并持续运行，执行时限为无限；系统不得按任务计划程序的默认节电策略停止输入助手。
 - 助手没有托盘、窗口、网络监听和自动更新逻辑。
 - 安装程序注册 `flowtype_tip.dll`；卸载前先停助手，再注销 DLL。
 - 安装时启用 FlowType Speech Profile；注入助手在登录后确保它只激活一次，并在整个桌面会话中保持空闲待命。
@@ -198,7 +200,8 @@ V1 使用成熟的 ZXing Android 扫描组件，避免自行承担 Camera2 兼�
 
 - 使用命名管道，DACL 只允许当前用户、Administrators 和 SYSTEM。
 - 注入助手获取连接方 PID 并校验主程序安装路径。
-- 发布版本校验主程序 Authenticode 签名或安装时固定的文件身份。
+- 主程序同时查询管道服务端 PID，要求系统返回路径、助手自报路径和当前安装目录中的助手路径一致。
+- 握手要求助手报告独立 IPC 版本、非空实例 ID 和高权限状态；任一项不符都拒绝使用该服务。
 - 主程序安装目录位于普通用户不可修改的 `Program Files`。
 - IPC 使用有最大长度限制的类型化消息，不接受命令行、脚本、路径或任意虚拟键。
 - 单条 IPC 消息上限与 WSS 文本消息上限保持一致。
@@ -208,14 +211,18 @@ V1 使用成熟的 ZXing Android 扫描组件，避免自行承担 Camera2 兼�
 助手只接受：
 
 ```text
-begin_session(session_id, sequence)
+hello()
+begin_session(session_id)
 apply_state(session_id, sequence, full_text)
 finish_session(session_id, sequence)
-query_status()
+query_session(session_id)
+probe_target()
 cancel_invalid_session(session_id)
 ```
 
 `cancel_invalid_session` 只清理助手内存状态，不向目标窗口发送删除或恢复操作。
+
+本地协议与 Android 网络协议独立演进：Android-Windows WSS 使用 `protocol_version = 1`，主程序到助手使用 `flowtype-input-v2` / `INJECTOR_IPC_VERSION = 2`，助手到 TIP 使用 `flowtype-tip-v2` / `TIP_IPC_VERSION = 2`。V1 尚未发布，不保留旧本地管道或旧消息兼容分支；不匹配的进程不能接入新管道。
 
 ## 7. 输入后端与会话租约
 
@@ -249,6 +256,7 @@ cancel_invalid_session(session_id)
 - HWND 关闭、进程退出、TIP 卸载或组合被目标终止时，不猜测恢复、不发送删除操作。
 - 自动验收记录一次性激活前后的键盘 Profile 和目标线程 HKL；连续多轮开始、完成、取消和失败后这些状态必须完全一致。
 - TIP 管道空闲时使用阻塞读取，不以定时轮询维持常驻服务。
+- TIP 命令响应预算为 1.5 秒；主程序等待助手响应的预算为 4 秒，允许助手完成一次 TIP 超时和有界清理后再判断服务失联。
 
 ## 8. WSS 与身份认证
 
@@ -343,6 +351,8 @@ idle
 - Windows 主程序、注入助手或目标进程失效后进入 `target_invalid`，只允许用户从新光标创建新会话。
 - 电脑端主动编辑或移动选区后进入 `target_modified`；Windows 立即让出输入权，Android 保留正文并将“同步”重新启用，等待用户重新同步。
 - TSF 编辑结果无法确认时进入 `injection_unknown`。助手不更新逻辑文本、不自动重试。
+- 主程序与助手断管后，若重新连接到同一助手实例，则通过 `query_session` 判定中断请求：状态已应用时直接补 ACK，助手序号落后时安全重试，结束仍未执行时重试结束。实例变化、同序号正文冲突或状态缺失时返回 `recovery_required`，Android 保留全文并要求用户点击“同步”创建新会话。
+- `recovery_required` 表示服务连接已经恢复但旧请求结果未知，不等同于“输入服务不可用”。Windows 不强杀助手、不猜测目标正文、不在未知结果上自动重放。
 
 ### 9.3 顺序
 
@@ -424,7 +434,7 @@ V1 使用 Inno Setup：
 1. 申请一次安装级 UAC。
 2. 安装两个 Rust 可执行文件和 x64/x86 TSF DLL 到 `Program Files`，分别通过对应位数的 `regsvr32` 注册 Speech Text Service；覆盖升级先注销所有历史 TIP DLL，卸载后清除两种注册表视图和当前用户 Profile。
 3. 为普通主程序创建当前用户登录启动项。
-4. 为高权限注入助手创建最高权限计划任务。
+4. 为高权限注入助手创建最高权限计划任务，关闭电池停用策略并取消执行时限。
 5. 创建远端范围为 `LocalSubnet` 的入站防火墙规则。
 6. 启动主程序并打开首次配对窗口。
 

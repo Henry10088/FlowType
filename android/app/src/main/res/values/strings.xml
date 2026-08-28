@@ -20,6 +20,7 @@
     <string name="status_pair_failed">Invalid QR code. Scan again.</string>
     <string name="status_reconnecting">Reconnecting to %1$s</string>
     <string name="status_input_service_unavailable">Computer input is unavailable. Repair it in FlowType settings on Windows.</string>
+    <string name="status_input_service_recovered">Computer input has recovered. Tap Sync to continue.</string>
     <string name="status_sync_stopped">This input has stopped</string>
     <string name="status_target_modified">Text was edited on the computer. Syncing has stopped.</string>
     <string name="status_target_invalid">The input location is no longer available. Select it again.</string>

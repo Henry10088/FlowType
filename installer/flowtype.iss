@@ -190,6 +190,15 @@ begin
   if (not Exec(ExpandConstant('{sys}\schtasks.exe'), Parameters, '', SW_HIDE,
       ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
     RaiseException('Failed to create the FlowType Injector task.');
+  Parameters := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' +
+    '$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries ' +
+    '-DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero); ' +
+    'Set-ScheduledTask -TaskName ' + #39 + '{#TaskName}' + #39 +
+    ' -Settings $settings | Out-Null"';
+  if (not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      Parameters, '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or
+      (ResultCode <> 0) then
+    RaiseException('Failed to configure the FlowType Injector task.');
   if (not Exec(ExpandConstant('{sys}\schtasks.exe'), '/Run /TN "{#TaskName}"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
     RaiseException('Failed to start the FlowType Injector task.');

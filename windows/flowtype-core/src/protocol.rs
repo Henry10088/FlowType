@@ -165,6 +165,7 @@ pub enum ErrorCode {
     TargetInvalid,
     TargetModified,
     InjectorUnavailable,
+    RecoveryRequired,
     InjectionUnknown,
     InvalidMessage,
     UnsupportedProtocol,
@@ -312,16 +313,21 @@ mod tests {
 
     #[test]
     fn serializes_input_service_failures_without_closing_the_protocol() {
-        let message = ServerMessage::Error(ProtocolError {
-            protocol_version: 1,
-            code: ErrorCode::InjectorUnavailable,
-            session_id: Some("session".into()),
-        });
-        let value = serde_json::to_value(message).unwrap();
+        for (code, expected) in [
+            (ErrorCode::InjectorUnavailable, "INJECTOR_UNAVAILABLE"),
+            (ErrorCode::RecoveryRequired, "RECOVERY_REQUIRED"),
+        ] {
+            let message = ServerMessage::Error(ProtocolError {
+                protocol_version: 1,
+                code,
+                session_id: Some("session".into()),
+            });
+            let value = serde_json::to_value(message).unwrap();
 
-        assert_eq!(value["type"], "error");
-        assert_eq!(value["code"], "INJECTOR_UNAVAILABLE");
-        assert_eq!(value["session_id"], "session");
+            assert_eq!(value["type"], "error");
+            assert_eq!(value["code"], expected);
+            assert_eq!(value["session_id"], "session");
+        }
     }
 
     #[test]

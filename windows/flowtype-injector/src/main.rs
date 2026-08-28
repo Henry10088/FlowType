@@ -12,7 +12,7 @@ use std::io;
 use std::mem::size_of;
 use std::os::windows::io::FromRawHandle;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flowtype_core::ipc::{
     InjectorRequest, InjectorResponse, PIPE_NAME, read_message, write_message,
@@ -25,8 +25,8 @@ use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::{
-    GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
-    TokenUser,
+    GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY,
+    TOKEN_USER, TokenElevation, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
 use windows_sys::Win32::System::Pipes::{
@@ -34,8 +34,8 @@ use windows_sys::Win32::System::Pipes::{
     PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
-    QueryFullProcessImageNameW,
+    GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 
 use crate::target::TargetWindow;
@@ -50,6 +50,11 @@ struct ActiveSession {
     input_epoch: u64,
 }
 
+struct CompletedSession {
+    id: String,
+    sequence: i64,
+}
+
 enum InputMode {
     Tsf(TipKey),
     Legacy,
@@ -61,8 +66,15 @@ fn main() -> io::Result<()> {
     speech::initialize_com().map_err(io::Error::other)?;
     let tips = TipRegistry::start();
     speech::ensure_flowtype_active().map_err(io::Error::other)?;
+    let instance_id = service_instance_id();
+    let elevated = is_elevated()?;
+    diagnostics::log(format!(
+        "service instance={instance_id} elevated={elevated} ipc_version={}",
+        flowtype_core::INJECTOR_IPC_VERSION
+    ));
     let pipe_sddl = pipe_security_sddl()?;
     let mut session = None;
+    let mut completed = None;
     loop {
         let mut pipe = match accept_pipe(&pipe_sddl) {
             Ok(pipe) => pipe,
@@ -70,7 +82,14 @@ fn main() -> io::Result<()> {
             Err(error) => return Err(error),
         };
         while let Ok(request) = read_message(&mut pipe) {
-            let response = handle_request(request, &mut session, &tips);
+            let response = handle_request(
+                request,
+                &mut session,
+                &mut completed,
+                &tips,
+                &instance_id,
+                elevated,
+            );
             if write_message(&mut pipe, &response).is_err() {
                 break;
             }
@@ -205,9 +224,20 @@ fn is_expected_client(pipe: HANDLE) -> io::Result<bool> {
 fn handle_request(
     request: InjectorRequest,
     session: &mut Option<ActiveSession>,
+    completed: &mut Option<CompletedSession>,
     tips: &Arc<TipRegistry>,
+    instance_id: &str,
+    elevated: bool,
 ) -> InjectorResponse {
     match request {
+        InjectorRequest::Hello => InjectorResponse::Hello {
+            ipc_version: flowtype_core::INJECTOR_IPC_VERSION,
+            instance_id: instance_id.to_owned(),
+            executable_path: std::env::current_exe()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            elevated,
+        },
         InjectorRequest::BeginSession { session_id } => {
             if session.is_some() {
                 // A new START is the recovery boundary after a lost socket or
@@ -263,6 +293,7 @@ fn handle_request(
                 }
             };
             let target_name = target.title();
+            *completed = None;
             *session = Some(ActiveSession {
                 id: session_id,
                 sequence: 0,
@@ -282,14 +313,35 @@ fn handle_request(
         InjectorRequest::FinishSession {
             session_id,
             sequence,
-        } => finish_session(session, tips, &session_id, sequence),
-        InjectorRequest::QueryStatus => InjectorResponse::Ready,
-        InjectorRequest::QueryIdentity => InjectorResponse::Identity {
-            protocol_version: flowtype_core::PROTOCOL_VERSION,
-            executable_path: std::env::current_exe()
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-        },
+        } => {
+            let response = finish_session(session, tips, &session_id, sequence);
+            if let InjectorResponse::Finished { sequence } = &response {
+                *completed = Some(CompletedSession {
+                    id: session_id,
+                    sequence: *sequence,
+                });
+            }
+            response
+        }
+        InjectorRequest::QuerySession { session_id } => {
+            if let Some(active) = session.as_ref().filter(|active| active.id == session_id) {
+                InjectorResponse::SessionActive {
+                    session_id,
+                    sequence: active.sequence,
+                    full_text: active.text.clone(),
+                }
+            } else if let Some(finished) = completed
+                .as_ref()
+                .filter(|finished| finished.id == session_id)
+            {
+                InjectorResponse::SessionFinished {
+                    session_id,
+                    sequence: finished.sequence,
+                }
+            } else {
+                InjectorResponse::SessionMissing
+            }
+        }
         InjectorRequest::ProbeTarget => {
             let Some(target) = TargetWindow::capture_foreground() else {
                 return InjectorResponse::TargetInvalid;
@@ -325,6 +377,40 @@ fn handle_request(
             InjectorResponse::Cancelled
         }
     }
+}
+
+fn service_instance_id() -> String {
+    let started = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("{}-{started}", unsafe { GetCurrentProcessId() })
+}
+
+fn is_elevated() -> io::Result<bool> {
+    let mut token = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let result = (|| {
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut length = 0_u32;
+        if unsafe {
+            GetTokenInformation(
+                token,
+                TokenElevation,
+                (&mut elevation as *mut TOKEN_ELEVATION).cast(),
+                size_of::<TOKEN_ELEVATION>() as u32,
+                &mut length,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(elevation.TokenIsElevated != 0)
+    })();
+    unsafe { CloseHandle(token) };
+    result
 }
 
 fn apply_state(

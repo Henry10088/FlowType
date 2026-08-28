@@ -97,4 +97,15 @@ class ProtocolTest {
         assertEquals("request-1", ack.getString("request_id"))
         assertEquals(true, ack.getBoolean("accepted"))
     }
+
+    @Test
+    fun decodesInputServiceRecoveryRequired() {
+        val message = ProtocolCodec.decodeServer(
+            """{"protocol_version":1,"type":"error","code":"RECOVERY_REQUIRED","session_id":"voice"}""",
+        )
+
+        require(message is ServerMessage.Error)
+        assertEquals(ErrorCode.RECOVERY_REQUIRED, message.value.code)
+        assertEquals("voice", message.value.sessionId)
+    }
 }

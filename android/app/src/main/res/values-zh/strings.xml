@@ -20,6 +20,7 @@
     <string name="status_pair_failed">二维码无效，请重新扫描</string>
     <string name="status_reconnecting">正在重新连接：%1$s</string>
     <string name="status_input_service_unavailable">Windows 输入服务不可用，请在电脑设置中修复</string>
+    <string name="status_input_service_recovered">Windows 输入服务已恢复，请点同步继续</string>
     <string name="status_sync_stopped">本次输入已停止</string>
     <string name="status_target_modified">电脑端已编辑，本次同步已停止</string>
     <string name="status_target_invalid">原输入位置已失效，请重新选择输入位置</string>

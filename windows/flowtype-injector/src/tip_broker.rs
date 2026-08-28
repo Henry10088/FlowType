@@ -26,6 +26,7 @@ use windows_sys::Win32::System::Pipes::{
 use crate::diagnostics;
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+const TIP_RESPONSE_TIMEOUT: Duration = Duration::from_millis(1_500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TipKey {
@@ -135,7 +136,7 @@ impl TipRegistry {
             })
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "TSF client left"))?;
         receiver
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(TIP_RESPONSE_TIMEOUT)
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TSF edit timed out"))?
     }
 
@@ -167,6 +168,13 @@ impl TipRegistry {
         let Ok(hello) = read_message::<TipHello>(&mut pipe) else {
             return;
         };
+        if hello.ipc_version != flowtype_core::TIP_IPC_VERSION {
+            diagnostics::log(format!(
+                "tip_client rejected pid={} thread={} reason=protocol_version version={}",
+                hello.process_id, hello.thread_id, hello.ipc_version
+            ));
+            return;
+        }
         if !pipe_client_matches(&pipe, hello.process_id) {
             diagnostics::log(format!(
                 "tip_client rejected pid={} thread={} reason=pipe_pid_mismatch",

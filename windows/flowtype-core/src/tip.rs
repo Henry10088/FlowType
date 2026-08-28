@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-pub const TIP_PIPE_NAME: &str = r"\\.\pipe\flowtype-tip-v1";
+pub const TIP_PIPE_NAME: &str = r"\\.\pipe\flowtype-tip-v2";
 pub const CLSID_FLOWTYPE_TIP_VALUE: u128 = 0x9a50b266_9e86_4ff4_871b_8d47ad8c658b;
 pub const GUID_FLOWTYPE_PROFILE_VALUE: u128 = 0x567ab276_3af1_4874_8e2c_d47c31d5e46e;
 pub const FLOWTYPE_LANG_ID: u16 = 0x0804;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipHello {
+    pub ipc_version: u16,
     pub process_id: u32,
     pub thread_id: u32,
 }
@@ -128,7 +129,21 @@ impl TipSessionModel {
 
 #[cfg(test)]
 mod tests {
-    use super::{TipResponse, TipSessionModel};
+    use super::{TipHello, TipResponse, TipSessionModel};
+
+    #[test]
+    fn tip_handshake_carries_its_independent_protocol_version() {
+        let value = serde_json::to_value(TipHello {
+            ipc_version: crate::TIP_IPC_VERSION,
+            process_id: 42,
+            thread_id: 7,
+        })
+        .unwrap();
+
+        assert_eq!(value["ipc_version"], crate::TIP_IPC_VERSION);
+        assert_eq!(value["process_id"], 42);
+        assert_eq!(value["thread_id"], 7);
+    }
 
     #[test]
     fn full_snapshots_replace_the_active_composition() {

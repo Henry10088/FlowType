@@ -1114,49 +1114,216 @@ struct ActiveConnectionLease {
 fn injector_request(
     state: &AppState,
     request: InjectorRequest,
-) -> std::io::Result<InjectorResponse> {
+) -> Result<InjectorResponse, InjectorRequestFailure> {
     let mut injector = state
         .injector
         .lock()
-        .map_err(|_| std::io::Error::other("input service state unavailable"))?;
+        .map_err(|_| InjectorRequestFailure::Unavailable)?;
     if injector.is_none() {
-        *injector = connect_injector().ok();
-    }
-    let result = injector
-        .as_mut()
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotConnected,
-                "input service unavailable",
-            )
-        })?
-        .request(request);
-    if result.is_err() {
-        *injector = None;
-        let recovered = connect_injector().ok();
-        let recovered_ok = recovered.is_some();
-        *injector = recovered;
-        state.update_status(|status| {
-            if recovered_ok {
-                status.last_error = Some(tr(
-                    "输入服务已自动恢复；本次请求未自动重试，请同步全文",
-                    "Input service recovered automatically. The failed request was not retried; sync the full text.",
-                ).to_owned());
-            } else {
-                status.summary =
-                    tr("Windows 输入服务不可用", "Windows input is unavailable").to_owned();
-                status.last_error =
-                    Some(tr("请在设置中修复输入服务", "Repair input from Settings").to_owned());
+        *injector = match connect_injector() {
+            Ok(client) => Some(client),
+            Err(_) => {
+                mark_injector_unavailable(state);
+                return Err(InjectorRequestFailure::Unavailable);
             }
-        });
-    } else if result.is_ok() {
-        state.update_status(|status| status.last_error = None);
+        };
     }
-    result
+    let previous_instance = injector
+        .as_ref()
+        .map(|client| client.instance_id().to_owned())
+        .ok_or(InjectorRequestFailure::Unavailable)?;
+    if let Ok(response) = injector
+        .as_mut()
+        .ok_or(InjectorRequestFailure::Unavailable)?
+        .request(request.clone())
+    {
+        state.update_status(|status| status.last_error = None);
+        return Ok(response);
+    }
+
+    *injector = None;
+    let mut recovered = match connect_injector() {
+        Ok(client) => client,
+        Err(_) => {
+            mark_injector_unavailable(state);
+            return Err(InjectorRequestFailure::Unavailable);
+        }
+    };
+    let same_instance = recovered.instance_id() == previous_instance;
+    let reconciled = reconcile_injector_request(&mut recovered, same_instance, &request);
+    match reconciled {
+        Ok(response) => {
+            *injector = Some(recovered);
+            state.update_status(|status| status.last_error = None);
+            Ok(response)
+        }
+        Err(ReconcileFailure::Unavailable) => {
+            *injector = None;
+            mark_injector_unavailable(state);
+            Err(InjectorRequestFailure::Unavailable)
+        }
+        Err(ReconcileFailure::Unconfirmed) => {
+            *injector = Some(recovered);
+            state.update_status(|status| {
+                status.summary = tr("输入服务已恢复", "Input service recovered").to_owned();
+                status.target_name = None;
+                status.last_error = Some(
+                    tr(
+                        "Windows 无法确认中断前的输入结果，请在手机上同步全文",
+                        "Windows could not confirm the interrupted input. Sync the full text from your phone.",
+                    )
+                    .to_owned(),
+                );
+            });
+            Err(InjectorRequestFailure::RecoveryRequired)
+        }
+    }
 }
 
 fn connect_injector() -> std::io::Result<InjectorClient> {
-    InjectorClient::connect().or_else(|_| InjectorClient::repair())
+    InjectorClient::connect()
+}
+
+#[derive(Clone, Copy)]
+enum InjectorRequestFailure {
+    Unavailable,
+    RecoveryRequired,
+}
+
+#[derive(Clone, Copy)]
+enum ReconcileFailure {
+    Unavailable,
+    Unconfirmed,
+}
+
+fn mark_injector_unavailable(state: &AppState) {
+    state.update_status(|status| {
+        status.summary = tr("Windows 输入服务不可用", "Windows input is unavailable").to_owned();
+        status.target_name = None;
+        status.last_error =
+            Some(tr("请在设置中修复输入服务", "Repair input from Settings").to_owned());
+    });
+}
+
+fn reconcile_injector_request(
+    client: &mut InjectorClient,
+    same_instance: bool,
+    request: &InjectorRequest,
+) -> Result<InjectorResponse, ReconcileFailure> {
+    match request {
+        InjectorRequest::Hello
+        | InjectorRequest::BeginSession { .. }
+        | InjectorRequest::ProbeTarget
+        | InjectorRequest::CancelInvalidSession { .. } => client
+            .request(request.clone())
+            .map_err(|_| ReconcileFailure::Unavailable),
+        InjectorRequest::ApplyState {
+            session_id,
+            sequence,
+            full_text,
+        } if same_instance => {
+            let state = client
+                .request(InjectorRequest::QuerySession {
+                    session_id: session_id.clone(),
+                })
+                .map_err(|_| ReconcileFailure::Unavailable)?;
+            match classify_apply_recovery(session_id, *sequence, full_text, &state) {
+                ReconcileDecision::Applied => Ok(InjectorResponse::Applied {
+                    sequence: *sequence,
+                }),
+                ReconcileDecision::Retry => client
+                    .request(request.clone())
+                    .map_err(|_| ReconcileFailure::Unavailable),
+                ReconcileDecision::Finished | ReconcileDecision::Unknown => {
+                    Err(ReconcileFailure::Unconfirmed)
+                }
+            }
+        }
+        InjectorRequest::FinishSession {
+            session_id,
+            sequence,
+        } if same_instance => {
+            let state = client
+                .request(InjectorRequest::QuerySession {
+                    session_id: session_id.clone(),
+                })
+                .map_err(|_| ReconcileFailure::Unavailable)?;
+            match classify_finish_recovery(session_id, *sequence, &state) {
+                ReconcileDecision::Finished => Ok(InjectorResponse::Finished {
+                    sequence: *sequence,
+                }),
+                ReconcileDecision::Retry => client
+                    .request(request.clone())
+                    .map_err(|_| ReconcileFailure::Unavailable),
+                ReconcileDecision::Applied | ReconcileDecision::Unknown => {
+                    Err(ReconcileFailure::Unconfirmed)
+                }
+            }
+        }
+        InjectorRequest::QuerySession { .. } if same_instance => client
+            .request(request.clone())
+            .map_err(|_| ReconcileFailure::Unavailable),
+        _ => Err(ReconcileFailure::Unconfirmed),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconcileDecision {
+    Applied,
+    Finished,
+    Retry,
+    Unknown,
+}
+
+fn classify_apply_recovery(
+    session_id: &str,
+    sequence: i64,
+    full_text: &str,
+    state: &InjectorResponse,
+) -> ReconcileDecision {
+    match state {
+        InjectorResponse::SessionActive {
+            session_id: active_session,
+            sequence: active_sequence,
+            full_text: active_text,
+        } if active_session == session_id
+            && *active_sequence == sequence
+            && active_text == full_text =>
+        {
+            ReconcileDecision::Applied
+        }
+        InjectorResponse::SessionActive {
+            session_id: active_session,
+            sequence: active_sequence,
+            ..
+        } if active_session == session_id && *active_sequence < sequence => {
+            ReconcileDecision::Retry
+        }
+        _ => ReconcileDecision::Unknown,
+    }
+}
+
+fn classify_finish_recovery(
+    session_id: &str,
+    sequence: i64,
+    state: &InjectorResponse,
+) -> ReconcileDecision {
+    match state {
+        InjectorResponse::SessionFinished {
+            session_id: finished_session,
+            sequence: finished_sequence,
+        } if finished_session == session_id && *finished_sequence == sequence => {
+            ReconcileDecision::Finished
+        }
+        InjectorResponse::SessionActive {
+            session_id: active_session,
+            sequence: active_sequence,
+            ..
+        } if active_session == session_id && *active_sequence == sequence => {
+            ReconcileDecision::Retry
+        }
+        _ => ReconcileDecision::Unknown,
+    }
 }
 
 impl Drop for ActiveConnectionLease {
@@ -1312,8 +1479,8 @@ where
             },
         ) {
             Ok(response) => response,
-            Err(_) => {
-                return send_injector_unavailable(websocket, &snapshot.session_id).await;
+            Err(error) => {
+                return send_injector_failure(websocket, &snapshot.session_id, error).await;
             }
         };
         match response {
@@ -1349,7 +1516,7 @@ where
         },
     ) {
         Ok(response) => response,
-        Err(_) => return send_injector_unavailable(websocket, &snapshot.session_id).await,
+        Err(error) => return send_injector_failure(websocket, &snapshot.session_id, error).await,
     };
     match applied {
         InjectorResponse::Applied { sequence } if kind == "finish" => {
@@ -1361,7 +1528,9 @@ where
                 },
             ) {
                 Ok(response) => response,
-                Err(_) => return send_injector_unavailable(websocket, &snapshot.session_id).await,
+                Err(error) => {
+                    return send_injector_failure(websocket, &snapshot.session_id, error).await;
+                }
             };
             match finished {
                 InjectorResponse::Finished { sequence } => {
@@ -1408,7 +1577,7 @@ where
         },
     ) {
         Ok(response) => response,
-        Err(_) => return send_injector_unavailable(websocket, &resume.session_id).await,
+        Err(error) => return send_injector_failure(websocket, &resume.session_id, error).await,
     };
     match applied {
         InjectorResponse::Applied { sequence }
@@ -1422,7 +1591,9 @@ where
                 },
             ) {
                 Ok(response) => response,
-                Err(_) => return send_injector_unavailable(websocket, &resume.session_id).await,
+                Err(error) => {
+                    return send_injector_failure(websocket, &resume.session_id, error).await;
+                }
             };
             match finished {
                 InjectorResponse::Finished { sequence } => {
@@ -1584,9 +1755,10 @@ where
     .await
 }
 
-async fn send_injector_unavailable<S>(
+async fn send_injector_failure<S>(
     websocket: &mut WebSocketStream<S>,
     session_id: &str,
+    failure: InjectorRequestFailure,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -1595,7 +1767,10 @@ where
         websocket,
         &ServerMessage::Error(ProtocolError {
             protocol_version: flowtype_core::PROTOCOL_VERSION,
-            code: ErrorCode::InjectorUnavailable,
+            code: match failure {
+                InjectorRequestFailure::Unavailable => ErrorCode::InjectorUnavailable,
+                InjectorRequestFailure::RecoveryRequired => ErrorCode::RecoveryRequired,
+            },
             session_id: Some(session_id.to_owned()),
         }),
     )
@@ -1728,7 +1903,12 @@ mod tests {
     use p256::ecdsa::{Signature, SigningKey};
     use p256::pkcs8::EncodePublicKey;
 
-    use super::{AuthMessage, ImageStart, auth_payload, verify_signature};
+    use flowtype_core::ipc::InjectorResponse;
+
+    use super::{
+        AuthMessage, ImageStart, ReconcileDecision, auth_payload, classify_apply_recovery,
+        classify_finish_recovery, verify_signature,
+    };
 
     #[test]
     fn verifies_a_phone_challenge_signature() {
@@ -1775,5 +1955,69 @@ mod tests {
             ..image
         };
         assert!(oversized.validate("phone").is_err());
+    }
+
+    #[test]
+    fn recognizes_an_applied_snapshot_after_reconnecting_to_the_same_injector() {
+        let state = InjectorResponse::SessionActive {
+            session_id: "voice".to_owned(),
+            sequence: 7,
+            full_text: "修正后的文本".to_owned(),
+        };
+
+        assert_eq!(
+            classify_apply_recovery("voice", 7, "修正后的文本", &state),
+            ReconcileDecision::Applied,
+        );
+    }
+
+    #[test]
+    fn retries_only_when_the_injector_is_behind_the_requested_snapshot() {
+        let state = InjectorResponse::SessionActive {
+            session_id: "voice".to_owned(),
+            sequence: 6,
+            full_text: "旧文本".to_owned(),
+        };
+
+        assert_eq!(
+            classify_apply_recovery("voice", 7, "新文本", &state),
+            ReconcileDecision::Retry,
+        );
+    }
+
+    #[test]
+    fn does_not_replay_when_the_same_sequence_has_different_text() {
+        let state = InjectorResponse::SessionActive {
+            session_id: "voice".to_owned(),
+            sequence: 7,
+            full_text: "无法确认的文本".to_owned(),
+        };
+
+        assert_eq!(
+            classify_apply_recovery("voice", 7, "手机正文", &state),
+            ReconcileDecision::Unknown,
+        );
+    }
+
+    #[test]
+    fn recognizes_a_finished_session_and_retries_an_unfinished_one() {
+        let finished = InjectorResponse::SessionFinished {
+            session_id: "voice".to_owned(),
+            sequence: 7,
+        };
+        let active = InjectorResponse::SessionActive {
+            session_id: "voice".to_owned(),
+            sequence: 7,
+            full_text: "最终文本".to_owned(),
+        };
+
+        assert_eq!(
+            classify_finish_recovery("voice", 7, &finished),
+            ReconcileDecision::Finished,
+        );
+        assert_eq!(
+            classify_finish_recovery("voice", 7, &active),
+            ReconcileDecision::Retry,
+        );
     }
 }
