@@ -38,7 +38,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::target::TargetWindow;
-use crate::tip_broker::{TipKey, TipRegistry};
+use crate::tip_broker::{TipBeginError, TipKey, TipRegistry};
 
 struct ActiveSession {
     id: String,
@@ -52,6 +52,7 @@ struct ActiveSession {
 struct CompletedSession {
     id: String,
     sequence: i64,
+    text: String,
 }
 
 fn main() -> io::Result<()> {
@@ -251,6 +252,7 @@ fn handle_request(
                 return InjectorResponse::SessionFinished {
                     session_id,
                     sequence: finished.sequence,
+                    full_text: finished.text.clone(),
                 };
             }
             if session.is_some() {
@@ -301,8 +303,12 @@ fn handle_request(
                     ));
                     tip
                 }
-                Err(error) => {
-                    diagnostics::log(format!("begin rejected=tsf_unavailable reason={error}"));
+                Err(TipBeginError::Unsupported) => {
+                    diagnostics::log("begin rejected=target_tsf_unsupported");
+                    return InjectorResponse::TargetUnsupported;
+                }
+                Err(TipBeginError::Unavailable) => {
+                    diagnostics::log("begin rejected=tsf_unavailable");
                     return InjectorResponse::TsfUnavailable;
                 }
             };
@@ -323,16 +329,24 @@ fn handle_request(
             session_id,
             sequence,
             full_text,
-        } => apply_state(session, tips, &session_id, sequence, full_text),
+        } => completed_apply_response(completed.as_ref(), &session_id, sequence, &full_text)
+            .unwrap_or_else(|| apply_state(session, tips, &session_id, sequence, full_text)),
         InjectorRequest::FinishSession {
             session_id,
             sequence,
         } => {
+            let finished_text = session
+                .as_ref()
+                .filter(|active| active.id == session_id && active.sequence == sequence)
+                .map(|active| active.text.clone());
             let response = finish_session(session, tips, &session_id, sequence);
-            if let InjectorResponse::Finished { sequence } = &response {
+            if let (InjectorResponse::Finished { sequence }, Some(text)) =
+                (&response, finished_text)
+            {
                 *completed = Some(CompletedSession {
                     id: session_id,
                     sequence: *sequence,
+                    text,
                 });
             }
             response
@@ -351,6 +365,7 @@ fn handle_request(
                 InjectorResponse::SessionFinished {
                     session_id,
                     sequence: finished.sequence,
+                    full_text: finished.text.clone(),
                 }
             } else {
                 InjectorResponse::SessionMissing
@@ -390,6 +405,22 @@ fn handle_request(
             InjectorResponse::Cancelled
         }
     }
+}
+
+fn completed_apply_response(
+    completed: Option<&CompletedSession>,
+    session_id: &str,
+    sequence: i64,
+    full_text: &str,
+) -> Option<InjectorResponse> {
+    let finished = completed.filter(|finished| finished.id == session_id)?;
+    Some(
+        if finished.sequence == sequence && finished.text == full_text {
+            InjectorResponse::Finished { sequence }
+        } else {
+            InjectorResponse::InvalidRequest
+        },
+    )
 }
 
 fn service_instance_id() -> String {
@@ -587,7 +618,32 @@ mod integration_tests {
 
     use flowtype_core::tip::{TipCommand, TipResponse};
 
-    use super::{speech, target::TargetWindow, tip_broker::TipRegistry};
+    use super::{
+        CompletedSession, completed_apply_response, speech, target::TargetWindow,
+        tip_broker::TipRegistry,
+    };
+
+    #[test]
+    fn completed_session_replays_only_the_exact_final_snapshot() {
+        let completed = CompletedSession {
+            id: "voice".to_owned(),
+            sequence: 8,
+            text: "最终正文".to_owned(),
+        };
+
+        assert_eq!(
+            completed_apply_response(Some(&completed), "voice", 8, "最终正文"),
+            Some(flowtype_core::ipc::InjectorResponse::Finished { sequence: 8 }),
+        );
+        assert_eq!(
+            completed_apply_response(Some(&completed), "voice", 8, "不同正文"),
+            Some(flowtype_core::ipc::InjectorResponse::InvalidRequest),
+        );
+        assert_eq!(
+            completed_apply_response(Some(&completed), "other", 8, "最终正文"),
+            None,
+        );
+    }
 
     #[test]
     #[ignore = "requires a registered FlowType TIP and a focused Notepad edit control"]

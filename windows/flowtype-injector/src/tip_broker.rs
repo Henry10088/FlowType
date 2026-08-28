@@ -36,6 +36,12 @@ pub struct TipKey {
     generation: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TipBeginError {
+    Unavailable,
+    Unsupported,
+}
+
 #[derive(Clone)]
 struct Client {
     key: TipKey,
@@ -72,8 +78,9 @@ impl TipRegistry {
         preferred_thread_id: u32,
         session_id: &str,
         timeout: Duration,
-    ) -> io::Result<TipKey> {
+    ) -> Result<TipKey, TipBeginError> {
         let deadline = Instant::now() + timeout;
+        let mut target_rejected = false;
         loop {
             let mut candidates = self.candidates(process_id);
             candidates.sort_by_key(|client| client.key.thread_id != preferred_thread_id);
@@ -89,24 +96,34 @@ impl TipRegistry {
                     client.key.process_id, client.key.thread_id
                 ));
                 if matches!(
-                    response,
-                    Ok(TipResponse::Begun { session_id: ref begun }) if begun == session_id
+                    &response,
+                    Ok(TipResponse::Begun { session_id: begun }) if begun == session_id
                 ) {
                     return Ok(client.key);
+                }
+                if matches!(
+                    &response,
+                    Ok(TipResponse::NoFocus | TipResponse::EditRejected)
+                ) {
+                    target_rejected = true;
                 }
             }
             let now = Instant::now();
             if now >= deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "foreground TSF text service did not become available",
-                ));
+                return Err(if target_rejected {
+                    TipBeginError::Unsupported
+                } else {
+                    TipBeginError::Unavailable
+                });
             }
-            let state = self.state.lock().map_err(poisoned)?;
+            let state = self.state.lock().map_err(|_| TipBeginError::Unavailable)?;
             let wait = deadline
                 .saturating_duration_since(now)
                 .min(TIP_RETRY_INTERVAL);
-            let _ = self.changed.wait_timeout(state, wait).map_err(poisoned)?;
+            let _ = self
+                .changed
+                .wait_timeout(state, wait)
+                .map_err(|_| TipBeginError::Unavailable)?;
         }
     }
 
@@ -294,7 +311,7 @@ mod tests {
 
     use flowtype_core::tip::{TipHello, TipResponse};
 
-    use super::{BrokerRequest, Client, TipKey, TipRegistry, hello_is_compatible};
+    use super::{BrokerRequest, Client, TipBeginError, TipKey, TipRegistry, hello_is_compatible};
 
     #[test]
     fn rejects_a_tip_with_a_different_component_identity() {
@@ -355,5 +372,44 @@ mod tests {
         );
         worker.join().unwrap();
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn reports_a_connected_tip_without_text_focus_as_unsupported() {
+        let registry = TipRegistry::default();
+        let key = TipKey {
+            process_id: 30,
+            thread_id: 40,
+            generation: 1,
+        };
+        let (sender, receiver) = mpsc::sync_channel::<BrokerRequest>(8);
+        registry
+            .state
+            .lock()
+            .unwrap()
+            .clients
+            .insert((key.process_id, key.thread_id), Client { key, sender });
+        let worker = std::thread::spawn(move || {
+            for request in receiver {
+                request.response.send(Ok(TipResponse::NoFocus)).unwrap();
+            }
+        });
+
+        assert_eq!(
+            registry.begin_for_target(30, 40, "voice", Duration::from_millis(150)),
+            Err(TipBeginError::Unsupported),
+        );
+        drop(registry);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn reports_no_compatible_tip_as_unavailable() {
+        let registry = TipRegistry::default();
+
+        assert_eq!(
+            registry.begin_for_target(50, 60, "voice", Duration::from_millis(20)),
+            Err(TipBeginError::Unavailable),
+        );
     }
 }

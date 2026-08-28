@@ -59,4 +59,62 @@ class ComputerSessionsTest {
         assertNull(stored["a"])
         assertEquals("B", stored["b"]?.state?.text)
     }
+
+    @Test
+    fun inputEnteredDuringAutomaticSelectionMovesToTheChosenComputer() {
+        val stored = mutableMapOf<String, ComputerSessions.ParkedSession>()
+        val sessions = ComputerSessions(
+            phoneId = "phone",
+            sessionIdFactory = { "auto-session" },
+            load = stored::get,
+            save = stored::set,
+            clear = stored::remove,
+        )
+        sessions.activate("fallback")
+        sessions.current.onTextChanged("探测期间输入")
+        sessions.current.onTextChanged("探测期间修正后的输入")
+        val movingState = sessions.current.state()
+        sessions.saveCurrent(remoteStarted = false)
+
+        assertEquals(
+            ComputerSessions.AutomaticActivation.Activated(null),
+            sessions.activateForAutomaticSelection("winner"),
+        )
+        sessions.saveCurrent(remoteStarted = false)
+
+        assertEquals("winner", sessions.activePcId)
+        assertEquals(movingState, sessions.current.state())
+        assertEquals(movingState, stored["winner"]?.state)
+        assertNull(stored["fallback"])
+    }
+
+    @Test
+    fun automaticSelectionCanDetectAConflictingParkedSession() {
+        val stored = mutableMapOf<String, ComputerSessions.ParkedSession>()
+        stored["winner"] = ComputerSessions.ParkedSession(
+            InputSession.State("parked", "原有正文", 1, 1, false),
+            remoteStarted = true,
+        )
+        val sessions = ComputerSessions(
+            phoneId = "phone",
+            sessionIdFactory = { "new" },
+            load = stored::get,
+            save = stored::set,
+            clear = stored::remove,
+        )
+        sessions.activate("fallback")
+        sessions.current.onTextChanged("新正文")
+        sessions.saveCurrent(remoteStarted = false)
+        val fallbackBeforeActivation = stored.getValue("fallback")
+        val winnerBeforeActivation = stored.getValue("winner")
+
+        assertEquals(
+            ComputerSessions.AutomaticActivation.Conflict,
+            sessions.activateForAutomaticSelection("winner"),
+        )
+        assertEquals("fallback", sessions.activePcId)
+        assertEquals("新正文", sessions.current.currentText)
+        assertEquals(fallbackBeforeActivation, stored["fallback"])
+        assertEquals(winnerBeforeActivation, stored["winner"])
+    }
 }

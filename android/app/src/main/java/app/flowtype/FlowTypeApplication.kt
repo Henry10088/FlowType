@@ -184,7 +184,10 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         }
         if (session.sessionId == null && text.isNotEmpty()) targetState = null
         session.onTextChanged(text)?.let { snapshot ->
-            if (autoSelecting || pendingAutoStart != null) {
+            if (autoSelecting) {
+                if (snapshot.type == SnapshotType.START && pendingAutoStart == null) {
+                    pendingAutoStart = snapshot
+                }
                 pendingAutoLatest = snapshot
             } else {
                 if (snapshot.type == SnapshotType.START) manualStartPending = false
@@ -208,7 +211,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         session.finish()?.let {
             statusText = text(R.string.sync_status_syncing)
             saveDraftNow()
-            if (autoSelecting || pendingAutoStart != null) pendingAutoLatest = it else syncClient.send(it)
+            if (autoSelecting) pendingAutoLatest = it else syncClient.send(it)
             notifyChanged()
         }
     }
@@ -565,9 +568,8 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         showSyncFullText = text.isNotEmpty()
     }
 
-    private fun beginAutoSelection(initial: SnapshotMessage? = null) {
+    private fun beginAutoSelection() {
         if (autoSelecting) {
-            initial?.let { pendingAutoLatest = it }
             return
         }
         val candidates = bindings.list().filter { it.pairingToken == null }
@@ -579,8 +581,8 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         autoSelecting = true
         autoSelectionError = null
         manualStartPending = false
-        pendingAutoStart = initial
-        pendingAutoLatest = initial
+        pendingAutoStart = null
+        pendingAutoLatest = null
         autoSelectionTargetPcId = null
         statusText = text(R.string.status_auto_selecting)
         val fallback = currentBinding
@@ -593,8 +595,9 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
             // external editor behind it.
             autoSelectionTargetPcId = candidates.single().pcId
             recentActivityPcId = candidates.single().pcId
-            restoreSessionFor(candidates.single())
-            connect(candidates.single())
+            if (!connectAutoSelected(candidates.single())) {
+                failAutoSelection(R.string.status_auto_ambiguous, fallback)
+            }
             return
         }
         targetProbeClient.probe(candidates) { results ->
@@ -606,8 +609,9 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
                 } else {
                     autoSelectionTargetPcId = winner.binding.pcId
                     recentActivityPcId = winner.binding.pcId
-                    restoreSessionFor(winner.binding)
-                    connect(winner.binding)
+                    if (!connectAutoSelected(winner.binding)) {
+                        failAutoSelection(R.string.status_auto_ambiguous, fallback)
+                    }
                 }
             }
         }
@@ -662,9 +666,25 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
 
     private fun restoreSessionFor(binding: ComputerBinding) {
         val restored = sessions.activate(binding.pcId) ?: return
+        restoreQueue(restored)
+    }
+
+    private fun restoreQueue(restored: ComputerSessions.ParkedSession) {
         session.recoverySnapshot()?.let {
             syncClient.restore(it, restored.state.acknowledgedSequence, restored.remoteStarted)
         }
+    }
+
+    private fun connectAutoSelected(binding: ComputerBinding): Boolean {
+        when (val activation = sessions.activateForAutomaticSelection(binding.pcId)) {
+            ComputerSessions.AutomaticActivation.Conflict -> return false
+            is ComputerSessions.AutomaticActivation.Activated -> {
+                activation.parked?.let(::restoreQueue)
+                if (activation.parked == null) sessions.saveCurrent(remoteStarted = false)
+            }
+        }
+        connect(binding)
+        return true
     }
 
     private fun notifyChanged() {

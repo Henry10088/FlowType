@@ -7,7 +7,7 @@ pub mod tip;
 /// Android <-> Windows WebSocket protocol.
 pub const PROTOCOL_VERSION: u16 = 1;
 /// Windows app <-> elevated injector protocol.
-pub const INJECTOR_IPC_VERSION: u16 = 3;
+pub const INJECTOR_IPC_VERSION: u16 = 4;
 /// Injector <-> in-process TSF text service protocol.
 pub const TIP_IPC_VERSION: u16 = 3;
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;

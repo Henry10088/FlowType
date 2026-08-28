@@ -1286,7 +1286,11 @@ fn classify_apply_recovery(
         InjectorResponse::SessionFinished {
             session_id: finished_session,
             sequence: finished_sequence,
-        } if finished_session == session_id && *finished_sequence == sequence => {
+            full_text: finished_text,
+        } if finished_session == session_id
+            && *finished_sequence == sequence
+            && finished_text == full_text =>
+        {
             ReconcileDecision::Finished
         }
         InjectorResponse::SessionActive {
@@ -1319,6 +1323,7 @@ fn classify_finish_recovery(
         InjectorResponse::SessionFinished {
             session_id: finished_session,
             sequence: finished_sequence,
+            ..
         } if finished_session == session_id && *finished_sequence == sequence => {
             ReconcileDecision::Finished
         }
@@ -1507,6 +1512,17 @@ where
                     }),
                 )
                 .await?;
+            }
+            InjectorResponse::SessionFinished {
+                session_id,
+                sequence,
+                full_text,
+            } if session_id == snapshot.session_id
+                && sequence == snapshot.sequence
+                && full_text == snapshot.full_text =>
+            {
+                state.mark_input_finished();
+                return send_ack(websocket, &snapshot.session_id, sequence, true).await;
             }
             other => {
                 return send_injector_state(websocket, state, &snapshot.session_id, other).await;
@@ -2027,6 +2043,7 @@ mod tests {
         let finished = InjectorResponse::SessionFinished {
             session_id: "voice".to_owned(),
             sequence: 7,
+            full_text: "最终文本".to_owned(),
         };
         let active = InjectorResponse::SessionActive {
             session_id: "voice".to_owned(),
@@ -2049,11 +2066,16 @@ mod tests {
         let finished = InjectorResponse::SessionFinished {
             session_id: "voice".to_owned(),
             sequence: 8,
+            full_text: "最终正文".to_owned(),
         };
 
         assert_eq!(
             classify_apply_recovery("voice", 8, "最终正文", &finished),
             ReconcileDecision::Finished,
+        );
+        assert_eq!(
+            classify_apply_recovery("voice", 8, "不同正文", &finished),
+            ReconcileDecision::Unknown,
         );
     }
 }

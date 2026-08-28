@@ -12,6 +12,11 @@ class ComputerSessions(
         val remoteStarted: Boolean,
     )
 
+    sealed interface AutomaticActivation {
+        data class Activated(val parked: ParkedSession?) : AutomaticActivation
+        data object Conflict : AutomaticActivation
+    }
+
     var activePcId: String? = null
         private set
     var current: InputSession = newSession()
@@ -38,6 +43,19 @@ class ComputerSessions(
         } else {
             save(pcId, parked)
         }
+    }
+
+    fun activateForAutomaticSelection(pcId: String): AutomaticActivation {
+        if (activePcId == pcId) return AutomaticActivation.Activated(load(pcId))
+        val stored = load(pcId)
+        val movingInput = current.sessionId != null || current.currentText.isNotEmpty()
+        if (movingInput && stored != null) return AutomaticActivation.Conflict
+        if (movingInput) {
+            activePcId?.let(clear)
+            activePcId = pcId
+            return AutomaticActivation.Activated(null)
+        }
+        return AutomaticActivation.Activated(activate(pcId))
     }
 
     fun clearCurrent() {

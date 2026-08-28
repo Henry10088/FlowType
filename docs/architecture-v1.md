@@ -220,7 +220,7 @@ cancel_invalid_session(session_id)
 
 `cancel_invalid_session` 只清理助手内存状态，不向目标窗口发送删除或恢复操作。
 
-本地协议与 Android 网络协议独立演进：Android-Windows WSS 使用 `protocol_version = 1`，主程序到助手使用 `flowtype-input-v3` / `INJECTOR_IPC_VERSION = 3`，助手到 TIP 使用 `flowtype-tip-v3` / `TIP_IPC_VERSION = 3`。TIP 握手同时核对组件版本，旧进程或旧 DLL 不能接入新管道。
+本地协议与 Android 网络协议独立演进：Android-Windows WSS 使用 `protocol_version = 1`，主程序到助手使用 `flowtype-input-v4` / `INJECTOR_IPC_VERSION = 4`，助手到 TIP 使用 `flowtype-tip-v3` / `TIP_IPC_VERSION = 3`。TIP 握手同时核对组件版本，旧进程或旧 DLL 不能接入新管道。
 
 ## 7. 输入后端与会话租约
 
