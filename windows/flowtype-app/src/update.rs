@@ -506,6 +506,24 @@ fn check_for_update(
             }
         }
         Err(error) => {
+            let no_release = tr("暂无 Windows 更新", "No Windows update is available");
+            if error == no_release {
+                *available = None;
+                set_snapshot(
+                    shared,
+                    hwnd,
+                    UpdateSnapshot {
+                        message: error,
+                        action: UpdateAction::Check,
+                        action_label: tr("再次检查", "Check again").to_owned(),
+                        progress: None,
+                        version: None,
+                    },
+                    None,
+                    None,
+                );
+                return;
+            }
             let placeholder = UpdateManifest::placeholder();
             set_failure(
                 shared,
@@ -549,11 +567,10 @@ impl UpdateManifest {
 }
 
 fn fetch_verified_manifest() -> Result<UpdateManifest, String> {
-    let manifest_url = std::env::var("FLOWTYPE_UPDATE_MANIFEST_URL")
-        .unwrap_or_else(|_| latest_release_manifest_url().unwrap_or_default());
-    if manifest_url.is_empty() {
-        return Err(tr("找不到 Windows 更新", "No Windows release found").to_owned());
-    }
+    let manifest_url = match std::env::var("FLOWTYPE_UPDATE_MANIFEST_URL") {
+        Ok(url) if !url.trim().is_empty() => url,
+        _ => latest_release_manifest_url()?,
+    };
     let bytes = http_get(&manifest_url, MAX_MANIFEST_BYTES).map_err(|e| e.to_string())?;
     let _untrusted: UpdateManifest = serde_json::from_slice(&bytes)
         .map_err(|_| tr("更新清单格式无效", "Invalid update information").to_owned())?;

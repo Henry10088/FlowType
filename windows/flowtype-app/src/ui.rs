@@ -8,8 +8,8 @@ use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM}
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, COLOR_WINDOW, CreateSolidBrush, DT_CENTER, DT_LEFT, DT_SINGLELINE, DT_VCENTER,
     DeleteObject, EndPaint, FW_NORMAL, FW_SEMIBOLD, FillRect, GetStockObject, HBRUSH, HFONT,
-    InvalidateRect, PAINTSTRUCT, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW,
-    RedrawWindow, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow, WHITE_BRUSH,
+    InvalidateRect, PAINTSTRUCT, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RDW_NOERASE,
+    RDW_UPDATENOW, RedrawWindow, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow, WHITE_BRUSH,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::SS_NOPREFIX;
@@ -243,7 +243,14 @@ impl UiContext {
                 );
             }
         }
-        unsafe { InvalidateRect(self.hwnd, null(), 0) };
+        unsafe {
+            RedrawWindow(
+                self.hwnd,
+                null(),
+                null_mut(),
+                RDW_INVALIDATE | RDW_NOERASE | RDW_ALLCHILDREN,
+            );
+        }
     }
 
     fn rebuild_fonts(&mut self) {
@@ -1144,9 +1151,12 @@ impl UiContext {
             } else {
                 ShowWindow(self.update_progress, SW_HIDE);
             }
-            InvalidateRect(self.update_action, null(), 1);
-            InvalidateRect(self.update_repository, null(), 1);
-            InvalidateRect(self.update_history, null(), 1);
+            RedrawWindow(
+                self.hwnd,
+                null(),
+                null_mut(),
+                RDW_INVALIDATE | RDW_NOERASE | RDW_ALLCHILDREN,
+            );
         }
         self.update_tray();
     }
