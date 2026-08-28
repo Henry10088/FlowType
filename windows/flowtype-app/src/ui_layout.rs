@@ -78,6 +78,7 @@ pub(super) struct SettingsLayout {
     pub shell: ShellLayout,
     pub save_action: Rect,
     pub name_edit: Rect,
+    pub service_status_dot: Rect,
     pub repair_action: Rect,
     pub separators: [f32; 2],
     pub update_repository: Rect,
@@ -140,6 +141,7 @@ impl SettingsLayout {
                 (shell.content_right - 350.0 - 102.0).clamp(220.0, 330.0),
                 27.0,
             ),
+            service_status_dot: Rect::from_xywh(shell.content_left + 6.0, 316.0, 12.0, 12.0),
             repair_action: Rect::from_xywh(shell.content_right - 112.0, 298.0, 112.0, 38.0),
             separators: [262.0, 382.0],
             update_repository,
@@ -249,6 +251,7 @@ mod tests {
             layout.shell.language_action.left
         );
         assert_eq!(layout.repair_action.right, layout.shell.content_right);
+        assert_eq!(layout.service_status_dot.right, 238.0);
         assert_eq!(layout.update_action.right, layout.shell.content_right);
         assert!(layout.update_repository.left >= layout.shell.content_left);
     }

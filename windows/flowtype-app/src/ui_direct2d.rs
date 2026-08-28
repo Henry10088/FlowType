@@ -162,7 +162,7 @@ impl Direct2dPainter {
                     &line,
                 );
             }
-            let status = Rect::from_xywh(layout.shell.content_left, 339.0, 12.0, 12.0);
+            let status = layout.service_status_dot;
             let color = if service_ready {
                 rgb(0, 186, 184)
             } else {
