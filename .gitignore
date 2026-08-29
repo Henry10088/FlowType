@@ -27,3 +27,6 @@ FlowType-*-local-package.zip
 
 # Local release signing material
 signing/
+
+# CI-generated dependency scan inputs
+.ci-locks/
