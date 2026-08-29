@@ -297,6 +297,10 @@ struct RuntimeStatus {
     last_error: Option<String>,
 }
 
+fn has_active_input(status: &RuntimeStatus) -> bool {
+    status.target_name.is_some()
+}
+
 #[derive(Clone)]
 struct UiSnapshot {
     pc_name: String,
@@ -823,9 +827,9 @@ impl AppState {
     }
 
     fn update_install_blocked(&self) -> bool {
-        self.active_connection
+        self.runtime_status
             .lock()
-            .map(|active| active.is_some())
+            .map(|status| has_active_input(&status))
             .unwrap_or(true)
     }
 }
@@ -886,11 +890,25 @@ mod tests {
 
     use super::{
         AuthMessage, ConnectionLimiter, ImageStart, MAX_CONNECTION_ATTEMPTS_PER_MINUTE,
-        MAX_CONNECTIONS_PER_IP, PairedPhone, ReconcileDecision, auth_payload,
+        MAX_CONNECTIONS_PER_IP, PairedPhone, ReconcileDecision, RuntimeStatus, auth_payload,
         classify_apply_recovery, classify_finish_recovery, deduplicate_paired_phones,
-        upsert_paired_phone, validate_cancel_for_phone, validate_resume_for_phone,
-        verify_signature,
+        has_active_input, upsert_paired_phone, validate_cancel_for_phone,
+        validate_resume_for_phone, verify_signature,
     };
+
+    #[test]
+    fn update_installation_is_blocked_only_while_text_input_is_active() {
+        let mut status = RuntimeStatus {
+            summary: "Connected".to_owned(),
+            connected_phone: Some("Phone".to_owned()),
+            target_name: None,
+            last_error: None,
+        };
+        assert!(!has_active_input(&status));
+
+        status.target_name = Some("Notepad".to_owned());
+        assert!(has_active_input(&status));
+    }
 
     #[test]
     fn limits_concurrent_connections_per_ip() {

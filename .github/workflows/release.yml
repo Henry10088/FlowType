@@ -6,7 +6,7 @@ on:
       release_tag:
         description: "Release tag to create or publish"
         required: true
-        default: "windows-v0.2.5"
+        default: "windows-v0.2.6"
   push:
     tags:
       - "windows-v*"

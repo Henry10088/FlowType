@@ -285,7 +285,9 @@ impl UpdateManager {
             Some(path.clone()),
         );
         verify_installer(&path, &manifest.windows).map_err(|error| {
-            set_failure(
+            let _ = fs::remove_file(&path);
+            invalidate_persisted_installer(&manifest.version);
+            set_download_failure(
                 &self.shared,
                 &self.ui_hwnd,
                 &manifest,
@@ -297,10 +299,11 @@ impl UpdateManager {
             error
         })?;
         shell_open("runas", path.to_string_lossy().as_ref()).map_err(|error| {
-            set_failure(
+            set_install_failure(
                 &self.shared,
                 &self.ui_hwnd,
                 &manifest,
+                path,
                 &format!(
                     "{}{error}",
                     tr("无法启动安装程序：", "Could not start the installer: ")
@@ -995,6 +998,44 @@ fn set_download_failure(
     );
 }
 
+fn set_install_failure(
+    shared: &Arc<Mutex<SharedUpdate>>,
+    hwnd: &Arc<AtomicIsize>,
+    manifest: &UpdateManifest,
+    path: PathBuf,
+    message: &str,
+) {
+    set_snapshot(
+        shared,
+        hwnd,
+        UpdateSnapshot {
+            message: message.to_owned(),
+            action: UpdateAction::Install,
+            action_label: tr("重新安装", "Retry install").to_owned(),
+            progress: Some((manifest.windows.size, manifest.windows.size)),
+            version: Some(manifest.version.clone()),
+        },
+        Some(manifest.clone()),
+        Some(path),
+    );
+}
+
+fn invalidate_persisted_installer(version: &str) {
+    let Ok(mut persisted) = load_persisted() else {
+        return;
+    };
+    if persisted
+        .manifest
+        .as_ref()
+        .is_some_and(|manifest| manifest.version == version)
+    {
+        persisted.job_id = None;
+        persisted.installer_path = None;
+        persisted.verified = false;
+        let _ = save_persisted(&persisted);
+    }
+}
+
 fn friendly_update_error(error: &str) -> String {
     if error.contains("12002") {
         tr(
@@ -1501,5 +1542,29 @@ mod tests {
         assert!(authenticode_status_is_acceptable(0));
         assert!(authenticode_status_is_acceptable(CERT_E_UNTRUSTEDROOT));
         assert!(!authenticode_status_is_acceptable(TRUST_E_BAD_DIGEST));
+    }
+
+    #[test]
+    fn install_launch_failure_keeps_the_verified_installer_retryable() {
+        let shared = Arc::new(Mutex::new(SharedUpdate {
+            snapshot: UpdateSnapshot::idle(),
+            manifest: None,
+            installer_path: None,
+        }));
+        let hwnd = Arc::new(AtomicIsize::new(0));
+        let manifest = manifest();
+        let path = PathBuf::from("FlowType-9.8.7-x64-setup.exe");
+
+        set_install_failure(&shared, &hwnd, &manifest, path.clone(), "launch failed");
+
+        let state = shared.lock().unwrap();
+        assert_eq!(state.snapshot.action, UpdateAction::Install);
+        assert_eq!(state.snapshot.message, "launch failed");
+        assert_eq!(state.snapshot.version.as_deref(), Some("9.8.7"));
+        assert_eq!(state.installer_path.as_ref(), Some(&path));
+        assert_eq!(
+            state.manifest.as_ref().map(|value| value.version.as_str()),
+            Some("9.8.7")
+        );
     }
 }
