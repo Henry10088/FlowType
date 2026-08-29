@@ -299,8 +299,10 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> io::Error {
 }
 
 fn hello_is_compatible(hello: &TipHello) -> bool {
+    // A TSF host can keep an older DLL loaded after an upgrade. The protocol
+    // version is the compatibility boundary; the application version is only
+    // diagnostic metadata and must not strand those long-lived host processes.
     hello.ipc_version == flowtype_core::TIP_IPC_VERSION
-        && hello.component_version == env!("CARGO_PKG_VERSION")
 }
 
 #[cfg(test)]
@@ -314,18 +316,15 @@ mod tests {
     use super::{BrokerRequest, Client, TipBeginError, TipKey, TipRegistry, hello_is_compatible};
 
     #[test]
-    fn rejects_a_tip_with_a_different_component_identity() {
+    fn accepts_current_protocol_from_an_older_loaded_component() {
         let mut hello = TipHello {
             ipc_version: flowtype_core::TIP_IPC_VERSION,
-            component_version: env!("CARGO_PKG_VERSION").to_owned(),
+            component_version: "0.2.1".to_owned(),
             process_id: 1,
             thread_id: 2,
         };
         assert!(hello_is_compatible(&hello));
 
-        hello.component_version = "stale-component".to_owned();
-        assert!(!hello_is_compatible(&hello));
-        hello.component_version = env!("CARGO_PKG_VERSION").to_owned();
         hello.ipc_version -= 1;
         assert!(!hello_is_compatible(&hello));
     }

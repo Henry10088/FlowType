@@ -14,7 +14,7 @@
 
 Android 的 `versionCode` 必须在每次 Android 发布时严格递增。Windows 修复只发布 Windows，不要求重新构建 Android；Android 更新同理。两端仍共享协议版本和产品主版本策略，但不再强制版本号相同。
 
-当前版本：Windows `0.2.6`；Android `0.2.3`，`versionCode=23`。
+当前版本：Windows `0.2.7`；Android `0.2.3`，`versionCode=23`。
 
 本次从旧工程标识迁移到 FlowType 会更换 Android applicationId、绑定 URI、认证前缀、mDNS 服务名和本地 IPC 名称；JSON 消息结构未变化，因此协议字段版本仍为 1。该迁移是 V1 内测阶段的兼容性断点，旧版本必须卸载并重新绑定，不承诺跨版本互通。
 
