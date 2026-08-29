@@ -4,12 +4,12 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.net.Uri
+import android.provider.Settings
 import android.util.Base64
 import app.flowtype.data.AppDatabase
 import app.flowtype.protocol.PROTOCOL_VERSION
 import org.json.JSONObject
 import org.json.JSONArray
-import java.util.UUID
 
 data class ComputerBinding(
     val pcId: String,
@@ -34,15 +34,34 @@ data class ComputerBinding(
 }
 
 class BindingStore(context: Context, private val database: AppDatabase = AppDatabase(context)) {
+    private val appContext = context.applicationContext
     private val preferences = context.getSharedPreferences("binding-v1", Context.MODE_PRIVATE)
+    private val phoneIdLock = Any()
+    @Volatile
+    private var cachedPhoneId: String? = null
 
     init {
         migrateLegacyBinding()
     }
 
     val phoneId: String
-        get() = database.setting("phone_id") ?: UUID.randomUUID().toString().also {
-            database.setSetting("phone_id", it)
+        get() = cachedPhoneId ?: synchronized(phoneIdLock) {
+            cachedPhoneId ?: run {
+                val stored = database.setting("phone_id")?.trim()?.takeIf { it.isNotEmpty() }
+                val value = stored
+                    ?: phoneIdForAndroidId(
+                        Settings.Secure.getString(
+                            appContext.contentResolver,
+                            Settings.Secure.ANDROID_ID,
+                        ),
+                    )
+                    ?: randomPhoneId()
+                if (stored == null) {
+                    database.setSetting("phone_id", value)
+                }
+                cachedPhoneId = value
+                value
+            }
         }
 
     fun load(): ComputerBinding? = query("selected = 1").firstOrNull()

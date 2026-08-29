@@ -198,6 +198,14 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
         notifyChanged()
     }
 
+    /** Clear the editable draft without ending its session. An active session
+     * emits an empty full-text snapshot so Windows removes the remote text too.
+     */
+    fun clearCurrentInput() {
+        if (session.finishing || session.currentText.isEmpty()) return
+        textChanged("")
+    }
+
     /** One user-visible command for initial, recovered, or retargeted full sync. */
     fun sync() {
         if (session.currentText.isEmpty()) return
@@ -422,7 +430,7 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
     override fun onAck(ack: AckMessage) = onMain {
         session.acknowledge(ack)
         if (session.finished) {
-            currentBinding?.let { history.add(it, session.currentText) }
+            if (session.currentText.isNotEmpty()) currentBinding?.let { history.add(it, session.currentText) }
             sessions.clearCurrent()
             showSyncFullText = false
             statusText = currentBinding?.let { text(R.string.status_connected, it.pcName) }

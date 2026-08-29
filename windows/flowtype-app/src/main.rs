@@ -10,7 +10,7 @@ mod settings;
 mod ui;
 mod update;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
@@ -1043,14 +1043,13 @@ fn authenticate_phone(
             .ok_or("public key required")?;
         verify_signature(&state.identity.pc_id, auth, nonce, public_key)?;
         *token = None;
-        phones.insert(
-            auth.phone_id.clone(),
-            PairedPhone {
-                phone_name: auth.phone_name.clone(),
-                public_key_spki: public_key.to_owned(),
-                paired_at: unix_time(),
-                last_connected: Some(unix_time()),
-            },
+        let now = unix_time();
+        upsert_paired_phone(
+            &mut phones,
+            &auth.phone_id,
+            &auth.phone_name,
+            public_key,
+            now,
         );
         save_paired_phones(&phones).map_err(|_| "cannot save phone")?;
         public_key.to_owned()
@@ -1081,6 +1080,36 @@ fn unix_time() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+/// Update a pairing in place so re-pairing the same phone never creates a
+/// second record and does not reset metadata that belongs to the binding.
+fn upsert_paired_phone(
+    phones: &mut HashMap<String, PairedPhone>,
+    phone_id: &str,
+    phone_name: &str,
+    public_key_spki: &str,
+    now: u64,
+) {
+    if let Some(phone) = phones.get_mut(phone_id) {
+        phone.phone_name = phone_name.to_owned();
+        phone.public_key_spki = public_key_spki.to_owned();
+        phone.last_connected = Some(now);
+        if phone.paired_at == 0 {
+            phone.paired_at = now;
+        }
+        return;
+    }
+
+    phones.insert(
+        phone_id.to_owned(),
+        PairedPhone {
+            phone_name: phone_name.to_owned(),
+            public_key_spki: public_key_spki.to_owned(),
+            paired_at: now,
+            last_connected: Some(now),
+        },
+    );
 }
 
 fn verify_signature(
@@ -1982,7 +2011,38 @@ fn load_paired_phones() -> Result<HashMap<String, PairedPhone>, Box<dyn std::err
     if !path.exists() {
         return Ok(HashMap::new());
     }
-    Ok(serde_json::from_slice(&fs::read(path)?)?)
+    let stored: HashMap<String, PairedPhone> = serde_json::from_slice(&fs::read(path)?)?;
+    let (phones, changed) = deduplicate_paired_phones(stored);
+    if changed {
+        save_paired_phones(&phones)?;
+    }
+    Ok(phones)
+}
+
+/// Remove only records that prove they are the same identity. Phone names are
+/// deliberately ignored because two physical phones can share a model name.
+fn deduplicate_paired_phones(
+    phones: HashMap<String, PairedPhone>,
+) -> (HashMap<String, PairedPhone>, bool) {
+    let original_len = phones.len();
+    let mut entries = phones.into_iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        let left_time = (left.1.last_connected.unwrap_or(0), left.1.paired_at);
+        let right_time = (right.1.last_connected.unwrap_or(0), right.1.paired_at);
+        right_time
+            .cmp(&left_time)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    let mut seen_keys = HashSet::new();
+    let mut deduplicated = HashMap::with_capacity(entries.len());
+    for (phone_id, phone) in entries {
+        if phone.public_key_spki.is_empty() || seen_keys.insert(phone.public_key_spki.clone()) {
+            deduplicated.insert(phone_id, phone);
+        }
+    }
+    let changed = deduplicated.len() != original_len;
+    (deduplicated, changed)
 }
 
 fn save_paired_phones(
@@ -1994,6 +2054,8 @@ fn save_paired_phones(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
     use p256::ecdsa::signature::Signer;
@@ -2003,8 +2065,9 @@ mod tests {
     use flowtype_core::ipc::InjectorResponse;
 
     use super::{
-        AuthMessage, ImageStart, ReconcileDecision, auth_payload, classify_apply_recovery,
-        classify_finish_recovery, verify_signature,
+        AuthMessage, ImageStart, PairedPhone, ReconcileDecision, auth_payload,
+        classify_apply_recovery, classify_finish_recovery, deduplicate_paired_phones,
+        upsert_paired_phone, verify_signature,
     };
 
     #[test]
@@ -2029,6 +2092,58 @@ mod tests {
 
         assert!(verify_signature("pc", &auth, "nonce", &public_key).is_ok());
         assert!(verify_signature("pc", &auth, "different", &public_key).is_err());
+    }
+
+    #[test]
+    fn re_pair_updates_existing_phone_without_resetting_pair_time() {
+        let mut phones = HashMap::new();
+        phones.insert(
+            "phone".to_owned(),
+            PairedPhone {
+                phone_name: "old name".to_owned(),
+                public_key_spki: "old key".to_owned(),
+                paired_at: 10,
+                last_connected: Some(20),
+            },
+        );
+
+        upsert_paired_phone(&mut phones, "phone", "new name", "new key", 30);
+
+        assert_eq!(phones.len(), 1);
+        let phone = phones.get("phone").unwrap();
+        assert_eq!(phone.phone_name, "new name");
+        assert_eq!(phone.public_key_spki, "new key");
+        assert_eq!(phone.paired_at, 10);
+        assert_eq!(phone.last_connected, Some(30));
+    }
+
+    #[test]
+    fn duplicate_public_key_keeps_the_most_recent_record() {
+        let mut phones = HashMap::new();
+        phones.insert(
+            "older".to_owned(),
+            PairedPhone {
+                phone_name: "same phone".to_owned(),
+                public_key_spki: "same key".to_owned(),
+                paired_at: 10,
+                last_connected: Some(20),
+            },
+        );
+        phones.insert(
+            "newer".to_owned(),
+            PairedPhone {
+                phone_name: "same phone".to_owned(),
+                public_key_spki: "same key".to_owned(),
+                paired_at: 30,
+                last_connected: Some(40),
+            },
+        );
+
+        let (deduplicated, changed) = deduplicate_paired_phones(phones);
+
+        assert!(changed);
+        assert_eq!(deduplicated.len(), 1);
+        assert!(deduplicated.contains_key("newer"));
     }
 
     #[test]

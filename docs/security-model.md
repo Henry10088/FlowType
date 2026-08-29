@@ -100,6 +100,8 @@ flowtype-auth-v1\0{pc_id}\0{phone_id}\0{nonce}
 
 The first pairing request also includes the one-time token and phone public key. Later connections send the phone identity and a new signature only. Windows verifies the DER-encoded ECDSA signature against the public key stored for that phone.
 
+Android's `phone_id` is an opaque device-record identifier, not an authentication credential. An existing ID is retained when the phone is paired again. If no local ID exists, the app uses a namespaced SHA-256 hash of the Android device identifier, falling back to a random ID only when that platform value is unavailable. Windows performs an idempotent update keyed by `phone_id`, replacing the phone public key while retaining binding metadata; it never merges different devices solely because their display names match.
+
 A phone public key is not secret and is not sufficient to impersonate the phone; an attacker must produce a valid signature using the corresponding private key. The fresh nonce prevents a captured authentication message from being replayed on a later connection. Removing a phone from Windows deletes its accepted public key, so subsequent authentication from that binding fails.
 
 ## Text and image integrity

@@ -62,6 +62,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var input: EditText
     private lateinit var sync: Button
     private lateinit var newSession: Button
+    private lateinit var clearInput: ImageButton
     private lateinit var pair: Button
     private lateinit var status: TextView
     private lateinit var syncStatus: TextView
@@ -266,6 +267,7 @@ class MainActivity : ComponentActivity() {
         input = findViewById(R.id.input)
         sync = findViewById(R.id.sync)
         newSession = findViewById(R.id.newSession)
+        clearInput = findViewById(R.id.clearInput)
         pair = findViewById(R.id.pair)
         status = findViewById(R.id.status)
         syncStatus = findViewById(R.id.syncStatus)
@@ -281,6 +283,7 @@ class MainActivity : ComponentActivity() {
             }
         })
         sync.setOnClickListener { controller.sync() }
+        clearInput.setOnClickListener { controller.clearCurrentInput() }
         newSession.setOnClickListener { controller.startNewSession() }
         pair.setOnClickListener { launchScanner() }
         findViewById<ImageButton>(R.id.openHistory).setOnClickListener { showHistory() }
@@ -357,6 +360,8 @@ class MainActivity : ComponentActivity() {
         }
         val paired = state.binding != null
         input.isEnabled = paired && !state.finishing
+        clearInput.isEnabled = state.text.isNotEmpty() && !state.finishing
+        clearInput.alpha = if (clearInput.isEnabled) 1f else 0.45f
         sync.isEnabled = state.syncAvailable
         newSession.isEnabled = state.activeSession || state.text.isNotEmpty()
         pair.visibility = if (paired) View.GONE else View.VISIBLE

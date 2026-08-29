@@ -4,6 +4,7 @@
     <string name="default_computer">No computer selected</string>
     <string name="status_unpaired">No computers paired</string>
     <string name="input_hint">Type here</string>
+    <string name="clear_current_input">Clear current input</string>
     <string name="sync">Sync</string>
     <string name="sync_status_synced">Synced</string>
     <string name="sync_status_pending">Not synced</string>
@@ -31,10 +32,10 @@
     <string name="language">Language</string>
     <string name="extra_dim">Extra dim</string>
     <string name="back">Back</string>
-    <string name="add_computer">Add computer</string>
     <string name="history_empty">No input history</string>
     <string name="select_history">Select history</string>
     <string name="select_all">Select all</string>
+    <string name="invert_selection">Invert selection</string>
     <string name="selected_count">%1$d selected</string>
     <string name="delete_selected">Delete selected</string>
     <string name="confirm_delete_history">Delete %1$d selected entries?</string>

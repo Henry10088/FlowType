@@ -54,6 +54,7 @@ class FloatingInputService : Service() {
     private var panelComputer: TextView? = null
     private var panelSync: Button? = null
     private var panelNewSession: Button? = null
+    private var panelClearInput: ImageButton? = null
     private var panelOpenImage: ImageButton? = null
     private var panelChooser: HorizontalScrollView? = null
     private var panelImeVisible = false
@@ -276,6 +277,19 @@ class FloatingInputService : Service() {
         }
         root.addView(panelInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         val primaryActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        panelClearInput = ImageButton(this).apply {
+            setImageResource(R.drawable.icon_close)
+            contentDescription = getString(R.string.clear_current_input)
+            background = getDrawable(R.drawable.button_secondary)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            isEnabled = state.text.isNotEmpty() && !state.finishing
+            alpha = if (isEnabled) 1f else 0.45f
+            setOnClickListener { controller.clearCurrentInput() }
+        }
+        primaryActions.addView(
+            panelClearInput,
+            LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginEnd = dp(8) },
+        )
         panelOpenImage = ImageButton(this).apply {
             setImageResource(R.drawable.icon_image)
             contentDescription = getString(R.string.image)
@@ -419,6 +433,10 @@ class FloatingInputService : Service() {
             it.isEnabled = state.binding != null && !state.finishing
         }
         panelOpenImage?.isEnabled = state.binding != null && state.imageTransfer != FlowTypeApplication.ImageTransferState.SENDING
+        panelClearInput?.let {
+            it.isEnabled = state.text.isNotEmpty() && !state.finishing
+            it.alpha = if (it.isEnabled) 1f else 0.45f
+        }
         panelSync?.isEnabled = state.syncAvailable
         panelNewSession?.isEnabled = state.activeSession || state.text.isNotEmpty()
     }
@@ -426,7 +444,7 @@ class FloatingInputService : Service() {
     private fun collapsePanel() {
         panelInput?.let { getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(it.windowToken, 0) }
         panel?.let { windowManager.removeView(it) }
-        panel = null; panelInput = null; panelStatus = null; panelSyncStatus = null; panelComputer = null; panelSync = null; panelNewSession = null; panelOpenImage = null; panelChooser = null; panelImeVisible = false
+        panel = null; panelInput = null; panelStatus = null; panelSyncStatus = null; panelComputer = null; panelSync = null; panelNewSession = null; panelClearInput = null; panelOpenImage = null; panelChooser = null; panelImeVisible = false
         showBall()
     }
 
@@ -464,7 +482,7 @@ class FloatingInputService : Service() {
     private fun removeOverlays() {
         removeBall()
         panel?.let { windowManager.removeView(it) }
-        panel = null; panelInput = null; panelStatus = null; panelSyncStatus = null; panelComputer = null; panelSync = null; panelNewSession = null; panelOpenImage = null; panelChooser = null; panelImeVisible = false
+        panel = null; panelInput = null; panelStatus = null; panelSyncStatus = null; panelComputer = null; panelSync = null; panelNewSession = null; panelClearInput = null; panelOpenImage = null; panelChooser = null; panelImeVisible = false
         removeCloseTarget()
     }
 

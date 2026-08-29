@@ -33,6 +33,20 @@ class InputSessionTest {
     }
 
     @Test
+    fun clearingActiveSessionSendsEmptyUpdateWithoutEndingSession() {
+        val session = session()
+        session.onTextChanged("待清空")
+
+        val clear = session.onTextChanged("")!!
+
+        assertEquals(SnapshotType.UPDATE, clear.type)
+        assertEquals(2L, clear.sequence)
+        assertEquals("", clear.fullText)
+        assertEquals("session-1", session.sessionId)
+        assertFalse(session.finishing)
+    }
+
+    @Test
     fun finalAckFreezesSession() {
         val session = session()
         session.onTextChanged("完成内容")

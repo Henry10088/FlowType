@@ -6,6 +6,7 @@ import android.app.AlertDialog
 import android.graphics.Typeface
 import android.view.Gravity
 import android.view.View
+import android.widget.Button
 import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -36,7 +37,7 @@ class HistoryScreen(
             if (entries.isEmpty()) View.VISIBLE else View.GONE
         val selected = linkedSetOf<Long>()
         val selectedCount = activity.findViewById<TextView>(R.id.selectedCount)
-        val selectAll = activity.findViewById<View>(R.id.selectAll)
+        val selectAll = activity.findViewById<Button>(R.id.selectAll)
         val deleteSelected = activity.findViewById<View>(R.id.deleteSelected)
         val selectButton = activity.findViewById<View>(R.id.selectHistory)
         var selecting = false
@@ -52,6 +53,11 @@ class HistoryScreen(
             selectedCount.visibility = if (selecting) View.VISIBLE else View.GONE
             selectedCount.text = activity.getString(R.string.selected_count, selected.size)
             selectAll.visibility = if (selecting && entries.isNotEmpty()) View.VISIBLE else View.GONE
+            if (selecting && entries.isNotEmpty()) {
+                selectAll.setText(
+                    if (selected.isEmpty()) R.string.select_all else R.string.invert_selection,
+                )
+            }
             deleteSelected.visibility = if (selecting) View.VISIBLE else View.GONE
             deleteSelected.isEnabled = selected.isNotEmpty()
             selectButton.contentDescription = activity.getString(
@@ -65,8 +71,13 @@ class HistoryScreen(
             renderRows()
         }
         selectAll.setOnClickListener {
-            selected.clear()
-            selected += entries.map { it.id }
+            if (selected.isEmpty()) {
+                selected += entries.map { it.id }
+            } else {
+                val current = selected.toSet()
+                selected.clear()
+                selected += entries.map { it.id }.filterNot(current::contains)
+            }
             renderRows()
         }
         deleteSelected.setOnClickListener {

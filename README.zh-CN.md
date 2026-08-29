@@ -196,6 +196,12 @@ $tipX86Hash = (Get-FileHash .\windows\target\release\flowtype_tip_x86.dll -Algor
 
 `docs/validation/` 下的开发记录属于阶段性验证证据，不构成对当前发行版的完整兼容性承诺，详情请参阅[验证记录说明](docs/validation/README.md)。
 
+## 开发说明
+
+说写（FlowType）在开发过程中使用 OpenAI Codex 辅助完成代码编写、重构和测试，采用 AI 辅助开发流程。项目维护者负责产品需求、系统架构、实现取舍、代码审查、测试、安全决策和版本发布。
+
+AI 辅助工具不替代工程审查和安全验证。
+
 ## 开源许可证
 
 本项目基于 [Apache License 2.0](LICENSE) 协议开源。所引用的第三方依赖组件仍受各自原始许可证约束。

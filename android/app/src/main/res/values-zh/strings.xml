@@ -4,6 +4,7 @@
     <string name="default_computer">未选择电脑</string>
     <string name="status_unpaired">尚未绑定电脑</string>
     <string name="input_hint">在这里输入</string>
+    <string name="clear_current_input">清空当前输入</string>
     <string name="sync">同步</string>
     <string name="sync_status_synced">已同步</string>
     <string name="sync_status_pending">待同步</string>
@@ -31,10 +32,10 @@
     <string name="language">语言</string>
     <string name="extra_dim">极暗模式</string>
     <string name="back">返回</string>
-    <string name="add_computer">添加电脑</string>
     <string name="history_empty">还没有输入记录</string>
     <string name="select_history">选择历史记录</string>
     <string name="select_all">全选</string>
+    <string name="invert_selection">反选</string>
     <string name="selected_count">已选 %1$d 项</string>
     <string name="delete_selected">删除所选记录</string>
     <string name="confirm_delete_history">删除选中的 %1$d 条历史记录？</string>

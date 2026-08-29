@@ -196,6 +196,15 @@ Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before
 
 Development logs in `docs/validation/` serve as historical validation records and do not constitute full compatibility guarantees for current releases. See the [Validation Overview](docs/validation/README.md).
 
+## Development Disclosure
+
+FlowType was developed with assistance from OpenAI Codex as part of an
+AI-assisted development workflow. The project maintainer is responsible for the product
+requirements, architecture, implementation decisions, code review, testing,
+security decisions, and releases.
+
+AI assistance does not replace engineering review or security validation.
+
 ## License
 
 FlowType is licensed under the [Apache License 2.0](LICENSE). Third-party dependencies are subject to their respective upstream licenses.
