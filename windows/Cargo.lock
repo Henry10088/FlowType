@@ -370,6 +370,7 @@ name = "flowtype-tip"
 version = "0.2.1"
 dependencies = [
  "flowtype-core",
+ "rand",
  "windows",
  "windows-core",
 ]

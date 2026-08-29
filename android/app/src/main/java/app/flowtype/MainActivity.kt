@@ -149,6 +149,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -157,7 +158,7 @@ class MainActivity : ComponentActivity() {
         })
         if (savedInstanceState?.getBoolean(STATE_REOPEN_SETTINGS) == true) {
             showSettings()
-        } else if (!handlePairingIntent(intent)) {
+        } else {
             showInput(focus = intent.action != ACTION_OPEN_IMAGE)
             if (intent.action == ACTION_OPEN_IMAGE) chooseImageSource()
         }
@@ -166,7 +167,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (!handlePairingIntent(intent) && intent.action == ACTION_OPEN_IMAGE) {
+        if (intent.action == ACTION_OPEN_IMAGE) {
             showInput(focus = false)
             chooseImageSource()
         }
@@ -512,13 +513,6 @@ class MainActivity : ComponentActivity() {
                 Toast.makeText(this, R.string.status_pair_failed, Toast.LENGTH_LONG).show()
                 if (page == Screen.INPUT) renderInput(controller.state())
             }
-    }
-
-    private fun handlePairingIntent(intent: Intent): Boolean {
-        val value = intent.dataString ?: return false
-        if (!value.startsWith("flowtype://pair")) return false
-        acceptPairingValue(value)
-        return true
     }
 
     private fun applyInputWindowSettings() {

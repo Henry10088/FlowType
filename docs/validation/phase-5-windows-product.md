@@ -13,7 +13,7 @@
 - TLS/WSS 监听与 `_flowtype._tcp.local.` mDNS 发布运行在独立网络线程。
 - 网络线程只更新共享状态，通过 `WM_APP` 通知 UI，不跨线程直接操作窗口。
 - 单实例互斥；再次启动会唤醒已有窗口。
-- Inno Setup 安装两个 Release 程序，集中创建高权限计划任务和 LocalSubnet 防火墙规则。
+- Inno Setup 安装两个 Release 程序，集中创建高权限计划任务，以及仅允许 LocalSubnet 与 Tailscale CGNAT 的防火墙规则。
 - 覆盖安装不删除 `%LOCALAPPDATA%\FlowType`，卸载清理计划任务、防火墙和当前用户自启动。
 - 安装和卸载时以原登录用户身份设置自启动，避免管理员凭据属于另一账户时写错 `HKCU`。
 

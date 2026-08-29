@@ -10,12 +10,12 @@ mod settings;
 mod ui;
 mod update;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
@@ -36,10 +36,11 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
@@ -50,6 +51,83 @@ use crate::injector::InjectorClient;
 
 const PORT: u16 = 32187;
 const WM_APP_STATE: u32 = 0x8001;
+const MAX_CONNECTIONS: usize = 32;
+const MAX_CONNECTIONS_PER_IP: usize = 8;
+const MAX_CONNECTION_ATTEMPTS_PER_MINUTE: usize = 30;
+const MAX_PEER_LIMIT_ENTRIES: usize = 1024;
+const MAX_AUTH_MESSAGE_BYTES: usize = 64 * 1024;
+const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECTION_RATE_WINDOW: Duration = Duration::from_secs(60);
+
+struct PeerConnectionState {
+    active: usize,
+    attempts: VecDeque<Instant>,
+    last_seen: Instant,
+}
+
+struct ConnectionLimiter {
+    peers: Mutex<HashMap<IpAddr, PeerConnectionState>>,
+}
+
+struct PeerConnectionLease {
+    limiter: Arc<ConnectionLimiter>,
+    peer: IpAddr,
+}
+
+impl ConnectionLimiter {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            peers: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn try_acquire(self: &Arc<Self>, peer: IpAddr) -> Option<PeerConnectionLease> {
+        let now = Instant::now();
+        let mut peers = self.peers.lock().ok()?;
+        if peers.len() >= MAX_PEER_LIMIT_ENTRIES {
+            peers.retain(|_, state| {
+                state.active > 0
+                    || now.saturating_duration_since(state.last_seen) < CONNECTION_RATE_WINDOW
+            });
+            if peers.len() >= MAX_PEER_LIMIT_ENTRIES && !peers.contains_key(&peer) {
+                return None;
+            }
+        }
+        let state = peers.entry(peer).or_insert_with(|| PeerConnectionState {
+            active: 0,
+            attempts: VecDeque::new(),
+            last_seen: now,
+        });
+        while state.attempts.front().is_some_and(|attempt| {
+            now.saturating_duration_since(*attempt) >= CONNECTION_RATE_WINDOW
+        }) {
+            state.attempts.pop_front();
+        }
+        state.last_seen = now;
+        if state.active >= MAX_CONNECTIONS_PER_IP
+            || state.attempts.len() >= MAX_CONNECTION_ATTEMPTS_PER_MINUTE
+        {
+            return None;
+        }
+        state.active += 1;
+        state.attempts.push_back(now);
+        Some(PeerConnectionLease {
+            limiter: Arc::clone(self),
+            peer,
+        })
+    }
+}
+
+impl Drop for PeerConnectionLease {
+    fn drop(&mut self) {
+        if let Ok(mut peers) = self.limiter.peers.lock()
+            && let Some(state) = peers.get_mut(&self.peer)
+        {
+            state.active = state.active.saturating_sub(1);
+        }
+    }
+}
 
 #[derive(Serialize)]
 struct PairingPayload<'a> {
@@ -116,7 +194,7 @@ struct ImageStart {
 impl ImageStart {
     fn validate(&self, authenticated_phone_id: &str) -> Result<(), &'static str> {
         let max_bytes = if self.original {
-            32 * 1024 * 1024
+            MAX_IMAGE_BYTES
         } else {
             15 * 1024 * 1024
         };
@@ -343,11 +421,21 @@ async fn run_network(
     let tls = tls_acceptor(&state.identity)?;
     let _mdns = advertise(&state.identity, endpoint_host)?;
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, PORT)).await?;
+    let connection_slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let connection_limiter = ConnectionLimiter::new();
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, peer) = listener.accept().await?;
+        let Ok(connection_slot) = Arc::clone(&connection_slots).try_acquire_owned() else {
+            continue;
+        };
+        let Some(peer_slot) = connection_limiter.try_acquire(peer.ip()) else {
+            continue;
+        };
         let state = Arc::clone(&state);
         let tls = tls.clone();
         tokio::spawn(async move {
+            let _connection_slot = connection_slot;
+            let _peer_slot = peer_slot;
             if let Err(error) = serve_connection(stream, tls, state).await {
                 eprintln!("connection ended: {error}");
             }
@@ -794,20 +882,40 @@ async fn serve_connection(
     tls: TlsAcceptor,
     state: Arc<AppState>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let stream = tls.accept(stream).await?;
-    let mut websocket = tokio_tungstenite::accept_async(stream).await?;
-    let nonce = random_token();
-    send_json(
-        &mut websocket,
-        &ChallengeMessage {
-            protocol_version: flowtype_core::PROTOCOL_VERSION,
-            message_type: "challenge",
-            pc_id: &state.identity.pc_id,
-            nonce: &nonce,
-        },
+    let stream = tokio::time::timeout(CONNECTION_TIMEOUT, tls.accept(stream))
+        .await
+        .map_err(|_| "TLS handshake timed out")??;
+    let websocket_config = WebSocketConfig::default()
+        .read_buffer_size(16 * 1024)
+        .write_buffer_size(16 * 1024)
+        .max_write_buffer_size(2 * flowtype_core::MAX_MESSAGE_BYTES)
+        .max_message_size(Some(MAX_IMAGE_BYTES))
+        .max_frame_size(Some(MAX_IMAGE_BYTES));
+    let mut websocket = tokio::time::timeout(
+        CONNECTION_TIMEOUT,
+        tokio_tungstenite::accept_async_with_config(stream, Some(websocket_config)),
     )
-    .await?;
-    let auth = next_text(&mut websocket).await?;
+    .await
+    .map_err(|_| "WebSocket handshake timed out")??;
+    let nonce = random_token();
+    let auth = tokio::time::timeout(CONNECTION_TIMEOUT, async {
+        send_json(
+            &mut websocket,
+            &ChallengeMessage {
+                protocol_version: flowtype_core::PROTOCOL_VERSION,
+                message_type: "challenge",
+                pc_id: &state.identity.pc_id,
+                nonce: &nonce,
+            },
+        )
+        .await?;
+        next_text(&mut websocket).await
+    })
+    .await
+    .map_err(|_| "authentication timed out")??;
+    if auth.len() > MAX_AUTH_MESSAGE_BYTES {
+        return Err("authentication message too large".into());
+    }
     let auth: AuthMessage = serde_json::from_str(&auth)?;
     if authenticate_phone(&state, &auth, &nonce).is_err() {
         send_json(
@@ -940,10 +1048,10 @@ async fn serve_connection(
                     let message: ClientMessage = serde_json::from_value(value)?;
                     monitored_session = match &message {
                         ClientMessage::Start(snapshot) | ClientMessage::Update(snapshot)
-                            if snapshot.session_id != "" => Some(snapshot.session_id.clone()),
+                            if !snapshot.session_id.is_empty() => Some(snapshot.session_id.clone()),
                         ClientMessage::Resume(resume)
                             if resume.session_state == ClientSessionState::Active
-                                && resume.session_id != "" => Some(resume.session_id.clone()),
+                                && !resume.session_id.is_empty() => Some(resume.session_id.clone()),
                         ClientMessage::Finish(_) | ClientMessage::Resume(_) => None,
                         _ => monitored_session,
                     };
@@ -1534,8 +1642,10 @@ where
         ClientMessage::Start(value) => ("start", value),
         ClientMessage::Update(value) => ("update", value),
         ClientMessage::Finish(value) => ("finish", value),
-        ClientMessage::Resume(value) => return handle_resume(websocket, state, value).await,
-        ClientMessage::Cancel(value) => return handle_cancel(state, value),
+        ClientMessage::Resume(value) => {
+            return handle_resume(websocket, state, authenticated_phone_id, value).await;
+        }
+        ClientMessage::Cancel(value) => return handle_cancel(state, authenticated_phone_id, value),
         ClientMessage::Probe(_) | ClientMessage::HealthCheck(_) | ClientMessage::SwitchAck(_) => {
             unreachable!()
         }
@@ -1640,8 +1750,12 @@ where
     }
 }
 
-fn handle_cancel(state: &AppState, cancel: Cancel) -> Result<(), Box<dyn std::error::Error>> {
-    cancel.validate().map_err(|_| "invalid cancel")?;
+fn handle_cancel(
+    state: &AppState,
+    authenticated_phone_id: &str,
+    cancel: Cancel,
+) -> Result<(), Box<dyn std::error::Error>> {
+    validate_cancel_for_phone(&cancel, authenticated_phone_id)?;
     let _ = injector_request(
         state,
         InjectorRequest::CancelInvalidSession {
@@ -1655,12 +1769,13 @@ fn handle_cancel(state: &AppState, cancel: Cancel) -> Result<(), Box<dyn std::er
 async fn handle_resume<S>(
     websocket: &mut WebSocketStream<S>,
     state: &AppState,
+    authenticated_phone_id: &str,
     resume: Resume,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    resume.validate().map_err(|_| "invalid resume")?;
+    validate_resume_for_phone(&resume, authenticated_phone_id)?;
     let applied = match injector_request(
         state,
         InjectorRequest::ApplyState {
@@ -1705,6 +1820,28 @@ where
         }
         other => send_injector_state(websocket, state, &resume.session_id, other).await,
     }
+}
+
+fn validate_cancel_for_phone(
+    cancel: &Cancel,
+    authenticated_phone_id: &str,
+) -> Result<(), &'static str> {
+    cancel.validate().map_err(|_| "invalid cancel")?;
+    if cancel.phone_id != authenticated_phone_id {
+        return Err("cancel phone does not match");
+    }
+    Ok(())
+}
+
+fn validate_resume_for_phone(
+    resume: &Resume,
+    authenticated_phone_id: &str,
+) -> Result<(), &'static str> {
+    resume.validate().map_err(|_| "invalid resume")?;
+    if resume.phone_id != authenticated_phone_id {
+        return Err("resume phone does not match");
+    }
+    Ok(())
 }
 
 async fn send_ack<S>(
@@ -2055,6 +2192,7 @@ fn save_paired_phones(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::net::{IpAddr, Ipv4Addr};
 
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
@@ -2063,12 +2201,62 @@ mod tests {
     use p256::pkcs8::EncodePublicKey;
 
     use flowtype_core::ipc::InjectorResponse;
+    use flowtype_core::protocol::{Cancel, ClientSessionState, Resume};
 
     use super::{
-        AuthMessage, ImageStart, PairedPhone, ReconcileDecision, auth_payload,
+        AuthMessage, ConnectionLimiter, ImageStart, MAX_CONNECTION_ATTEMPTS_PER_MINUTE,
+        MAX_CONNECTIONS_PER_IP, PairedPhone, ReconcileDecision, auth_payload,
         classify_apply_recovery, classify_finish_recovery, deduplicate_paired_phones,
-        upsert_paired_phone, verify_signature,
+        upsert_paired_phone, validate_cancel_for_phone, validate_resume_for_phone,
+        verify_signature,
     };
+
+    #[test]
+    fn limits_concurrent_connections_per_ip() {
+        let limiter = ConnectionLimiter::new();
+        let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let leases = (0..MAX_CONNECTIONS_PER_IP)
+            .map(|_| limiter.try_acquire(peer).unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(limiter.try_acquire(peer).is_none());
+        drop(leases);
+        assert!(limiter.try_acquire(peer).is_some());
+    }
+
+    #[test]
+    fn limits_connection_attempt_rate_per_ip() {
+        let limiter = ConnectionLimiter::new();
+        let peer = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
+        for _ in 0..MAX_CONNECTION_ATTEMPTS_PER_MINUTE {
+            drop(limiter.try_acquire(peer).unwrap());
+        }
+
+        assert!(limiter.try_acquire(peer).is_none());
+    }
+
+    #[test]
+    fn resume_and_cancel_require_the_authenticated_phone() {
+        let cancel = Cancel {
+            protocol_version: flowtype_core::PROTOCOL_VERSION,
+            phone_id: "phone-a".to_owned(),
+            session_id: "session".to_owned(),
+        };
+        let resume = Resume {
+            protocol_version: flowtype_core::PROTOCOL_VERSION,
+            phone_id: "phone-a".to_owned(),
+            session_id: "session".to_owned(),
+            last_ack_sequence: 0,
+            sequence: 1,
+            full_text: "text".to_owned(),
+            session_state: ClientSessionState::Active,
+        };
+
+        assert!(validate_cancel_for_phone(&cancel, "phone-a").is_ok());
+        assert!(validate_resume_for_phone(&resume, "phone-a").is_ok());
+        assert!(validate_cancel_for_phone(&cancel, "phone-b").is_err());
+        assert!(validate_resume_for_phone(&resume, "phone-b").is_err());
+    }
 
     #[test]
     fn verifies_a_phone_challenge_signature() {

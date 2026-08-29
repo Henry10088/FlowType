@@ -333,7 +333,8 @@ class FloatingInputService : Service() {
         ).apply {
             gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
             flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+                WindowManager.LayoutParams.FLAG_SECURE
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
             y = dp(8)
         }

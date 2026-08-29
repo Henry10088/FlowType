@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -14,20 +15,61 @@ use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use crate::service::WM_TIP_COMMAND;
 
-pub struct PendingCommand {
+struct PendingCommand {
     pub command: TipCommand,
     pub response: mpsc::Sender<TipResponse>,
 }
 
+#[derive(Clone, Default)]
+pub struct PendingCommands {
+    commands: Arc<Mutex<HashMap<usize, PendingCommand>>>,
+}
+
+impl PendingCommands {
+    fn insert(&self, pending: PendingCommand) -> Option<usize> {
+        let mut commands = self.commands.lock().ok()?;
+        for _ in 0..16 {
+            let token = rand::random::<u64>() as usize;
+            if token != 0 && !commands.contains_key(&token) {
+                commands.insert(token, pending);
+                return Some(token);
+            }
+        }
+        None
+    }
+
+    pub fn take(&self, token: usize) -> Option<(TipCommand, mpsc::Sender<TipResponse>)> {
+        self.commands
+            .lock()
+            .ok()?
+            .remove(&token)
+            .map(|pending| (pending.command, pending.response))
+    }
+
+    fn remove(&self, token: usize) {
+        if let Ok(mut commands) = self.commands.lock() {
+            commands.remove(&token);
+        }
+    }
+
+    fn clear(&self) {
+        if let Ok(mut commands) = self.commands.lock() {
+            commands.clear();
+        }
+    }
+}
+
 pub struct Worker {
     running: Arc<AtomicBool>,
+    pending: PendingCommands,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Worker {
-    pub fn start(window: HWND, process_id: u32, thread_id: u32) -> Self {
+    pub fn start(window: HWND, process_id: u32, thread_id: u32, pending: PendingCommands) -> Self {
         let running = Arc::new(AtomicBool::new(true));
         let worker_running = running.clone();
+        let worker_pending = pending.clone();
         let window_value = window.0 as isize;
         let thread = thread::spawn(move || {
             run(
@@ -35,10 +77,12 @@ impl Worker {
                 process_id,
                 thread_id,
                 worker_running,
+                worker_pending,
             );
         });
         Self {
             running,
+            pending,
             thread: Some(thread),
         }
     }
@@ -52,10 +96,17 @@ impl Worker {
             }
             let _ = thread.join();
         }
+        self.pending.clear();
     }
 }
 
-fn run(window: HWND, process_id: u32, thread_id: u32, running: Arc<AtomicBool>) {
+fn run(
+    window: HWND,
+    process_id: u32,
+    thread_id: u32,
+    running: Arc<AtomicBool>,
+    pending_commands: PendingCommands,
+) {
     while running.load(Ordering::Acquire) {
         let Ok(mut pipe) = open_pipe() else {
             thread::sleep(Duration::from_millis(200));
@@ -75,22 +126,17 @@ fn run(window: HWND, process_id: u32, thread_id: u32, running: Arc<AtomicBool>) 
                 break;
             };
             let (sender, receiver) = mpsc::channel();
-            let pending = Box::new(PendingCommand {
+            let pending = PendingCommand {
                 command,
                 response: sender,
-            });
-            let raw = Box::into_raw(pending);
-            if unsafe {
-                PostMessageW(
-                    Some(window),
-                    WM_TIP_COMMAND,
-                    WPARAM(0),
-                    LPARAM(raw as isize),
-                )
-            }
-            .is_err()
+            };
+            let Some(token) = pending_commands.insert(pending) else {
+                break;
+            };
+            if unsafe { PostMessageW(Some(window), WM_TIP_COMMAND, WPARAM(token), LPARAM(0)) }
+                .is_err()
             {
-                unsafe { drop(Box::from_raw(raw)) };
+                pending_commands.remove(token);
                 break;
             }
             let response = loop {
@@ -101,6 +147,7 @@ fn run(window: HWND, process_id: u32, thread_id: u32, running: Arc<AtomicBool>) 
                 }
             };
             let Some(response) = response else {
+                pending_commands.remove(token);
                 break;
             };
             if write_message(&mut pipe, &response).is_err() {
@@ -124,13 +171,32 @@ mod tests {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 
-    use super::Worker;
+    use super::{PendingCommand, PendingCommands, Worker};
+
+    #[test]
+    fn pending_commands_ignore_unknown_and_replayed_tokens() {
+        let pending = PendingCommands::default();
+        let (sender, _receiver) = std::sync::mpsc::channel();
+        let token = pending
+            .insert(PendingCommand {
+                command: flowtype_core::tip::TipCommand::Ping,
+                response: sender,
+            })
+            .unwrap();
+
+        assert!(pending.take(token.wrapping_add(1)).is_none());
+        assert!(pending.take(token).is_some());
+        assert!(pending.take(token).is_none());
+    }
 
     #[test]
     fn stop_cancels_a_blocking_pipe_read() {
-        let worker = Worker::start(HWND::default(), unsafe { GetCurrentProcessId() }, unsafe {
-            GetCurrentThreadId()
-        });
+        let worker = Worker::start(
+            HWND::default(),
+            unsafe { GetCurrentProcessId() },
+            unsafe { GetCurrentThreadId() },
+            PendingCommands::default(),
+        );
         std::thread::sleep(Duration::from_millis(50));
 
         let started = Instant::now();

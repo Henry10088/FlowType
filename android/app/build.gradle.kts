@@ -84,6 +84,10 @@ kotlin {
     }
 }
 
+dependencyLocking {
+    lockAllConfigurations()
+}
+
 dependencies {
     implementation("androidx.activity:activity-ktx:1.10.1")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")

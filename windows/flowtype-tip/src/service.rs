@@ -17,7 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{PCWSTR, Ref, Result, implement};
 
 use crate::composition::{CompositionState, EditAction, request_edit};
-use crate::ipc::{PendingCommand, Worker};
+use crate::ipc::{PendingCommands, Worker};
 use crate::lifetime::ObjectGuard;
 use crate::module_instance;
 
@@ -91,6 +91,7 @@ struct Controller {
     client_id: Cell<u32>,
     composition: Rc<CompositionState>,
     window: Cell<Option<HWND>>,
+    pending_commands: PendingCommands,
     worker: RefCell<Option<Worker>>,
 }
 
@@ -99,11 +100,14 @@ impl Controller {
         self.deactivate();
         *self.thread_manager.borrow_mut() = Some(thread_manager);
         self.client_id.set(client_id);
-        let window = create_message_window(self.clone())?;
+        let window = create_message_window(self)?;
         self.window.set(Some(window));
-        let worker = Worker::start(window, unsafe { GetCurrentProcessId() }, unsafe {
-            GetCurrentThreadId()
-        });
+        let worker = Worker::start(
+            window,
+            unsafe { GetCurrentProcessId() },
+            unsafe { GetCurrentThreadId() },
+            self.pending_commands.clone(),
+        );
         *self.worker.borrow_mut() = Some(worker);
         Ok(())
     }
@@ -156,23 +160,21 @@ impl Controller {
                 TipResponse::Begun { session_id }
             };
         }
-        if self.composition.session_id().is_some() {
-            if !self.composition.is_terminated() {
-                // The injector owns the active session. If it is asking for a
-                // new session, any live state belongs to a previous injector
-                // lifetime and must not block the new target.
-                if self.composition.has_composition()
-                    && let Some(context) = self.composition.context()
-                {
-                    let _ = request_edit(
-                        &context,
-                        self.client_id.get(),
-                        self.composition.clone(),
-                        EditAction::Finish,
-                    );
-                }
-                self.composition.clear();
+        if self.composition.session_id().is_some() && !self.composition.is_terminated() {
+            // The injector owns the active session. If it is asking for a
+            // new session, any live state belongs to a previous injector
+            // lifetime and must not block the new target.
+            if self.composition.has_composition()
+                && let Some(context) = self.composition.context()
+            {
+                let _ = request_edit(
+                    &context,
+                    self.client_id.get(),
+                    self.composition.clone(),
+                    EditAction::Finish,
+                );
             }
+            self.composition.clear();
         }
         let Some(context) = self.focused_context() else {
             return TipResponse::NoFocus;
@@ -354,7 +356,7 @@ impl Controller {
     }
 }
 
-fn create_message_window(controller: Rc<Controller>) -> Result<HWND> {
+fn create_message_window(controller: &Rc<Controller>) -> Result<HWND> {
     let instance = HINSTANCE(module_instance().0);
     let class = WNDCLASSW {
         lpfnWndProc: Some(window_proc),
@@ -363,8 +365,7 @@ fn create_message_window(controller: Rc<Controller>) -> Result<HWND> {
         ..Default::default()
     };
     unsafe { RegisterClassW(&class) };
-    let raw_controller = Box::into_raw(Box::new(controller));
-    let created = unsafe {
+    unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             PCWSTR(WINDOW_CLASS.as_ptr()),
@@ -377,15 +378,8 @@ fn create_message_window(controller: Rc<Controller>) -> Result<HWND> {
             Some(HWND_MESSAGE),
             None,
             Some(instance),
-            Some(raw_controller.cast::<c_void>()),
+            Some(Rc::as_ptr(controller).cast::<c_void>().cast_mut()),
         )
-    };
-    match created {
-        Ok(window) => Ok(window),
-        Err(error) => {
-            unsafe { drop(Box::from_raw(raw_controller)) };
-            Err(error)
-        }
     }
 }
 
@@ -396,21 +390,27 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     if message == WM_NCCREATE {
+        if unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } != 0 {
+            return LRESULT(0);
+        }
         let create = unsafe { &*(lparam.0 as *const CREATESTRUCTW) };
         unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, create.lpCreateParams as _) };
         return LRESULT(1);
     }
-    let controller = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *mut Rc<Controller>;
+    let controller = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *const Controller;
     if message == WM_TIP_COMMAND && !controller.is_null() {
-        let pending = unsafe { Box::from_raw(lparam.0 as *mut PendingCommand) };
-        let response = unsafe { &*controller }.handle_command(pending.command);
-        let _ = pending.response.send(response);
+        let Some((command, response_sender)) =
+            (unsafe { &*controller }).pending_commands.take(wparam.0)
+        else {
+            return LRESULT(0);
+        };
+        let response = unsafe { &*controller }.handle_command(command);
+        let _ = response_sender.send(response);
         return LRESULT(0);
     }
     if message == WM_NCDESTROY && !controller.is_null() {
         unsafe {
             SetWindowLongPtrW(window, GWLP_USERDATA, 0);
-            drop(Box::from_raw(controller));
         }
     }
     unsafe { DefWindowProcW(window, message, wparam, lparam) }

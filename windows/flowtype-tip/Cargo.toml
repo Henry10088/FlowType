@@ -10,5 +10,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 flowtype-core = { path = "../flowtype-core" }
+rand.workspace = true
 windows.workspace = true
 windows-core.workspace = true
