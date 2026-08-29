@@ -28,7 +28,9 @@ FLOWTYPE_ANDROID_KEY_PASSWORD
 5. 重新编译 Inno Setup 安装包
 6. `FlowType-<version>-x64-setup.exe`
 
-必须使用 RFC 3161 时间戳服务和 SHA-256 摘要。发布前用 PowerShell `Get-AuthenticodeSignature` 验证以上文件均为 `Valid`，并检查签名主体与项目发布者一致。GitHub Actions 会始终验证 Authenticode 签名有效；如需固定发布证书，还可配置 `FLOWTYPE_WINDOWS_CERT_SHA256`，不配置时不会阻断构建。
+必须使用 RFC 3161 时间戳服务和 SHA-256 摘要。发布前用 PowerShell `Get-AuthenticodeSignature` 验证以上文件均为 `Valid`，并检查签名主体与项目发布者一致。
+
+GitHub Actions 在编译 Windows 主程序前，从 `FLOWTYPE_WINDOWS_CERT_BASE64` 指定的同一份 PFX 自动计算签名证书 SHA-256，并通过 `FLOWTYPE_WINDOWS_CERT_SHA256` 编译进客户端。之后所有二进制文件和安装包必须由该证书签名且指纹完全一致，否则发布立即失败。该值不再依赖单独的 GitHub Variable，避免出现安装包已签名、客户端却没有固定证书而无法在线更新的发布物。
 
 Windows 安装包内的两个程序和两个 TIP DLL 应先签名，安装包在最后签名；不能只签最外层安装包。
 

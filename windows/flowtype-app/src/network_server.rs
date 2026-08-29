@@ -581,30 +581,45 @@ where
             Ok(InjectorResponse::TargetReady {
                 target_name,
                 activity_age_ms,
-            }) => ProbeResult {
-                protocol_version: flowtype_core::PROTOCOL_VERSION,
-                target_state: ProbeState::Ready,
-                target_name: Some(target_name),
-                activity_age_ms: Some(activity_age_ms),
-            },
-            Ok(InjectorResponse::TargetUnsupported) => ProbeResult {
-                protocol_version: flowtype_core::PROTOCOL_VERSION,
-                target_state: ProbeState::Unsupported,
-                target_name: None,
-                activity_age_ms: None,
-            },
-            Ok(InjectorResponse::TargetInvalid) => ProbeResult {
-                protocol_version: flowtype_core::PROTOCOL_VERSION,
-                target_state: ProbeState::Invalid,
-                target_name: None,
-                activity_age_ms: None,
-            },
-            Ok(_) | Err(_) => ProbeResult {
-                protocol_version: flowtype_core::PROTOCOL_VERSION,
-                target_state: ProbeState::Unsupported,
-                target_name: None,
-                activity_age_ms: None,
-            },
+            }) => {
+                state.update_status(|status| {
+                    status.target_name = Some(target_name.clone());
+                    status.last_error = None;
+                });
+                ProbeResult {
+                    protocol_version: flowtype_core::PROTOCOL_VERSION,
+                    target_state: ProbeState::Ready,
+                    target_name: Some(target_name),
+                    activity_age_ms: Some(activity_age_ms),
+                }
+            }
+            Ok(InjectorResponse::TargetUnsupported) => {
+                state.update_status(|status| status.target_name = None);
+                ProbeResult {
+                    protocol_version: flowtype_core::PROTOCOL_VERSION,
+                    target_state: ProbeState::Unsupported,
+                    target_name: None,
+                    activity_age_ms: None,
+                }
+            }
+            Ok(InjectorResponse::TargetInvalid) => {
+                state.update_status(|status| status.target_name = None);
+                ProbeResult {
+                    protocol_version: flowtype_core::PROTOCOL_VERSION,
+                    target_state: ProbeState::Invalid,
+                    target_name: None,
+                    activity_age_ms: None,
+                }
+            }
+            Ok(_) | Err(_) => {
+                state.update_status(|status| status.target_name = None);
+                ProbeResult {
+                    protocol_version: flowtype_core::PROTOCOL_VERSION,
+                    target_state: ProbeState::Unsupported,
+                    target_name: None,
+                    activity_age_ms: None,
+                }
+            }
         };
         send_json(websocket, &ServerMessage::ProbeResult(result)).await?;
         return Ok(());

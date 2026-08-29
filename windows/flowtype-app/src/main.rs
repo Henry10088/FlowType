@@ -811,9 +811,9 @@ impl AppState {
     }
 
     fn update_install_blocked(&self) -> bool {
-        self.runtime_status
+        self.active_connection
             .lock()
-            .map(|status| status.target_name.is_some())
+            .map(|active| active.is_some())
             .unwrap_or(true)
     }
 }

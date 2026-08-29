@@ -6,7 +6,7 @@ on:
       release_tag:
         description: "Release tag to create or publish"
         required: true
-        default: "windows-v0.2.3"
+        default: "windows-v0.2.4"
   push:
     tags:
       - "windows-v*"
@@ -164,17 +164,7 @@ jobs:
         shell: pwsh
         run: pwsh -File scripts\verify-version.ps1 -Platform Windows -ExpectedTag "$env:RELEASE_TAG"
 
-      - name: Build Windows release
-        shell: pwsh
-        working-directory: windows
-        env:
-          FLOWTYPE_WINDOWS_CERT_SHA256: ${{ vars.FLOWTYPE_WINDOWS_CERT_SHA256 }}
-        run: |
-          cargo build --workspace --release --locked
-          cargo build -p flowtype-tip --release --locked --target i686-pc-windows-msvc
-          Copy-Item -LiteralPath "target\i686-pc-windows-msvc\release\flowtype_tip.dll" -Destination "target\release\flowtype_tip_x86.dll" -Force
-
-      - name: Decode certificate and sign Windows binaries
+      - name: Prepare Windows signing identity
         shell: pwsh
         env:
           FLOWTYPE_WINDOWS_CERT_BASE64: ${{ secrets.FLOWTYPE_WINDOWS_CERT_BASE64 }}
@@ -185,6 +175,35 @@ jobs:
 
           $pfxPath = Join-Path $env:RUNNER_TEMP "flowtype-authenticode.pfx"
           [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:FLOWTYPE_WINDOWS_CERT_BASE64))
+
+          $certificates = [Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+          $certificates.Import(
+            $pfxPath,
+            $env:FLOWTYPE_WINDOWS_CERT_PASSWORD,
+            [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+          )
+          $signingCertificates = @($certificates | Where-Object { $_.HasPrivateKey })
+          if ($signingCertificates.Count -ne 1) { throw "Windows PFX must contain exactly one signing certificate" }
+          $fingerprint = $signingCertificates[0].GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToLowerInvariant()
+          if ($fingerprint -notmatch '^[0-9a-f]{64}$') { throw "Invalid Windows signing certificate SHA-256 fingerprint" }
+          "FLOWTYPE_WINDOWS_CERT_SHA256=$fingerprint" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build Windows release
+        shell: pwsh
+        working-directory: windows
+        run: |
+          if ($env:FLOWTYPE_WINDOWS_CERT_SHA256 -notmatch '^[0-9a-f]{64}$') { throw "Windows release certificate fingerprint was not prepared" }
+          cargo build --workspace --release --locked
+          cargo build -p flowtype-tip --release --locked --target i686-pc-windows-msvc
+          Copy-Item -LiteralPath "target\i686-pc-windows-msvc\release\flowtype_tip.dll" -Destination "target\release\flowtype_tip_x86.dll" -Force
+
+      - name: Sign Windows binaries
+        shell: pwsh
+        env:
+          FLOWTYPE_WINDOWS_CERT_PASSWORD: ${{ secrets.FLOWTYPE_WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "flowtype-authenticode.pfx"
+          if (-not (Test-Path -LiteralPath $pfxPath -PathType Leaf)) { throw "Prepared Windows certificate was not found" }
 
           $signTool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
             Sort-Object FullName |
@@ -238,13 +257,13 @@ jobs:
       - name: Sign installer and verify signatures
         shell: pwsh
         env:
-          FLOWTYPE_WINDOWS_CERT_BASE64: ${{ secrets.FLOWTYPE_WINDOWS_CERT_BASE64 }}
           FLOWTYPE_WINDOWS_CERT_PASSWORD: ${{ secrets.FLOWTYPE_WINDOWS_CERT_PASSWORD }}
-          FLOWTYPE_WINDOWS_CERT_SHA256: ${{ vars.FLOWTYPE_WINDOWS_CERT_SHA256 }}
         run: |
           $pfxPath = Join-Path $env:RUNNER_TEMP "flowtype-authenticode.pfx"
-          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:FLOWTYPE_WINDOWS_CERT_BASE64))
-          $expected = if ([string]::IsNullOrWhiteSpace($env:FLOWTYPE_WINDOWS_CERT_SHA256)) { $null } else { $env:FLOWTYPE_WINDOWS_CERT_SHA256.Replace(":", "").ToLowerInvariant() }
+          if (-not (Test-Path -LiteralPath $pfxPath -PathType Leaf)) { throw "Prepared Windows certificate was not found" }
+          if ([string]::IsNullOrWhiteSpace($env:FLOWTYPE_WINDOWS_CERT_SHA256)) { throw "Windows release certificate fingerprint was not prepared" }
+          $expected = $env:FLOWTYPE_WINDOWS_CERT_SHA256.Replace(":", "").ToLowerInvariant()
+          if ($expected -notmatch '^[0-9a-f]{64}$') { throw "Windows release certificate fingerprint was not prepared" }
           $signTool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
             Sort-Object FullName |
             Select-Object -Last 1
@@ -278,11 +297,10 @@ jobs:
             )
             if ($signature.Status -notin $acceptableStatuses) { throw "Invalid Authenticode signature: $file ($($signature.Status))" }
             $actual = $signature.SignerCertificate.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToLowerInvariant()
-            if ($expected -and $actual -ne $expected) { throw "Unexpected Authenticode certificate: $file" }
+            if ($actual -ne $expected) { throw "Unexpected Authenticode certificate: $file" }
             "$file`t$($signature.Status)`t$($signature.SignerCertificate.Subject)"
           }
           $signatureLines | Set-Content -LiteralPath (Join-Path $metadataDir "FlowType-windows-AUTHENTICODE.txt") -Encoding UTF8
-          if (-not $expected) { Add-Content -LiteralPath (Join-Path $metadataDir "FlowType-windows-AUTHENTICODE.txt") -Value "Certificate pinning variable not configured; signatures and signer identity were verified." -Encoding UTF8 }
           $hashLines = foreach ($file in $signedFiles) {
             $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
             "$hash  $file"
