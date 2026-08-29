@@ -70,6 +70,7 @@ pub enum InjectorResponse {
     },
     TargetInvalid,
     TargetModified,
+    TargetSubmitted,
     TargetUnsupported,
     TsfUnavailable,
     InjectionUnknown,

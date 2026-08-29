@@ -164,6 +164,7 @@ pub enum ErrorCode {
     TargetUnavailable,
     TargetInvalid,
     TargetModified,
+    TargetSubmitted,
     InjectorUnavailable,
     RecoveryRequired,
     InjectionUnknown,
@@ -316,6 +317,7 @@ mod tests {
         for (code, expected) in [
             (ErrorCode::InjectorUnavailable, "INJECTOR_UNAVAILABLE"),
             (ErrorCode::RecoveryRequired, "RECOVERY_REQUIRED"),
+            (ErrorCode::TargetSubmitted, "TARGET_SUBMITTED"),
         ] {
             let message = ServerMessage::Error(ProtocolError {
                 protocol_version: 1,

@@ -108,4 +108,15 @@ class ProtocolTest {
         assertEquals(ErrorCode.RECOVERY_REQUIRED, message.value.code)
         assertEquals("voice", message.value.sessionId)
     }
+
+    @Test
+    fun decodesTargetSubmitted() {
+        val message = ProtocolCodec.decodeServer(
+            """{"protocol_version":1,"type":"error","code":"TARGET_SUBMITTED","session_id":"voice"}""",
+        )
+
+        require(message is ServerMessage.Error)
+        assertEquals(ErrorCode.TARGET_SUBMITTED, message.value.code)
+        assertEquals("voice", message.value.sessionId)
+    }
 }

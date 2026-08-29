@@ -455,7 +455,14 @@ class SyncClient(
                                 socket = null
                                 listener.onPairingInvalid(current)
                             } else {
-                                queue.requireExplicitStart()
+                                if (message.value.code == ErrorCode.TARGET_SUBMITTED) {
+                                    // The Windows target accepted the Enter key and
+                                    // already ended the remote session. Drop the
+                                    // queued snapshot so the next text starts cleanly.
+                                    queue.abandonSession()
+                                } else {
+                                    queue.requireExplicitStart()
+                                }
                                 listener.onServerError(current, message.value)
                             }
                         }

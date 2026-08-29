@@ -312,6 +312,10 @@ fn handle_request(
                     diagnostics::log("begin rejected=target_tsf_unsupported");
                     return InjectorResponse::TargetUnsupported;
                 }
+                Err(TipBeginError::RebindRejected) => {
+                    diagnostics::log("begin rejected=unsafe_rebind");
+                    return InjectorResponse::TargetModified;
+                }
                 Err(TipBeginError::Unavailable) => {
                     diagnostics::log("begin rejected=tsf_unavailable");
                     return InjectorResponse::TsfUnavailable;
@@ -358,11 +362,19 @@ fn handle_request(
         }
         InjectorRequest::QuerySession { session_id } => {
             if let Some(active) = session.as_ref().filter(|active| active.id == session_id) {
-                InjectorResponse::SessionActive {
-                    session_id,
-                    sequence: active.sequence,
-                    full_text: active.text.clone(),
-                }
+                let tip = active.tip;
+                let input_epoch = active.input_epoch;
+                let sequence = active.sequence;
+                let full_text = active.text.clone();
+                query_active_session(
+                    session,
+                    tips,
+                    tip,
+                    input_epoch,
+                    sequence,
+                    full_text,
+                    &session_id,
+                )
             } else if let Some(finished) = completed
                 .as_ref()
                 .filter(|finished| finished.id == session_id)
@@ -410,6 +422,87 @@ fn handle_request(
             InjectorResponse::Cancelled
         }
     }
+}
+
+fn query_active_session(
+    session: &mut Option<ActiveSession>,
+    tips: &TipRegistry,
+    tip: TipKey,
+    input_epoch: u64,
+    sequence: i64,
+    full_text: String,
+    session_id: &str,
+) -> InjectorResponse {
+    // A physical key/mouse event can terminate a TSF composition without a
+    // phone packet arriving. Query the TIP so the desktop can notify the
+    // phone immediately instead of replaying the old full text later.
+    if input_epoch != input_monitor::epoch() {
+        let submitted = is_submitted_candidate(
+            full_text.as_str(),
+            input_epoch,
+            input_monitor::epoch(),
+            input_monitor::last_event_was_return(),
+        );
+        if submitted {
+            end_failed_session(session, tips);
+        } else {
+            detach_session(session);
+        }
+        return if submitted {
+            InjectorResponse::TargetSubmitted
+        } else {
+            InjectorResponse::TargetModified
+        };
+    }
+    match tips.send(
+        tip,
+        TipCommand::Query {
+            session_id: session_id.to_owned(),
+        },
+    ) {
+        Ok(TipResponse::SessionActive { .. }) => InjectorResponse::SessionActive {
+            session_id: session_id.to_owned(),
+            sequence,
+            full_text,
+        },
+        Ok(TipResponse::CompositionTerminated) => {
+            let submitted = is_submitted_candidate(
+                full_text.as_str(),
+                input_epoch,
+                input_monitor::epoch(),
+                input_monitor::last_event_was_return(),
+            );
+            if submitted {
+                end_failed_session(session, tips);
+            } else {
+                detach_session(session);
+            }
+            if submitted {
+                InjectorResponse::TargetSubmitted
+            } else {
+                InjectorResponse::TargetModified
+            }
+        }
+        _ => {
+            end_failed_session(session, tips);
+            InjectorResponse::TargetModified
+        }
+    }
+}
+
+fn is_submitted_candidate(
+    full_text: &str,
+    session_input_epoch: u64,
+    current_input_epoch: u64,
+    last_event_was_return: bool,
+) -> bool {
+    full_text.ends_with('\n') && current_input_epoch != session_input_epoch && last_event_was_return
+}
+
+fn detach_session(session: &mut Option<ActiveSession>) {
+    // Keep the TIP's terminated composition range available for a verified
+    // rebind. The injector session itself is no longer accepted for updates.
+    session.take();
 }
 
 fn completed_apply_response(
@@ -624,9 +717,17 @@ mod integration_tests {
     use flowtype_core::tip::{TipCommand, TipResponse};
 
     use super::{
-        CompletedSession, completed_apply_response, pipe_security_sddl, speech,
-        target::TargetWindow, tip_broker::TipRegistry,
+        CompletedSession, completed_apply_response, is_submitted_candidate, pipe_security_sddl,
+        speech, target::TargetWindow, tip_broker::TipRegistry,
     };
+
+    #[test]
+    fn only_a_newline_snapshot_after_a_real_return_is_submitted() {
+        assert!(is_submitted_candidate("已完成\n", 10, 11, true));
+        assert!(!is_submitted_candidate("已完成", 10, 11, true));
+        assert!(!is_submitted_candidate("已完成\n", 10, 11, false));
+        assert!(!is_submitted_candidate("已完成\n", 10, 10, true));
+    }
 
     #[test]
     fn completed_session_replays_only_the_exact_final_snapshot() {

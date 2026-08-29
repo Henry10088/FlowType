@@ -31,6 +31,9 @@ pub enum TipCommand {
     Cancel {
         session_id: String,
     },
+    Query {
+        session_id: String,
+    },
     Ping,
 }
 
@@ -46,6 +49,8 @@ pub enum TipResponse {
     SessionMismatch,
     SequenceConflict,
     CompositionTerminated,
+    SessionActive { session_id: String, sequence: i64 },
+    RebindRejected,
     EditRejected,
 }
 

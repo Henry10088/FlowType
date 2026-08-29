@@ -489,6 +489,18 @@ class FlowTypeApplication : Application(), SyncClient.Listener {
     }
 
     override fun onServerError(binding: ComputerBinding, error: ErrorMessage) = onMain {
+        if (error.code == ErrorCode.TARGET_SUBMITTED) {
+            val submittedText = session.currentText
+            if (submittedText.isNotEmpty()) history.add(binding, submittedText)
+            sessions.clearCurrent()
+            clearAutoSelection()
+            connected = true
+            targetState = null
+            showSyncFullText = false
+            statusText = text(R.string.status_connected, binding.pcName)
+            notifyChanged()
+            return@onMain
+        }
         resetFailedSession()
         connected = true
         targetState = null

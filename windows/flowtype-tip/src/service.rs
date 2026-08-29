@@ -144,6 +144,7 @@ impl Controller {
                 sequence,
             } => self.finish(session_id, sequence),
             TipCommand::Cancel { session_id } => self.cancel(session_id),
+            TipCommand::Query { session_id } => self.query(session_id),
         }
     }
 
@@ -156,24 +157,31 @@ impl Controller {
             };
         }
         if self.composition.session_id().is_some() {
-            // The injector owns the active session. If it is asking for a new
-            // session, any state left here belongs to a previous injector
-            // lifetime and must not block the new target.
-            if self.composition.has_composition()
-                && let Some(context) = self.composition.context()
-            {
-                let _ = request_edit(
-                    &context,
-                    self.client_id.get(),
-                    self.composition.clone(),
-                    EditAction::Finish,
-                );
+            if !self.composition.is_terminated() {
+                // The injector owns the active session. If it is asking for a
+                // new session, any live state belongs to a previous injector
+                // lifetime and must not block the new target.
+                if self.composition.has_composition()
+                    && let Some(context) = self.composition.context()
+                {
+                    let _ = request_edit(
+                        &context,
+                        self.client_id.get(),
+                        self.composition.clone(),
+                        EditAction::Finish,
+                    );
+                }
+                self.composition.clear();
             }
-            self.composition.clear();
         }
         let Some(context) = self.focused_context() else {
             return TipResponse::NoFocus;
         };
+        let rebind_text = self
+            .composition
+            .is_terminated()
+            .then(|| self.composition.text());
+        let rebind_requested = rebind_text.is_some();
         if request_edit(
             &context,
             self.client_id.get(),
@@ -183,7 +191,11 @@ impl Controller {
         .is_err()
         {
             self.composition.clear();
-            return TipResponse::EditRejected;
+            return if rebind_requested {
+                TipResponse::RebindRejected
+            } else {
+                TipResponse::EditRejected
+            };
         }
         if self
             .composition
@@ -197,7 +209,17 @@ impl Controller {
                 EditAction::Finish,
             );
             self.composition.clear();
-            return TipResponse::EditRejected;
+            return if rebind_requested {
+                TipResponse::RebindRejected
+            } else {
+                TipResponse::EditRejected
+            };
+        }
+        if let Some(previous_text) = rebind_text {
+            // A terminated composition was safely rebound at its original
+            // range. Restore its last confirmed snapshot for the first update.
+            // The sequence intentionally starts at zero for the new session.
+            self.composition.applied(0, previous_text);
         }
         TipResponse::Begun { session_id }
     }
@@ -295,6 +317,25 @@ impl Controller {
         }
         self.composition.clear();
         TipResponse::Cancelled { session_id }
+    }
+
+    fn query(&self, session_id: String) -> TipResponse {
+        if self.controller_session_matches(&session_id) {
+            if self.composition.is_terminated() {
+                TipResponse::CompositionTerminated
+            } else {
+                TipResponse::SessionActive {
+                    session_id,
+                    sequence: self.composition.sequence(),
+                }
+            }
+        } else {
+            TipResponse::SessionMismatch
+        }
+    }
+
+    fn controller_session_matches(&self, session_id: &str) -> bool {
+        self.composition.session_id().as_deref() == Some(session_id)
     }
 
     fn focused_context(&self) -> Option<ITfContext> {

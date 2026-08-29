@@ -862,8 +862,25 @@ async fn serve_connection(
     // the single input connection until the client sends a real input message.
     let mut active_lease: Option<ActiveConnectionLease> = None;
     let mut pending_image: Option<ImageStart> = None;
+    let mut monitored_session: Option<String> = None;
+    let mut target_poll = tokio::time::interval(Duration::from_millis(120));
+    target_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            _ = target_poll.tick(), if monitored_session.is_some() && active_lease.is_some() => {
+                let Some(session_id) = monitored_session.clone() else { continue; };
+                match injector_request(&state, InjectorRequest::QuerySession { session_id: session_id.clone() }) {
+                    Ok(InjectorResponse::SessionActive { .. }) => {}
+                    Ok(response) => {
+                        monitored_session = None;
+                        send_injector_state(&mut websocket, &state, &session_id, response).await?;
+                    }
+                    Err(failure) => {
+                        monitored_session = None;
+                        send_injector_failure(&mut websocket, &session_id, failure).await?;
+                    }
+                }
+            }
             Some(request) = switch_rx.recv() => {
                 send_json(
                     &mut websocket,
@@ -921,6 +938,15 @@ async fn serve_connection(
                     }
                 } else {
                     let message: ClientMessage = serde_json::from_value(value)?;
+                    monitored_session = match &message {
+                        ClientMessage::Start(snapshot) | ClientMessage::Update(snapshot)
+                            if snapshot.session_id != "" => Some(snapshot.session_id.clone()),
+                        ClientMessage::Resume(resume)
+                            if resume.session_state == ClientSessionState::Active
+                                && resume.session_id != "" => Some(resume.session_id.clone()),
+                        ClientMessage::Finish(_) | ClientMessage::Resume(_) => None,
+                        _ => monitored_session,
+                    };
                     handle_client_message(&mut websocket, &state, &auth.phone_id, message).await?;
                 }
             }
@@ -1724,6 +1750,23 @@ where
                 &ServerMessage::Error(ProtocolError {
                     protocol_version: flowtype_core::PROTOCOL_VERSION,
                     code: ErrorCode::TargetModified,
+                    session_id: Some(session_id.to_owned()),
+                }),
+            )
+            .await;
+        }
+        InjectorResponse::TargetSubmitted => {
+            state.update_status(|status| {
+                status.summary = tr("输入已提交", "Input submitted").to_owned();
+                status.target_name = None;
+                status.last_error = None;
+            });
+            state.mark_input_finished();
+            return send_json(
+                websocket,
+                &ServerMessage::Error(ProtocolError {
+                    protocol_version: flowtype_core::PROTOCOL_VERSION,
+                    code: ErrorCode::TargetSubmitted,
                     session_id: Some(session_id.to_owned()),
                 }),
             )

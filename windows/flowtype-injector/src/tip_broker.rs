@@ -40,6 +40,7 @@ pub struct TipKey {
 pub enum TipBeginError {
     Unavailable,
     Unsupported,
+    RebindRejected,
 }
 
 #[derive(Clone)]
@@ -106,6 +107,9 @@ impl TipRegistry {
                     Ok(TipResponse::NoFocus | TipResponse::EditRejected)
                 ) {
                     target_rejected = true;
+                }
+                if matches!(&response, Ok(TipResponse::RebindRejected)) {
+                    return Err(TipBeginError::RebindRejected);
                 }
             }
             let now = Instant::now();

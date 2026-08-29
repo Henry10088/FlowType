@@ -12,6 +12,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 static PHYSICAL_INPUT_EPOCH: AtomicU64 = AtomicU64::new(0);
+static LAST_PHYSICAL_RETURN_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 pub fn start() -> bool {
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -48,11 +49,21 @@ pub fn epoch() -> u64 {
     PHYSICAL_INPUT_EPOCH.load(Ordering::Acquire)
 }
 
+pub fn last_event_was_return() -> bool {
+    LAST_PHYSICAL_RETURN_EPOCH.load(Ordering::Acquire) == epoch()
+        && LAST_PHYSICAL_RETURN_EPOCH.load(Ordering::Acquire) != 0
+}
+
 unsafe extern "system" fn keyboard_hook(code: i32, wparam: usize, lparam: isize) -> isize {
     if code >= 0 && lparam != 0 {
         let event = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
         if is_physical_keyboard_event(wparam as u32, event.flags) {
-            PHYSICAL_INPUT_EPOCH.fetch_add(1, Ordering::AcqRel);
+            let epoch = PHYSICAL_INPUT_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
+            if event.vkCode == 0x0d {
+                LAST_PHYSICAL_RETURN_EPOCH.store(epoch, Ordering::Release);
+            } else {
+                LAST_PHYSICAL_RETURN_EPOCH.store(0, Ordering::Release);
+            }
         }
     }
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
@@ -63,6 +74,7 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: usize, lparam: isize) ->
         let event = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
         if is_physical_mouse_event(wparam as u32, event.flags) {
             PHYSICAL_INPUT_EPOCH.fetch_add(1, Ordering::AcqRel);
+            LAST_PHYSICAL_RETURN_EPOCH.store(0, Ordering::Release);
         }
     }
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }

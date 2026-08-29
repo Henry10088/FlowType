@@ -51,6 +51,10 @@ impl CompositionState {
         *self.text.borrow() == text
     }
 
+    pub fn text(&self) -> String {
+        self.text.borrow().clone()
+    }
+
     pub fn is_terminated(&self) -> bool {
         self.terminated.get()
     }
@@ -123,13 +127,16 @@ impl CompositionState {
         self.applying_remote_edit.get()
     }
 
-    fn matches_expected_edit_state(&self, context: &ITfContext, ec: u32) -> Result<bool> {
-        let composition = self.composition()?;
-        let composition_range = unsafe { composition.GetRange()? };
+    fn matches_expected_range(
+        &self,
+        context: &ITfContext,
+        range: &windows::Win32::UI::TextServices::ITfRange,
+        ec: u32,
+    ) -> Result<bool> {
         let expected: Vec<u16> = self.text.borrow().encode_utf16().collect();
         let mut actual = vec![0_u16; expected.len().saturating_add(1)];
         let mut actual_len = 0_u32;
-        unsafe { composition_range.GetText(ec, 0, &mut actual, &mut actual_len)? };
+        unsafe { range.GetText(ec, 0, &mut actual, &mut actual_len)? };
         let actual_len = actual_len as usize;
         if actual_len != expected.len() || actual[..actual_len] != expected {
             return Ok(false);
@@ -151,10 +158,33 @@ impl CompositionState {
             if !unsafe { selected_range.IsEmpty(ec)? }.as_bool() {
                 return Ok(false);
             }
-            Ok(unsafe { selected_range.CompareStart(ec, &composition_range, TF_ANCHOR_END)? == 0 })
+            Ok(unsafe { selected_range.CompareStart(ec, range, TF_ANCHOR_END)? == 0 })
         })();
         unsafe { ManuallyDrop::drop(&mut selection[0].range) };
         result
+    }
+
+    fn matches_expected_edit_state(&self, context: &ITfContext, ec: u32) -> Result<bool> {
+        let composition = self.composition()?;
+        let composition_range = unsafe { composition.GetRange()? };
+        self.matches_expected_range(context, &composition_range, ec)
+    }
+
+    fn reusable_terminated_range(
+        &self,
+        context: &ITfContext,
+        ec: u32,
+    ) -> Result<Option<windows::Win32::UI::TextServices::ITfRange>> {
+        if !self.is_terminated() {
+            return Ok(None);
+        }
+        let composition = self.composition()?;
+        let range = unsafe { composition.GetRange()? };
+        if self.matches_expected_range(context, &range, ec)? {
+            Ok(Some(range))
+        } else {
+            Ok(None)
+        }
     }
 
     fn mark_external_edit(&self) {
@@ -162,7 +192,6 @@ impl CompositionState {
     }
 
     fn mark_terminated(&self) {
-        self.composition.borrow_mut().take();
         self.terminated.set(true);
     }
 }
@@ -247,8 +276,16 @@ impl ITfEditSession_Impl for EditSession_Impl {
 
 impl EditSession_Impl {
     fn begin(&self, ec: u32) -> Result<()> {
-        let insert: ITfInsertAtSelection = self.context.cast()?;
-        let range = unsafe { insert.InsertTextAtSelection(ec, TF_IAS_QUERYONLY, &[])? };
+        let range = if self.state.is_terminated() {
+            self.state
+                .reusable_terminated_range(&self.context, ec)?
+                .ok_or_else(|| {
+                    windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL)
+                })?
+        } else {
+            let insert: ITfInsertAtSelection = self.context.cast()?;
+            unsafe { insert.InsertTextAtSelection(ec, TF_IAS_QUERYONLY, &[])? }
+        };
         let context_composition: ITfContextComposition = self.context.cast()?;
         let sink = ComObject::new(CompositionSink {
             _guard: ObjectGuard::new(),
