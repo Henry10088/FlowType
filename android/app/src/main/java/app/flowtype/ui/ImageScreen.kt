@@ -8,14 +8,14 @@ import android.widget.ImageView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import app.flowtype.R
-import app.flowtype.FlowTypeApplication
+import app.flowtype.FlowTypeController
 import app.flowtype.image.ImagePreparer
 import java.util.concurrent.Executors
 
 /** Owns image preview/prepare UI and keeps expensive bitmap work off the main thread. */
 class ImageScreen(
     private val activity: ComponentActivity,
-    private val controller: FlowTypeApplication,
+    private val controller: FlowTypeController,
     private val applyInsets: () -> Unit,
     private val onBack: () -> Unit,
     private val onCompleted: () -> Unit,
@@ -57,23 +57,23 @@ class ImageScreen(
         }
     }
 
-    fun render(state: FlowTypeApplication.UiState) {
+    fun render(state: FlowTypeController.UiState) {
         if (processing) return
         val status = activity.findViewById<TextView>(R.id.imageStatus) ?: return
         val send = activity.findViewById<Button>(R.id.sendImage)
         val original = activity.findViewById<CheckBox>(R.id.sendOriginal)
         when (state.imageTransfer) {
-            FlowTypeApplication.ImageTransferState.IDLE -> {
+            FlowTypeController.ImageTransferState.IDLE -> {
                 status.text = if (state.connected) "" else activity.getString(R.string.computer_not_connected)
                 send.isEnabled = state.connected
                 original.isEnabled = true
             }
-            FlowTypeApplication.ImageTransferState.SENDING -> {
+            FlowTypeController.ImageTransferState.SENDING -> {
                 status.setText(R.string.image_transferring)
                 send.isEnabled = false
                 original.isEnabled = false
             }
-            FlowTypeApplication.ImageTransferState.SUCCESS -> {
+            FlowTypeController.ImageTransferState.SUCCESS -> {
                 status.setText(R.string.image_sent)
                 send.isEnabled = false
                 if (!successHandled) {
@@ -81,7 +81,7 @@ class ImageScreen(
                     status.postDelayed({ if (isVisible()) onCompleted() }, 900)
                 }
             }
-            FlowTypeApplication.ImageTransferState.FAILED -> {
+            FlowTypeController.ImageTransferState.FAILED -> {
                 status.setText(R.string.image_failed)
                 send.isEnabled = state.connected
                 original.isEnabled = true

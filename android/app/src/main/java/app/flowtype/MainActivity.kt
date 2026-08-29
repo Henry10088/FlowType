@@ -39,12 +39,13 @@ import app.flowtype.ui.HistoryScreen
 import app.flowtype.ui.ImageScreen
 import app.flowtype.ui.Screen
 import app.flowtype.ui.SettingsScreen
+import app.flowtype.ui.renderComputerChooser
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import java.io.File
 
 class MainActivity : ComponentActivity() {
-    private val controller by lazy { application as FlowTypeApplication }
+    private val controller by lazy { (application as FlowTypeApplication).controller }
     private var page = Screen.INPUT
     private var suppressTextChange = false
     private var scanLaunched = false
@@ -82,18 +83,25 @@ class MainActivity : ComponentActivity() {
         HistoryScreen(
             activity = this,
             controller = controller,
-            preparePage = { hideKeyboard(); clearInputWindowSettings() },
+            preparePage = {
+                hideKeyboard()
+                clearInputWindowSettings()
+            },
             applyInsets = ::applySystemInsets,
             onBack = { showInput() },
             onOpenInput = { focus -> showInput(focus) },
             onOpenDetail = ::showHistoryDetail,
+            isVisible = { page == Screen.HISTORY || page == Screen.DETAIL },
         )
     }
     private val computersScreen by lazy {
         ComputersScreen(
             activity = this,
             controller = controller,
-            preparePage = { hideKeyboard(); clearInputWindowSettings() },
+            preparePage = {
+                hideKeyboard()
+                clearInputWindowSettings()
+            },
             applyInsets = ::applySystemInsets,
             onBack = { showInput() },
             onAdd = ::launchScanner,
@@ -106,13 +114,16 @@ class MainActivity : ComponentActivity() {
         SettingsScreen(
             activity = this,
             controller = controller,
-            preparePage = { hideKeyboard(); clearInputWindowSettings() },
+            preparePage = {
+                hideKeyboard()
+                clearInputWindowSettings()
+            },
             applyInsets = ::applySystemInsets,
             onBack = { showInput() },
             onOpenComputers = ::showComputers,
             onFloatingToggle = { checked ->
                 if (checked) requestFloatingPermission() else {
-                    controller.settings.floatingInput = false
+                    controller.setFloatingInput(false)
                     FloatingInputService.stop(this)
                 }
             },
@@ -123,7 +134,7 @@ class MainActivity : ComponentActivity() {
             isVisible = { page == Screen.SETTINGS },
         )
     }
-    private val observer: (FlowTypeApplication.UiState) -> Unit = { state ->
+    private val observer: (FlowTypeController.UiState) -> Unit = { state ->
         when (page) {
             Screen.INPUT -> renderInput(state)
             Screen.IMAGE -> imageScreen.render(state)
@@ -192,7 +203,7 @@ class MainActivity : ComponentActivity() {
         controller.saveNow()
         controller.removeObserver(observer)
         if (page == Screen.INPUT) clearInputWindowSettings()
-        if (controller.settings.floatingInput) FloatingInputService.show(this)
+        if (controller.floatingInputEnabled) FloatingInputService.show(this)
         super.onStop()
     }
 
@@ -205,7 +216,7 @@ class MainActivity : ComponentActivity() {
         }
         if (waitingForOverlayPermission) {
             waitingForOverlayPermission = false
-            if (Settings.canDrawOverlays(this)) enableFloating() else controller.settings.floatingInput = false
+            if (Settings.canDrawOverlays(this)) enableFloating() else controller.setFloatingInput(false)
             if (page == Screen.SETTINGS) showSettings()
         }
         if (waitingForUpdatePermission) {
@@ -222,7 +233,7 @@ class MainActivity : ComponentActivity() {
 
     private fun installUpdate() {
         if (controller.state().activeSession ||
-            controller.state().imageTransfer == FlowTypeApplication.ImageTransferState.SENDING
+            controller.state().imageTransfer == FlowTypeController.ImageTransferState.SENDING
         ) {
             Toast.makeText(this, R.string.update_finish_work_first, Toast.LENGTH_SHORT).show()
             return
@@ -290,7 +301,7 @@ class MainActivity : ComponentActivity() {
         findViewById<ImageButton>(R.id.openHistory).setOnClickListener { showHistory() }
         findViewById<ImageButton>(R.id.openComputers).setOnClickListener { showComputers() }
         findViewById<ImageButton>(R.id.toggleDim).setOnClickListener {
-            controller.settings.extraDim = !controller.settings.extraDim
+            controller.setExtraDim(!controller.extraDimEnabled)
             applyInputWindowSettings()
         }
         findViewById<ImageButton>(R.id.openSettings).setOnClickListener { showSettings() }
@@ -349,7 +360,7 @@ class MainActivity : ComponentActivity() {
         imageScreen.show(uri)
     }
 
-    private fun renderInput(state: FlowTypeApplication.UiState) {
+    private fun renderInput(state: FlowTypeController.UiState) {
         computerName.text = state.binding?.pcName ?: getString(R.string.default_computer)
         status.text = state.status
         syncStatus.text = state.syncState
@@ -360,14 +371,14 @@ class MainActivity : ComponentActivity() {
             suppressTextChange = false
         }
         val paired = state.binding != null
-        input.isEnabled = paired && !state.finishing
+        input.isEnabled = paired && state.storageReady && !state.finishing
         clearInput.isEnabled = state.text.isNotEmpty() && !state.finishing
         clearInput.alpha = if (clearInput.isEnabled) 1f else 0.45f
         sync.isEnabled = state.syncAvailable
         newSession.isEnabled = state.activeSession || state.text.isNotEmpty()
         pair.visibility = if (paired) View.GONE else View.VISIBLE
         findViewById<ImageButton>(R.id.openImage).isEnabled =
-            paired && state.imageTransfer != FlowTypeApplication.ImageTransferState.SENDING
+            paired && state.imageTransfer != FlowTypeController.ImageTransferState.SENDING
         status.setTextColor(getColor(
             when {
                 state.binding == null -> R.color.status_neutral
@@ -378,54 +389,9 @@ class MainActivity : ComponentActivity() {
         renderComputerChooser(state)
     }
 
-    private fun renderComputerChooser(state: FlowTypeApplication.UiState) {
+    private fun renderComputerChooser(state: FlowTypeController.UiState) {
         val chooser = findViewById<LinearLayout>(R.id.computerChooser) ?: return
-        chooser.removeAllViews()
-        controller.bindings.list().forEach { binding ->
-            val selected = binding.pcId == state.binding?.pcId
-            val online = binding.pcId in state.onlinePcIds || (selected && state.connected)
-            val active = binding.pcId == state.recentActivityPcId
-            val chip = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = android.view.Gravity.CENTER_VERTICAL
-                setPadding(dp(12), 0, dp(12), 0)
-                background = GradientDrawable().apply {
-                    cornerRadius = dp(6).toFloat()
-                    setColor(getColor(R.color.surface))
-                    setStroke(dp(if (selected) 2 else 1), getColor(if (selected) R.color.accent else R.color.divider))
-                }
-                contentDescription = buildString {
-                    append(binding.pcName)
-                    if (selected) append(getString(R.string.a11y_selected))
-                    if (active) append(getString(R.string.a11y_recently_used))
-                    append(getString(if (online) R.string.a11y_connected else R.string.a11y_disconnected))
-                }
-                setOnClickListener { controller.selectComputer(binding.pcId) }
-            }
-            chip.addView(View(this).apply {
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(getColor(if (online) R.color.accent else R.color.status_warning))
-                }
-            }, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) })
-            chip.addView(TextView(this).apply {
-                text = binding.pcName
-                setTextColor(getColor(R.color.text_primary))
-                textSize = 14f
-                setTypeface(typeface, if (selected) Typeface.BOLD else Typeface.NORMAL)
-            })
-            if (active) {
-                chip.addView(TextView(this).apply {
-                    text = "  •"
-                    setTextColor(getColor(R.color.status_activity))
-                    textSize = 16f
-                    contentDescription = getString(R.string.recently_used)
-                })
-            }
-            chooser.addView(chip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40)).apply {
-                marginEnd = dp(8)
-            })
-        }
+        renderComputerChooser(this, chooser, state, compact = false, controller::selectComputer)
     }
 
     private fun showHistory() {
@@ -450,7 +416,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun renameComputer(pcId: String, oldName: String) {
-        val input = EditText(this).apply { setText(oldName); selectAll() }
+        val input = EditText(this).apply {
+            setText(oldName)
+            selectAll()
+        }
         AlertDialog.Builder(this)
             .setTitle(R.string.rename_computer)
             .setView(input)
@@ -469,7 +438,10 @@ class MainActivity : ComponentActivity() {
         AlertDialog.Builder(this)
             .setMessage(getString(R.string.confirm_unbind, name))
             .setNegativeButton(R.string.cancel, null)
-            .setPositiveButton(R.string.unbind) { _, _ -> controller.unbindComputer(pcId); showComputers() }
+            .setPositiveButton(R.string.unbind) { _, _ ->
+                controller.unbindComputer(pcId)
+                showComputers()
+            }
             .show()
     }
 
@@ -486,7 +458,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun enableFloating() {
-        controller.settings.floatingInput = true
+        controller.setFloatingInput(true)
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION)
         }
@@ -508,7 +480,10 @@ class MainActivity : ComponentActivity() {
 
     private fun acceptPairingValue(value: String) {
         runCatching { BindingStore.parse(value) }
-            .onSuccess { controller.acceptBinding(it); showInput() }
+            .onSuccess {
+                controller.acceptBinding(it)
+                showInput()
+            }
             .onFailure {
                 Toast.makeText(this, R.string.status_pair_failed, Toast.LENGTH_LONG).show()
                 if (page == Screen.INPUT) renderInput(controller.state())
@@ -516,9 +491,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun applyInputWindowSettings() {
-        if (controller.settings.keepScreenOn) refreshKeepAwake() else clearKeepAwake()
-        window.attributes = window.attributes.apply { screenBrightness = if (controller.settings.extraDim) 0.02f else -1f }
-        findViewById<ImageButton>(R.id.toggleDim)?.alpha = if (controller.settings.extraDim) 1f else 0.65f
+        if (controller.keepScreenOnEnabled) refreshKeepAwake() else clearKeepAwake()
+        window.attributes = window.attributes.apply {
+            screenBrightness = if (controller.extraDimEnabled) 0.02f else -1f
+        }
+        findViewById<ImageButton>(R.id.toggleDim)?.alpha =
+            if (controller.extraDimEnabled) 1f else 0.65f
     }
 
     private fun clearInputWindowSettings() {
@@ -527,7 +505,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshKeepAwake() {
-        if (!controller.settings.keepScreenOn || page != Screen.INPUT) return
+        if (!controller.keepScreenOnEnabled || page != Screen.INPUT) return
         keepAwakeUntil = SystemClock.uptimeMillis() + KEEP_AWAKE_WINDOW_MS
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         keepAwakeHandler.removeCallbacks(clearKeepAwakeTask)
@@ -580,7 +558,7 @@ class MainActivity : ComponentActivity() {
         if (page != Screen.INPUT || isFinishing || isChangingConfigurations) return
         controller.saveNow()
         clearInputWindowSettings()
-        if (controller.settings.floatingInput && Settings.canDrawOverlays(this)) {
+        if (controller.floatingInputEnabled && Settings.canDrawOverlays(this)) {
             FloatingInputService.show(this)
         }
         finish()

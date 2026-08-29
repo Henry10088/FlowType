@@ -7,7 +7,7 @@ import android.widget.ProgressBar
 import android.widget.Switch
 import android.widget.TextView
 import androidx.activity.ComponentActivity
-import app.flowtype.FlowTypeApplication
+import app.flowtype.FlowTypeController
 import app.flowtype.LanguageManager
 import app.flowtype.R
 import app.flowtype.update.UpdateManager
@@ -15,7 +15,7 @@ import app.flowtype.update.UpdateManager
 /** Binds persistent settings to controls; permission orchestration stays in MainActivity. */
 class SettingsScreen(
     private val activity: ComponentActivity,
-    private val controller: FlowTypeApplication,
+    private val controller: FlowTypeController,
     private val preparePage: () -> Unit,
     private val applyInsets: () -> Unit,
     private val onBack: () -> Unit,
@@ -45,20 +45,20 @@ class SettingsScreen(
         activity.findViewById<TextView>(R.id.languageSummary).text =
             LanguageManager.displayName(LanguageManager.current(activity))
         activity.findViewById<Switch>(R.id.autoSelectComputer).apply {
-            isChecked = controller.settings.autoSelectComputer
+            isChecked = controller.autoSelectComputerEnabled
             isEnabled = !controller.state().activeSession
             setOnCheckedChangeListener { _, checked -> controller.setAutoSelectComputer(checked) }
         }
         activity.findViewById<Switch>(R.id.keepScreenOn).apply {
-            isChecked = controller.settings.keepScreenOn
-            setOnCheckedChangeListener { _, checked -> controller.settings.keepScreenOn = checked }
+            isChecked = controller.keepScreenOnEnabled
+            setOnCheckedChangeListener { _, checked -> controller.setKeepScreenOn(checked) }
         }
         activity.findViewById<Switch>(R.id.extraDim).apply {
-            isChecked = controller.settings.extraDim
-            setOnCheckedChangeListener { _, checked -> controller.settings.extraDim = checked }
+            isChecked = controller.extraDimEnabled
+            setOnCheckedChangeListener { _, checked -> controller.setExtraDim(checked) }
         }
         activity.findViewById<Switch>(R.id.floatingInput).apply {
-            isChecked = controller.settings.floatingInput && Settings.canDrawOverlays(activity)
+            isChecked = controller.floatingInputEnabled && Settings.canDrawOverlays(activity)
             setOnCheckedChangeListener { _, checked -> onFloatingToggle(checked) }
         }
         controller.updates.refreshInstallAvailability()

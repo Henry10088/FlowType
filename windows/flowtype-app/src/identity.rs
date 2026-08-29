@@ -62,7 +62,7 @@ impl PcIdentity {
                 )?;
                 stored.protected_key_der = Some(STANDARD.encode(protect(&plaintext)?));
                 stored.key_der = None;
-                fs::write(&path, serde_json::to_vec_pretty(&stored)?)?;
+                crate::atomic_file::write(&path, &serde_json::to_vec_pretty(&stored)?)?;
                 plaintext
             };
             return Ok(Self {
@@ -93,7 +93,7 @@ impl PcIdentity {
             protected_key_der: Some(STANDARD.encode(protect(&identity.key_der)?)),
             spki_sha256: identity.spki_sha256.clone(),
         };
-        fs::write(path, serde_json::to_vec_pretty(&stored)?)?;
+        crate::atomic_file::write(&path, &serde_json::to_vec_pretty(&stored)?)?;
         Ok(identity)
     }
 
@@ -105,7 +105,7 @@ impl PcIdentity {
         let path = data_dir()?.join("identity-v1.json");
         let mut stored: StoredIdentity = serde_json::from_slice(&fs::read(&path)?)?;
         stored.pc_name = name.to_owned();
-        fs::write(path, serde_json::to_vec_pretty(&stored)?)?;
+        crate::atomic_file::write(&path, &serde_json::to_vec_pretty(&stored)?)?;
         Ok(())
     }
 }

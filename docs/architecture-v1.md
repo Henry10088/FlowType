@@ -164,8 +164,11 @@ V1 使用成熟的 ZXing Android 扫描组件，避免自行承担 Camera2 兼�
 
 - 主线程运行 Win32 消息循环。
 - 独立网络线程运行最小特性集 Tokio runtime。
-- UI 与网络通过有界 channel 通信。
-- 网络线程不得直接操作 HWND；UI 更新通过窗口消息投递回主线程。
+- UI 与网络共享受同步保护的 `AppState`；UI 只读取不可变快照并调用类型化命令。
+- 网络线程不得直接操作 HWND；状态变化通过合并后的 `PostMessageW` 投递回主线程。
+- Windows 到 Android 的切换请求使用有界 channel，不允许慢连接无限积压命令。
+- 命名管道 IPC 经 `InjectorDispatcher` 串行化，并在 Tokio 阻塞线程池中执行；同步管道等待不得占用异步网络 worker。
+- 电脑身份、配对和本地设置使用同目录临时文件及写穿透原子替换，失败时保留上一份完整状态。
 
 ### 5.4 主要依赖
 

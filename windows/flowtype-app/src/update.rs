@@ -1383,9 +1383,7 @@ fn load_persisted() -> io::Result<PersistedUpdate> {
 
 fn save_persisted(value: &PersistedUpdate) -> io::Result<()> {
     let path = persisted_path()?;
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, serde_json::to_vec_pretty(value)?)?;
-    fs::rename(temporary, path)
+    crate::atomic_file::write(&path, &serde_json::to_vec_pretty(value)?)
 }
 
 fn parse_version(value: &str) -> Option<(u64, u64, u64)> {

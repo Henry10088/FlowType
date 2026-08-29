@@ -73,7 +73,7 @@ pub fn floating_position() -> Option<(i32, i32)> {
 
 pub fn set_floating_position(position: (i32, i32)) -> io::Result<()> {
     let path = crate::identity::data_dir()?.join(FLOATING_POSITION_FILE);
-    fs::write(path, format!("{},{}", position.0, position.1))
+    crate::atomic_file::write(&path, format!("{},{}", position.0, position.1).as_bytes())
 }
 
 pub fn floating_enabled() -> bool {
@@ -88,7 +88,7 @@ pub fn floating_enabled() -> bool {
 
 pub fn set_floating_enabled(enabled: bool) -> io::Result<()> {
     let path = crate::identity::data_dir()?.join(FLOATING_ENABLED_FILE);
-    fs::write(path, if enabled { "1" } else { "0" })
+    crate::atomic_file::write(&path, if enabled { b"1" } else { b"0" })
 }
 
 struct RegistryKey(HKEY);

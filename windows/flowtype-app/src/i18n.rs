@@ -46,7 +46,7 @@ pub fn language_choice() -> LanguageChoice {
 
 pub fn set_language_choice(choice: LanguageChoice) -> io::Result<()> {
     let path = crate::identity::data_dir()?.join(LANGUAGE_FILE);
-    fs::write(path, choice_value(choice))?;
+    crate::atomic_file::write(&path, choice_value(choice).as_bytes())?;
     LANGUAGE.store(language_code(resolve(choice)), Ordering::Release);
     Ok(())
 }

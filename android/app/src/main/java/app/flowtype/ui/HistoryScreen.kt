@@ -13,28 +13,32 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import app.flowtype.R
-import app.flowtype.FlowTypeApplication
+import app.flowtype.FlowTypeController
 import app.flowtype.data.HistoryEntry
 
 /** Renders persisted input history without owning session or navigation state. */
 class HistoryScreen(
     private val activity: ComponentActivity,
-    private val controller: FlowTypeApplication,
+    private val controller: FlowTypeController,
     private val preparePage: () -> Unit,
     private val applyInsets: () -> Unit,
     private val onBack: () -> Unit,
     private val onOpenInput: (Boolean) -> Unit,
     private val onOpenDetail: (Long) -> Unit,
+    private val isVisible: () -> Boolean,
 ) {
+    private var loadGeneration = 0L
+
     fun show() {
+        val generation = ++loadGeneration
         preparePage()
         activity.setContentView(R.layout.page_history)
         applyInsets()
         activity.findViewById<View>(R.id.back).setOnClickListener { onBack() }
         val list = activity.findViewById<LinearLayout>(R.id.historyList)
-        val entries = controller.history.list()
-        activity.findViewById<View>(R.id.empty).visibility =
-            if (entries.isEmpty()) View.VISIBLE else View.GONE
+        val empty = activity.findViewById<View>(R.id.empty)
+        empty.visibility = View.GONE
+        var entries = emptyList<HistoryEntry>()
         val selected = linkedSetOf<Long>()
         val selectedCount = activity.findViewById<TextView>(R.id.selectedCount)
         val selectAll = activity.findViewById<Button>(R.id.selectAll)
@@ -86,36 +90,51 @@ class HistoryScreen(
                 .setMessage(activity.getString(R.string.confirm_delete_history, selected.size))
                 .setNegativeButton(R.string.cancel, null)
                 .setPositiveButton(R.string.delete) { _, _ ->
-                    controller.history.delete(selected)
-                    show()
+                    controller.deleteHistory(selected) { show() }
                 }
                 .show()
         }
         renderRows()
+        controller.loadHistory { loaded ->
+            if (generation != loadGeneration || !isVisible()) return@loadHistory
+            entries = loaded
+            empty.visibility = if (entries.isEmpty()) View.VISIBLE else View.GONE
+            renderRows()
+        }
     }
 
     fun showDetail(id: Long) {
-        val entry = controller.history.get(id) ?: return onBack()
-        activity.setContentView(R.layout.page_history_detail)
-        applyInsets()
-        activity.findViewById<View>(R.id.back).setOnClickListener { onBack() }
-        activity.findViewById<TextView>(R.id.detailComputer).text = entry.pcName
-        activity.findViewById<TextView>(R.id.detailTime).text = activity.formatTime(entry.completedAt)
-        activity.findViewById<TextView>(R.id.detailText).text = entry.text
-        activity.findViewById<View>(R.id.copy).setOnClickListener {
-            activity.getSystemService(ClipboardManager::class.java).setPrimaryClip(
-                ClipData.newPlainText(activity.getString(R.string.app_name), entry.text),
-            )
-            Toast.makeText(activity, R.string.copied, Toast.LENGTH_SHORT).show()
-        }
-        activity.findViewById<View>(R.id.useAsNew).setOnClickListener {
-            if (controller.replaceWithHistory(entry.text)) onOpenInput(true) else {
-                Toast.makeText(activity, R.string.operation_requires_new_session, Toast.LENGTH_SHORT).show()
+        val generation = ++loadGeneration
+        controller.loadHistoryEntry(id) load@{ entry ->
+            if (generation != loadGeneration || !isVisible()) return@load
+            if (entry == null) {
+                onBack()
+                return@load
             }
-        }
-        activity.findViewById<View>(R.id.delete).setOnClickListener {
-            controller.history.delete(entry.id)
-            onBack()
+            activity.setContentView(R.layout.page_history_detail)
+            applyInsets()
+            activity.findViewById<View>(R.id.back).setOnClickListener { onBack() }
+            activity.findViewById<TextView>(R.id.detailComputer).text = entry.pcName
+            activity.findViewById<TextView>(R.id.detailTime).text = activity.formatTime(entry.completedAt)
+            activity.findViewById<TextView>(R.id.detailText).text = entry.text
+            activity.findViewById<View>(R.id.copy).setOnClickListener {
+                activity.getSystemService(ClipboardManager::class.java).setPrimaryClip(
+                    ClipData.newPlainText(activity.getString(R.string.app_name), entry.text),
+                )
+                Toast.makeText(activity, R.string.copied, Toast.LENGTH_SHORT).show()
+            }
+            activity.findViewById<View>(R.id.useAsNew).setOnClickListener {
+                if (controller.replaceWithHistory(entry.text)) onOpenInput(true) else {
+                    Toast.makeText(
+                        activity,
+                        R.string.operation_requires_new_session,
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            }
+            activity.findViewById<View>(R.id.delete).setOnClickListener {
+                controller.deleteHistory(entry.id, onBack)
+            }
         }
     }
 

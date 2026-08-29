@@ -6,12 +6,12 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import app.flowtype.R
-import app.flowtype.FlowTypeApplication
+import app.flowtype.FlowTypeController
 
 /** Renders computer bindings; mutations are delegated to the application coordinator. */
 class ComputersScreen(
     private val activity: ComponentActivity,
-    private val controller: FlowTypeApplication,
+    private val controller: FlowTypeController,
     private val preparePage: () -> Unit,
     private val applyInsets: () -> Unit,
     private val onBack: () -> Unit,
@@ -27,8 +27,8 @@ class ComputersScreen(
         activity.findViewById<View>(R.id.back).setOnClickListener { onBack() }
         activity.findViewById<View>(R.id.addComputer).setOnClickListener { onAdd() }
         val list = activity.findViewById<LinearLayout>(R.id.computerList)
-        val computers = controller.bindings.list()
         val state = controller.state()
+        val computers = state.computers
         activity.findViewById<View>(R.id.empty).visibility =
             if (computers.isEmpty()) View.VISIBLE else View.GONE
         computers.forEach { binding ->
