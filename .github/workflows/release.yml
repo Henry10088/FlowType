@@ -6,7 +6,7 @@ on:
       release_tag:
         description: "Release tag to create or publish"
         required: true
-        default: "windows-v0.2.4"
+        default: "windows-v0.2.5"
   push:
     tags:
       - "windows-v*"
@@ -298,9 +298,20 @@ jobs:
             if ($signature.Status -notin $acceptableStatuses) { throw "Invalid Authenticode signature: $file ($($signature.Status))" }
             $actual = $signature.SignerCertificate.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToLowerInvariant()
             if ($actual -ne $expected) { throw "Unexpected Authenticode certificate: $file" }
-            "$file`t$($signature.Status)`t$($signature.SignerCertificate.Subject)"
+            "$file`t$($signature.Status)`t$actual`t$($signature.SignerCertificate.Subject)"
           }
           $signatureLines | Set-Content -LiteralPath (Join-Path $metadataDir "FlowType-windows-AUTHENTICODE.txt") -Encoding UTF8
+
+          # Exercise the exact verifier shipped to users against the final
+          # signed installer. Publishing is blocked when the embedded pin or
+          # Authenticode policy differs from the artifact.
+          $client = Join-Path $env:GITHUB_WORKSPACE "windows\target\release\flowtype.exe"
+          $verification = Start-Process -FilePath $client -ArgumentList @(
+            "--verify-release-installer",
+            "`"$($installer.FullName)`""
+          ) -PassThru -Wait
+          if ($verification.ExitCode -ne 0) { throw "FlowType client rejected the signed release installer" }
+
           $hashLines = foreach ($file in $signedFiles) {
             $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
             "$hash  $file"

@@ -25,7 +25,7 @@ use windows::Win32::System::Com::{
     CLSCTX_LOCAL_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
 use windows::core::{GUID, HSTRING};
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{CERT_E_UNTRUSTEDROOT, HWND};
 use windows_sys::Win32::Networking::WinHttp::*;
 use windows_sys::Win32::Security::Cryptography::{
     CERT_SHA256_HASH_PROP_ID, CertGetCertificateContextProperty,
@@ -1090,6 +1090,10 @@ fn verify_installer(path: &Path, asset: &PlatformAsset) -> Result<(), String> {
     verify_authenticode(path)
 }
 
+pub(crate) fn verify_release_installer(path: &Path) -> Result<(), String> {
+    verify_authenticode(path)
+}
+
 fn verify_authenticode(path: &Path) -> Result<(), String> {
     let expected = option_env!("FLOWTYPE_WINDOWS_CERT_SHA256")
         .map(|value| value.replace(':', "").to_ascii_lowercase())
@@ -1108,7 +1112,11 @@ fn verify_authenticode(path: &Path) -> Result<(), String> {
     let mut data: WINTRUST_DATA = unsafe { zeroed() };
     data.cbStruct = size_of::<WINTRUST_DATA>() as u32;
     data.dwUIChoice = WTD_UI_NONE;
-    data.fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN;
+    // The pinned release certificate is the trust anchor. Asking Windows to
+    // trust its self-signed chain would make updates depend on a local
+    // certificate-store change that FlowType deliberately does not perform.
+    data.fdwRevocationChecks = WTD_REVOKE_NONE;
+    data.dwProvFlags = WTD_REVOCATION_CHECK_NONE;
     data.dwUnionChoice = WTD_CHOICE_FILE;
     data.Anonymous = WINTRUST_DATA_0 {
         pFile: &mut file_info,
@@ -1123,7 +1131,7 @@ fn verify_authenticode(path: &Path) -> Result<(), String> {
             (&mut data as *mut WINTRUST_DATA).cast(),
         )
     };
-    let signer_hash = if status == 0 {
+    let signer_hash = if !data.hWVTStateData.is_null() {
         signer_certificate_sha256(data.hWVTStateData)
     } else {
         Err(String::new())
@@ -1136,7 +1144,7 @@ fn verify_authenticode(path: &Path) -> Result<(), String> {
             (&mut data as *mut WINTRUST_DATA).cast(),
         );
     }
-    if status != 0 {
+    if !authenticode_status_is_acceptable(status) {
         return Err(format!(
             "{} (0x{:08x})",
             tr("Authenticode 验证失败", "Authenticode verification failed"),
@@ -1152,6 +1160,10 @@ fn verify_authenticode(path: &Path) -> Result<(), String> {
         .to_owned());
     }
     Ok(())
+}
+
+fn authenticode_status_is_acceptable(status: i32) -> bool {
+    status == 0 || status == CERT_E_UNTRUSTEDROOT
 }
 
 fn signer_certificate_sha256(
@@ -1480,5 +1492,14 @@ mod tests {
         );
         assert!(compare_versions("0.2", "0.1.18").is_none());
         assert!(compare_versions("0.2.0-beta", "0.1.18").is_none());
+    }
+
+    #[test]
+    fn accepts_only_valid_or_pinned_self_signed_authenticode_status() {
+        use windows_sys::Win32::Foundation::TRUST_E_BAD_DIGEST;
+
+        assert!(authenticode_status_is_acceptable(0));
+        assert!(authenticode_status_is_acceptable(CERT_E_UNTRUSTEDROOT));
+        assert!(!authenticode_status_is_acceptable(TRUST_E_BAD_DIGEST));
     }
 }

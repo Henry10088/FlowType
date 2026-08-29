@@ -307,6 +307,18 @@ struct UiSnapshot {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let arguments: Vec<String> = std::env::args().collect();
+    if let Some(index) = arguments
+        .iter()
+        .position(|argument| argument == "--verify-release-installer")
+    {
+        let path = arguments
+            .get(index + 1)
+            .ok_or("missing installer path for release verification")?;
+        update::verify_release_installer(std::path::Path::new(path))
+            .map_err(|error| format!("release installer verification failed: {error}"))?;
+        return Ok(());
+    }
     diagnostics::log("startup");
     let pairing_preview = std::env::args().any(|argument| argument == "--ui-preview-pairing");
     let ui_preview = pairing_preview || std::env::args().any(|argument| argument == "--ui-preview");
