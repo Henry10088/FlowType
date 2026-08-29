@@ -75,7 +75,7 @@
     <string name="a11y_recently_used">, recently used</string>
     <string name="a11y_connected">, connected</string>
     <string name="a11y_disconnected">, disconnected</string>
-    <string name="version_label">Version 0.2.2</string>
+    <string name="version_label">Version 0.2.3</string>
     <string name="input_display">Input &amp; display</string>
     <string name="version_and_updates">Version &amp; updates</string>
     <string name="check_updates">Check for updates</string>
