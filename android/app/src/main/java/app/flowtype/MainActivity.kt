@@ -193,6 +193,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        controller.onUiStarted()
         imeWasVisible = false
         ignoreImeDismissUntil = SystemClock.uptimeMillis() + INPUT_RESUME_GRACE_MS
         controller.observe(observer)
@@ -204,6 +205,7 @@ class MainActivity : ComponentActivity() {
         controller.removeObserver(observer)
         if (page == Screen.INPUT) clearInputWindowSettings()
         if (controller.floatingInputEnabled) FloatingInputService.show(this)
+        controller.onUiStopped()
         super.onStop()
     }
 

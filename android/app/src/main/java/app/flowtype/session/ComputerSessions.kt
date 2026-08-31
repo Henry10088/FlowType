@@ -38,7 +38,9 @@ class ComputerSessions(
     fun saveCurrent(remoteStarted: Boolean) {
         val pcId = activePcId ?: return
         val parked = ParkedSession(current.state(), remoteStarted)
-        if (parked.state.sessionId == null && parked.state.text.isEmpty()) {
+        if (parked.state.sessionId == null && parked.state.text.isEmpty() &&
+            parked.state.replacementSessionId == null
+        ) {
             clear(pcId)
         } else {
             save(pcId, parked)
@@ -61,6 +63,11 @@ class ComputerSessions(
     fun clearCurrent() {
         activePcId?.let(clear)
         current.reset()
+    }
+
+    fun prepareNewSession() {
+        current.resetForReplacement("")
+        saveCurrent(remoteStarted = false)
     }
 
     fun remove(pcId: String) {

@@ -68,6 +68,7 @@ const PORT: u16 = 32187;
 const WM_APP_STATE: u32 = 0x8001;
 const MAX_CONNECTIONS: usize = 32;
 const MAX_CONNECTIONS_PER_IP: usize = 8;
+const MAX_CONTROL_CONNECTIONS_PER_PHONE: usize = 2;
 const MAX_CONNECTION_ATTEMPTS_PER_MINUTE: usize = 30;
 const MAX_PEER_LIMIT_ENTRIES: usize = 1024;
 const MAX_AUTH_MESSAGE_BYTES: usize = 64 * 1024;
@@ -289,7 +290,7 @@ struct AppState {
     next_connection_id: AtomicU64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct RuntimeStatus {
     summary: String,
     connected_phone: Option<String>,
@@ -299,6 +300,15 @@ struct RuntimeStatus {
 
 fn has_active_input(status: &RuntimeStatus) -> bool {
     status.target_name.is_some()
+}
+
+fn update_runtime_status(
+    status: &mut RuntimeStatus,
+    update: impl FnOnce(&mut RuntimeStatus),
+) -> bool {
+    let previous = status.clone();
+    update(status);
+    *status != previous
 }
 
 #[derive(Clone)]
@@ -468,10 +478,14 @@ impl AppState {
     }
 
     fn update_status(&self, update: impl FnOnce(&mut RuntimeStatus)) {
-        if let Ok(mut status) = self.runtime_status.lock() {
-            update(&mut status);
+        let changed = self
+            .runtime_status
+            .lock()
+            .map(|mut status| update_runtime_status(&mut status, update))
+            .unwrap_or(false);
+        if changed {
+            self.notify_ui();
         }
-        self.notify_ui();
     }
 
     fn notify_ui(&self) {
@@ -892,7 +906,7 @@ mod tests {
         AuthMessage, ConnectionLimiter, ImageStart, MAX_CONNECTION_ATTEMPTS_PER_MINUTE,
         MAX_CONNECTIONS_PER_IP, PairedPhone, ReconcileDecision, RuntimeStatus, auth_payload,
         classify_apply_recovery, classify_finish_recovery, deduplicate_paired_phones,
-        has_active_input, upsert_paired_phone, validate_cancel_for_phone,
+        has_active_input, update_runtime_status, upsert_paired_phone, validate_cancel_for_phone,
         validate_resume_for_phone, verify_signature,
     };
 
@@ -908,6 +922,23 @@ mod tests {
 
         status.target_name = Some("Notepad".to_owned());
         assert!(has_active_input(&status));
+    }
+
+    #[test]
+    fn unchanged_runtime_status_does_not_request_another_ui_refresh() {
+        let mut status = RuntimeStatus {
+            summary: "Typing".to_owned(),
+            connected_phone: Some("Phone".to_owned()),
+            target_name: Some("Notepad++".to_owned()),
+            last_error: None,
+        };
+
+        assert!(!update_runtime_status(&mut status, |value| value
+            .last_error =
+            None));
+        assert!(update_runtime_status(&mut status, |value| {
+            value.summary = "Connected".to_owned();
+        }));
     }
 
     #[test]
@@ -963,7 +994,7 @@ mod tests {
         let payload = auth_payload("pc", "phone", "nonce");
         let signature: Signature = signing_key.sign(&payload);
         let auth = AuthMessage {
-            protocol_version: 1,
+            protocol_version: flowtype_core::PROTOCOL_VERSION,
             message_type: "authenticate".to_owned(),
             phone_id: "phone".to_owned(),
             phone_name: "test".to_owned(),
@@ -1036,7 +1067,7 @@ mod tests {
     #[test]
     fn validates_image_transfer_limits_and_phone() {
         let image = ImageStart {
-            protocol_version: 1,
+            protocol_version: flowtype_core::PROTOCOL_VERSION,
             transfer_id: "transfer-1".to_owned(),
             phone_id: "phone".to_owned(),
             mime_type: "image/png".to_owned(),

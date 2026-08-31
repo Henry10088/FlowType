@@ -126,7 +126,7 @@ impl Controller {
                 &context,
                 self.client_id.get(),
                 self.composition.clone(),
-                EditAction::Finish,
+                EditAction::ForceFinish,
             );
         }
         self.composition.clear();
@@ -137,7 +137,12 @@ impl Controller {
     fn handle_command(&self, command: TipCommand) -> TipResponse {
         match command {
             TipCommand::Ping => TipResponse::Ready,
-            TipCommand::Begin { session_id } => self.begin(session_id),
+            TipCommand::Begin {
+                session_id,
+                sequence,
+                full_text,
+                attach_existing,
+            } => self.begin(session_id, sequence, full_text, attach_existing),
             TipCommand::Update {
                 session_id,
                 sequence,
@@ -152,53 +157,29 @@ impl Controller {
         }
     }
 
-    fn begin(&self, session_id: String) -> TipResponse {
+    fn begin(
+        &self,
+        session_id: String,
+        sequence: i64,
+        full_text: String,
+        attach_existing: bool,
+    ) -> TipResponse {
         if self.composition.session_id().as_deref() == Some(&session_id) {
-            return if self.composition.is_terminated() {
+            return if self.composition.is_target_modified() {
                 TipResponse::CompositionTerminated
             } else {
                 TipResponse::Begun { session_id }
             };
         }
-        if self.composition.session_id().is_some() && !self.composition.is_terminated() {
-            // The injector owns the active session. If it is asking for a
-            // new session, any live state belongs to a previous injector
-            // lifetime and must not block the new target.
-            if self.composition.has_composition()
-                && let Some(context) = self.composition.context()
-            {
-                let _ = request_edit(
-                    &context,
-                    self.client_id.get(),
-                    self.composition.clone(),
-                    EditAction::Finish,
-                );
-            }
-            self.composition.clear();
+        if self.composition.session_id().is_some() {
+            // Cancel/finish must close the prior session before a different
+            // session can select a new insertion range. Silently replacing it
+            // would append the phone's full snapshot a second time.
+            return TipResponse::RebindRejected;
         }
         let Some(context) = self.focused_context() else {
             return TipResponse::NoFocus;
         };
-        let rebind_text = self
-            .composition
-            .is_terminated()
-            .then(|| self.composition.text());
-        let rebind_requested = rebind_text.is_some();
-        if request_edit(
-            &context,
-            self.client_id.get(),
-            self.composition.clone(),
-            EditAction::Begin,
-        )
-        .is_err()
-        {
-            self.composition.clear();
-            return if rebind_requested {
-                TipResponse::RebindRejected
-            } else {
-                TipResponse::EditRejected
-            };
-        }
         if self
             .composition
             .start_session(session_id.clone(), context.clone(), self.client_id.get())
@@ -208,21 +189,32 @@ impl Controller {
                 &context,
                 self.client_id.get(),
                 self.composition.clone(),
-                EditAction::Finish,
+                EditAction::ForceFinish,
             );
             self.composition.clear();
-            return if rebind_requested {
-                TipResponse::RebindRejected
-            } else {
-                TipResponse::EditRejected
-            };
+            return TipResponse::EditRejected;
         }
-        if let Some(previous_text) = rebind_text {
-            // A terminated composition was safely rebound at its original
-            // range. Restore its last confirmed snapshot for the first update.
-            // The sequence intentionally starts at zero for the new session.
-            self.composition.applied(0, previous_text);
+        if request_edit(
+            &context,
+            self.client_id.get(),
+            self.composition.clone(),
+            EditAction::Begin {
+                initial_text: full_text.clone(),
+                attach_existing,
+            },
+        )
+        .is_err()
+        {
+            let _ = request_edit(
+                &context,
+                self.client_id.get(),
+                self.composition.clone(),
+                EditAction::ForceFinish,
+            );
+            self.composition.clear();
+            return TipResponse::EditRejected;
         }
+        self.composition.applied(sequence, full_text);
         TipResponse::Begun { session_id }
     }
 
@@ -230,7 +222,7 @@ impl Controller {
         if self.composition.session_id().as_deref() != Some(&session_id) {
             return TipResponse::SessionMismatch;
         }
-        if self.composition.is_terminated() {
+        if self.composition.is_target_modified() {
             return TipResponse::CompositionTerminated;
         }
         let current_sequence = self.composition.sequence();
@@ -261,7 +253,7 @@ impl Controller {
         )
         .is_err()
         {
-            return if self.composition.is_terminated() {
+            return if self.composition.is_target_modified() {
                 TipResponse::CompositionTerminated
             } else {
                 TipResponse::EditRejected
@@ -280,7 +272,7 @@ impl Controller {
         {
             return TipResponse::SessionMismatch;
         }
-        if self.composition.is_terminated() {
+        if self.composition.is_target_modified() {
             return TipResponse::CompositionTerminated;
         }
         let Some(context) = self.composition.context() else {
@@ -314,7 +306,7 @@ impl Controller {
                 &context,
                 self.client_id.get(),
                 self.composition.clone(),
-                EditAction::Finish,
+                EditAction::ForceFinish,
             );
         }
         self.composition.clear();
@@ -323,7 +315,7 @@ impl Controller {
 
     fn query(&self, session_id: String) -> TipResponse {
         if self.controller_session_matches(&session_id) {
-            if self.composition.is_terminated() {
+            if self.composition.is_target_modified() {
                 TipResponse::CompositionTerminated
             } else {
                 TipResponse::SessionActive {

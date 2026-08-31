@@ -1,7 +1,9 @@
 #![allow(non_snake_case)]
 
 mod composition;
+mod diagnostics;
 mod factory;
+mod host;
 mod ipc;
 mod lifetime;
 mod registration;

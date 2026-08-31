@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::MAX_MESSAGE_BYTES;
 
-pub const PIPE_NAME: &str = r"\\.\pipe\flowtype-input-v4";
+pub const PIPE_NAME: &str = r"\\.\pipe\flowtype-input-v5";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -12,6 +12,10 @@ pub enum InjectorRequest {
     Hello,
     BeginSession {
         session_id: String,
+        replaces_session_id: Option<String>,
+        sequence: i64,
+        full_text: String,
+        attach_existing: bool,
     },
     ApplyState {
         session_id: String,
@@ -128,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn serializes_the_v4_handshake_and_session_query() {
+    fn serializes_the_v6_handshake_and_session_query() {
         let hello = InjectorResponse::Hello {
             ipc_version: crate::INJECTOR_IPC_VERSION,
             instance_id: "injector-1".to_owned(),
@@ -146,5 +150,19 @@ mod tests {
             read_message::<InjectorRequest>(&mut Cursor::new(bytes)).unwrap(),
             query,
         );
+
+        let replacement = InjectorRequest::BeginSession {
+            session_id: "new".to_owned(),
+            replaces_session_id: Some("old".to_owned()),
+            sequence: 4,
+            full_text: "current text".to_owned(),
+            attach_existing: true,
+        };
+        let value = serde_json::to_value(replacement).unwrap();
+        assert_eq!(value["type"], "begin_session");
+        assert_eq!(value["replaces_session_id"], "old");
+        assert_eq!(value["sequence"], 4);
+        assert_eq!(value["full_text"], "current text");
+        assert_eq!(value["attach_existing"], true);
     }
 }

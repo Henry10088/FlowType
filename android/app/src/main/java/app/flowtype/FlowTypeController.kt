@@ -8,6 +8,7 @@ import app.flowtype.data.HistoryEntry
 import app.flowtype.data.HistoryStore
 import app.flowtype.data.SettingsStore
 import app.flowtype.data.StorageDispatcher
+import app.flowtype.connectivity.ConnectivityDemand
 import app.flowtype.image.PreparedImage
 import app.flowtype.network.AutoSelectionCoordinator
 import app.flowtype.network.ComputerDiscovery
@@ -74,6 +75,7 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
     private lateinit var discovery: ComputerDiscovery
     private lateinit var controlClients: ControlClientPool
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val connectivityDemand = ConnectivityDemand()
     private val observers = CopyOnWriteArraySet<(UiState) -> Unit>()
     private var currentBinding: ComputerBinding? = null
     private var computers: List<ComputerBinding> = emptyList()
@@ -92,6 +94,10 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
     private var pendingAutoLatest: SnapshotMessage? = null
     private var autoSelectionError: LocalizedText? = null
     private var manualStartPending = false
+    private var connectivityRunning = false
+    private val disconnectInBackground = Runnable {
+        if (!connectivityDemand.required) suspendConnectivity()
+    }
 
     fun start() {
         database = AppDatabase(application)
@@ -126,14 +132,11 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         currentBinding?.let {
             statusText = text(R.string.status_connecting, it.pcName)
         }
-        refreshControlClients()
-        discovery.start()
         drafts.preload(computers.map(ComputerBinding::pcId)) {
             storageReady = true
             currentBinding?.let(::restoreSessionFor)
-            currentBinding?.let(::connect)
-            if (settings.autoSelectComputer && session.sessionId == null) {
-                beginAutoSelection()
+            if (connectivityRunning) {
+                activateCurrentConnectivity()
             } else {
                 notifyChanged()
             }
@@ -236,7 +239,7 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
             resetFailedSession()
         }
         if (session.sessionId == null && text.isNotEmpty()) targetState = null
-        session.onTextChanged(text)?.let { snapshot ->
+        session.onTextChanged(text, startIfNeeded = !manualStartPending)?.let { snapshot ->
             if (autoSelecting) {
                 if (snapshot.type == SnapshotType.START && pendingAutoStart == null) {
                     pendingAutoStart = snapshot
@@ -284,7 +287,7 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         clearAutoSelection()
         syncClient.abandonSession(sessionId)
         currentBinding?.let { addHistory(it, text) }
-        sessions.clearCurrent()
+        sessions.prepareNewSession()
         targetState = null
         showSyncFullText = false
         statusText = currentBinding?.let {
@@ -301,7 +304,8 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         clearAutoSelection()
         if (sessionId != null) syncClient.abandonSession(sessionId)
         if (text.isNotEmpty()) currentBinding?.let { addHistory(it, text) }
-        sessions.clearCurrent()
+        if (sessionId != null) sessions.prepareNewSession() else sessions.clearCurrent()
+        manualStartPending = false
         targetState = null
         showSyncFullText = false
         statusText = currentBinding?.let {
@@ -334,7 +338,7 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
             resetFailedSession()
         }
         targetState = null
-        val localStart = session.startLocalDraft()
+        val localStart = session.startLocalDraft(attachExistingAtCursor = true)
         if (localStart != null) {
             syncClient.send(localStart)
         } else {
@@ -427,12 +431,80 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
     }
 
     fun ensureConnected() {
+        if (!connectivityDemand.required) return
+        resumeConnectivity()
         syncClient.ensureConnected()
         controlClients.ensureConnected()
     }
 
+    fun onUiStarted() {
+        connectivityDemand.activityStarted()
+        resumeConnectivity()
+    }
+
+    fun onUiStopped() {
+        connectivityDemand.activityStopped()
+        scheduleBackgroundDisconnect()
+    }
+
+    fun onFloatingInputOpened() {
+        connectivityDemand.setFloatingInputVisible(true)
+        resumeConnectivity()
+    }
+
+    fun onFloatingInputClosed() {
+        connectivityDemand.setFloatingInputVisible(false)
+        scheduleBackgroundDisconnect()
+    }
+
     private fun refreshControlClients() {
-        controlClients.update(computers, currentBinding?.pcId)
+        if (connectivityRunning) {
+            controlClients.update(computers, currentBinding?.pcId)
+        } else {
+            controlClients.shutdown()
+        }
+    }
+
+    private fun resumeConnectivity() {
+        mainHandler.removeCallbacks(disconnectInBackground)
+        if (connectivityRunning) return
+        connectivityRunning = true
+        discovery.start()
+        refreshControlClients()
+        if (storageReady) activateCurrentConnectivity()
+    }
+
+    private fun activateCurrentConnectivity() {
+        currentBinding?.let(::connect)
+        if (shouldBeginAutoSelection(
+                settings.autoSelectComputer,
+                session.sessionId != null,
+                manualStartPending,
+            )
+        ) {
+            beginAutoSelection()
+        } else {
+            notifyChanged()
+        }
+    }
+
+    private fun scheduleBackgroundDisconnect() {
+        mainHandler.removeCallbacks(disconnectInBackground)
+        if (!connectivityDemand.required) {
+            mainHandler.postDelayed(disconnectInBackground, BACKGROUND_DISCONNECT_DELAY_MS)
+        }
+    }
+
+    private fun suspendConnectivity() {
+        if (!connectivityRunning) return
+        connectivityRunning = false
+        clearAutoSelection()
+        syncClient.shutdown()
+        controlClients.shutdown()
+        discovery.stop()
+        onlinePcIds.clear()
+        connected = false
+        targetState = null
     }
 
     fun saveNow() = saveDraftNow()
@@ -612,27 +684,27 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         connect(binding)
     }
 
-    /**
-     * A rejected update leaves the remote injector unable to accept more
-     * updates for this session. Keep the text, but start the next edit as a
-     * fresh session so recovery does not require clearing app data.
+    /** Keep a rejected session as a local draft until the user explicitly
+     * chooses a new Windows insertion point and synchronizes the full text.
      */
     private fun resetFailedSession() {
         val text = session.currentText
         val oldSessionId = session.sessionId
         clearAutoSelection()
         oldSessionId?.let(syncClient::abandonSession)
-        if (oldSessionId != null || session.finishing) {
-            session.reset()
-            session.replaceLocalDraft(text)
-        }
+        if (oldSessionId != null || session.finishing) session.resetForReplacement(text)
         targetState = null
-        manualStartPending = false
+        manualStartPending = true
         showSyncFullText = text.isNotEmpty()
     }
 
     private fun beginAutoSelection() {
-        if (autoSelecting) {
+        if (autoSelecting || !shouldBeginAutoSelection(
+                settings.autoSelectComputer,
+                session.sessionId != null,
+                manualStartPending,
+            )
+        ) {
             return
         }
         val candidates = computers.filter { it.pairingToken == null }
@@ -722,8 +794,12 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
     }
 
     private fun restoreSessionFor(binding: ComputerBinding) {
-        val restored = sessions.activate(binding.pcId) ?: return
-        restoreQueue(restored)
+        val restored = sessions.activate(binding.pcId)
+        manualStartPending = restoredDraftRequiresExplicitStart(
+            session.sessionId != null,
+            session.currentText.isNotEmpty(),
+        )
+        restored?.let(::restoreQueue)
     }
 
     private fun restoreQueue(restored: ComputerSessions.ParkedSession) {
@@ -752,4 +828,19 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
     private fun onMain(action: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) action() else mainHandler.post(action)
     }
+
+    private companion object {
+        const val BACKGROUND_DISCONNECT_DELAY_MS = 500L
+    }
 }
+
+internal fun shouldBeginAutoSelection(
+    enabled: Boolean,
+    hasActiveSession: Boolean,
+    explicitStartRequired: Boolean,
+): Boolean = enabled && !hasActiveSession && !explicitStartRequired
+
+internal fun restoredDraftRequiresExplicitStart(
+    hasActiveSession: Boolean,
+    hasText: Boolean,
+): Boolean = !hasActiveSession && hasText

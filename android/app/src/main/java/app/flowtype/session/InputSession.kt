@@ -14,6 +14,8 @@ class InputSession(
         val latestSequence: Long,
         val acknowledgedSequence: Long,
         val finishing: Boolean,
+        val replacementSessionId: String? = null,
+        val attachExistingAtCursor: Boolean = false,
     )
 
     var sessionId: String? = null
@@ -28,17 +30,23 @@ class InputSession(
         private set
     var finished: Boolean = false
         private set
+    var replacementSessionId: String? = null
+        private set
+    private var attachExistingAtCursor: Boolean = false
 
-    fun onTextChanged(text: String): SnapshotMessage? {
+    fun onTextChanged(text: String, startIfNeeded: Boolean = true): SnapshotMessage? {
         check(!finishing && !finished) { "session is not editable" }
         if (text == currentText) return null
-        if (sessionId == null && text.isEmpty()) {
+        if (sessionId == null && (text.isEmpty() || !startIfNeeded)) {
             currentText = text
             return null
         }
 
         val type = if (sessionId == null) SnapshotType.START else SnapshotType.UPDATE
-        if (sessionId == null) sessionId = sessionIdFactory()
+        if (sessionId == null) {
+            sessionId = sessionIdFactory()
+            attachExistingAtCursor = false
+        }
         currentText = text
         latestSequence += 1
         return snapshot(type)
@@ -62,10 +70,17 @@ class InputSession(
         check(sessionId != null && !finished) { "session cannot be restarted" }
         val finishAfterRestart = finishing
         val text = currentText
-        reset()
-        replaceLocalDraft(text)
-        val start = startLocalDraft() ?: return emptyList()
+        resetForReplacement(text)
+        val start = startLocalDraft(attachExistingAtCursor = true) ?: return emptyList()
         return if (finishAfterRestart) listOf(start, checkNotNull(finish())) else listOf(start)
+    }
+
+    fun resetForReplacement(text: String = currentText): String? {
+        val replaced = sessionId ?: replacementSessionId
+        reset()
+        replacementSessionId = replaced
+        currentText = text
+        return replaced
     }
 
     fun replaceLocalDraft(text: String) {
@@ -73,9 +88,10 @@ class InputSession(
         currentText = text
     }
 
-    fun startLocalDraft(): SnapshotMessage? {
+    fun startLocalDraft(attachExistingAtCursor: Boolean = false): SnapshotMessage? {
         if (sessionId != null || currentText.isEmpty()) return null
         sessionId = sessionIdFactory()
+        this.attachExistingAtCursor = attachExistingAtCursor
         latestSequence = 1
         return snapshot(SnapshotType.START)
     }
@@ -83,6 +99,10 @@ class InputSession(
     fun acknowledge(ack: AckMessage) {
         if (ack.sessionId != sessionId || ack.appliedSequence < acknowledgedSequence) return
         acknowledgedSequence = minOf(ack.appliedSequence, latestSequence)
+        if (acknowledgedSequence > 0) {
+            replacementSessionId = null
+            attachExistingAtCursor = false
+        }
         if (ack.finished && finishing && acknowledgedSequence == latestSequence) {
             finished = true
         }
@@ -95,6 +115,8 @@ class InputSession(
         acknowledgedSequence = 0
         finishing = false
         finished = false
+        replacementSessionId = null
+        attachExistingAtCursor = false
     }
 
     fun state(): State = State(
@@ -103,6 +125,8 @@ class InputSession(
         latestSequence = latestSequence,
         acknowledgedSequence = acknowledgedSequence,
         finishing = finishing,
+        replacementSessionId = replacementSessionId,
+        attachExistingAtCursor = attachExistingAtCursor,
     )
 
     fun restore(state: State) {
@@ -114,6 +138,8 @@ class InputSession(
         acknowledgedSequence = state.acknowledgedSequence
         finishing = state.finishing
         finished = false
+        replacementSessionId = state.replacementSessionId
+        attachExistingAtCursor = state.attachExistingAtCursor
     }
 
     fun recoverySnapshot(): SnapshotMessage? {
@@ -124,6 +150,8 @@ class InputSession(
             sessionId = id,
             sequence = latestSequence,
             fullText = currentText,
+            replacesSessionId = replacementSessionId,
+            attachExisting = attachExistingAtCursor,
         )
     }
 
@@ -133,5 +161,7 @@ class InputSession(
         sessionId = checkNotNull(sessionId),
         sequence = latestSequence,
         fullText = currentText,
+        replacesSessionId = replacementSessionId,
+        attachExisting = attachExistingAtCursor,
     )
 }

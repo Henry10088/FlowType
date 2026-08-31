@@ -60,6 +60,7 @@ class FloatingInputService : Service() {
     private var panelOpenImage: ImageButton? = null
     private var panelChooser: HorizontalScrollView? = null
     private var panelImeVisible = false
+    private var inputConnectivityClaimed = false
     private val observer: (FlowTypeController.UiState) -> Unit = { render(it) }
 
     override fun onCreate() {
@@ -78,6 +79,7 @@ class FloatingInputService : Service() {
         }
         when (action) {
             ACTION_STOP -> {
+                releaseConnectivity()
                 controller.setFloatingInput(false)
                 stopSelf()
                 return START_NOT_STICKY
@@ -98,12 +100,25 @@ class FloatingInputService : Service() {
     }
 
     override fun onDestroy() {
+        releaseConnectivity()
         controller.removeObserver(observer)
         removeOverlays()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun releaseConnectivity() {
+        if (!inputConnectivityClaimed) return
+        inputConnectivityClaimed = false
+        controller.onFloatingInputClosed()
+    }
+
+    private fun claimConnectivity() {
+        if (inputConnectivityClaimed) return
+        inputConnectivityClaimed = true
+        controller.onFloatingInputOpened()
+    }
 
     private fun showBall() {
         if (ball != null || hiddenByActivity || !Settings.canDrawOverlays(this)) return
@@ -387,6 +402,7 @@ class FloatingInputService : Service() {
         }
         runCatching { windowManager.addView(root, params) }.onSuccess {
             panel = root
+            claimConnectivity()
             panelInput?.requestFocus()
             panelInput?.postDelayed({
                 getSystemService(InputMethodManager::class.java).showSoftInput(panelInput, InputMethodManager.SHOW_IMPLICIT)
@@ -435,6 +451,7 @@ class FloatingInputService : Service() {
     private fun collapsePanel() {
         panelInput?.let { getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(it.windowToken, 0) }
         panel?.let { windowManager.removeView(it) }
+        releaseConnectivity()
         clearPanelReferences()
         showBall()
     }
@@ -490,6 +507,7 @@ class FloatingInputService : Service() {
     private fun removeOverlays() {
         removeBall()
         panel?.let { windowManager.removeView(it) }
+        releaseConnectivity()
         clearPanelReferences()
         removeCloseTarget()
     }

@@ -2,7 +2,7 @@ package app.flowtype.protocol
 
 import org.json.JSONObject
 
-const val PROTOCOL_VERSION: Int = 1
+const val PROTOCOL_VERSION: Int = 2
 const val MAX_MESSAGE_BYTES: Int = 1024 * 1024
 
 enum class SnapshotType(val wireName: String) {
@@ -17,11 +17,16 @@ data class SnapshotMessage(
     val sessionId: String,
     val sequence: Long,
     val fullText: String,
+    val replacesSessionId: String? = null,
+    val attachExisting: Boolean = false,
     val protocolVersion: Int = PROTOCOL_VERSION,
 ) {
     fun validate() {
         require(protocolVersion == PROTOCOL_VERSION) { "unsupported protocol" }
         require(phoneId.isNotBlank() && sessionId.isNotBlank()) { "missing identifier" }
+        require(replacesSessionId == null ||
+            (replacesSessionId.isNotBlank() && replacesSessionId != sessionId)
+        ) { "invalid replacement session" }
         require(sequence > 0) { "sequence must be positive" }
         require(fullText.toByteArray(Charsets.UTF_8).size <= MAX_MESSAGE_BYTES) {
             "message too large"
@@ -159,6 +164,14 @@ object ProtocolCodec {
         .put("session_id", message.sessionId)
         .put("sequence", message.sequence)
         .put("full_text", message.fullText)
+        .apply {
+            if (message.type == SnapshotType.START && message.replacesSessionId != null) {
+                put("replaces_session_id", message.replacesSessionId)
+            }
+            if (message.type == SnapshotType.START && message.attachExisting) {
+                put("attach_existing", true)
+            }
+        }
         .toString()
 
     fun encode(message: ResumeMessage): String = JSONObject()
@@ -208,6 +221,8 @@ object ProtocolCodec {
             sessionId = value.getString("session_id"),
             sequence = value.getLong("sequence"),
             fullText = value.getString("full_text"),
+            replacesSessionId = value.optString("replaces_session_id").ifEmpty { null },
+            attachExisting = value.optBoolean("attach_existing", false),
             protocolVersion = value.getInt("protocol_version"),
         ).also(SnapshotMessage::validate)
     }

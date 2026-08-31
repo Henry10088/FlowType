@@ -13,7 +13,7 @@
 - 建立原生 Kotlin/XML Android 应用，最低 Android 10（API 29）。
 - 建立 Rust workspace，分为核心库、普通权限主程序和注入助手。
 - 固化 WSS JSON V1 消息模型、1 MiB 上限、正数 `int64 sequence` 和稳定错误码。
-- Android 与 Rust 直接读取同一份 `protocol/v1/valid-messages.json` 契约样例。
+- Android 与 Rust 直接读取同一份 `protocol/v2/valid-messages.json` 契约样例。
 - 两端实现完整状态、累计 ACK、完成终态和 Unicode 字素 diff 的核心模型。
 
 ## 自动验证

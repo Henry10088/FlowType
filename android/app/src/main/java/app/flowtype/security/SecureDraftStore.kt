@@ -16,7 +16,7 @@ class SecureDraftStore(
 
     fun save(pcId: String, draft: ComputerSessions.ParkedSession) {
         val state = draft.state
-        if (state.sessionId == null && state.text.isEmpty()) {
+        if (state.sessionId == null && state.text.isEmpty() && state.replacementSessionId == null) {
             clear(pcId)
             return
         }
@@ -26,6 +26,8 @@ class SecureDraftStore(
             .put("latest_sequence", state.latestSequence)
             .put("acknowledged_sequence", state.acknowledgedSequence)
             .put("finishing", state.finishing)
+            .put("replacement_session_id", state.replacementSessionId)
+            .put("attach_existing_at_cursor", state.attachExistingAtCursor)
             .put("remote_started", draft.remoteStarted)
             .toString()
             .toByteArray(Charsets.UTF_8)
@@ -51,6 +53,8 @@ class SecureDraftStore(
                 latestSequence = value.getLong("latest_sequence"),
                 acknowledgedSequence = value.getLong("acknowledged_sequence"),
                 finishing = value.getBoolean("finishing"),
+                replacementSessionId = value.optString("replacement_session_id").ifEmpty { null },
+                attachExistingAtCursor = value.optBoolean("attach_existing_at_cursor", false),
             ),
             remoteStarted = value.optBoolean("remote_started", false),
         )

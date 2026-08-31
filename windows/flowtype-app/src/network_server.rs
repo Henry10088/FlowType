@@ -1,5 +1,7 @@
 use super::*;
 
+const INPUT_SESSION_DISCONNECT_GRACE: Duration = Duration::from_millis(1_500);
+
 pub(super) async fn run_network(
     state: Arc<AppState>,
     endpoint_host: IpAddr,
@@ -9,6 +11,7 @@ pub(super) async fn run_network(
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, PORT)).await?;
     let connection_slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let connection_limiter = ConnectionLimiter::new();
+    let control_limiter = ControlConnectionLimiter::new();
     loop {
         let (stream, peer) = listener.accept().await?;
         let Ok(connection_slot) = Arc::clone(&connection_slots).try_acquire_owned() else {
@@ -19,10 +22,11 @@ pub(super) async fn run_network(
         };
         let state = Arc::clone(&state);
         let tls = tls.clone();
+        let control_limiter = Arc::clone(&control_limiter);
         tokio::spawn(async move {
             let _connection_slot = connection_slot;
             let _peer_slot = peer_slot;
-            if let Err(error) = serve_connection(stream, tls, state).await {
+            if let Err(error) = serve_connection(stream, tls, state, control_limiter).await {
                 eprintln!("connection ended: {error}");
             }
         });
@@ -38,7 +42,7 @@ fn advertise(
     let host = format!("flowtype-{short_id}.local.");
     let properties = [
         ("pc_id", identity.pc_id.as_str()),
-        ("protocol_version", "1"),
+        ("protocol_version", "2"),
     ];
     let service = ServiceInfo::new(
         "_flowtype._tcp.local.",
@@ -56,6 +60,7 @@ async fn serve_connection(
     stream: TcpStream,
     tls: TlsAcceptor,
     state: Arc<AppState>,
+    control_limiter: Arc<ControlConnectionLimiter>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let stream = tokio::time::timeout(CONNECTION_TIMEOUT, tls.accept(stream))
         .await
@@ -107,6 +112,16 @@ async fn serve_connection(
         .await?;
         return Err("authentication failed".into());
     }
+    let is_control = auth.connection_mode.as_deref() == Some("control");
+    let _control_lease = if is_control {
+        Some(
+            control_limiter
+                .try_acquire(&auth.phone_id)
+                .ok_or("too many control connections for phone")?,
+        )
+    } else {
+        None
+    };
     let connection_id = state.next_connection_id.fetch_add(1, Ordering::Relaxed);
     let pc_name = state
         .pc_name
@@ -125,7 +140,6 @@ async fn serve_connection(
         },
     )
     .await?;
-    let is_control = auth.connection_mode.as_deref() == Some("control");
     let _online_lease = (!is_control).then(|| {
         state.mark_online_connection(&auth.phone_id, &auth.phone_name, connection_id);
         OnlineConnectionLease {
@@ -147,6 +161,8 @@ async fn serve_connection(
     // Authentication is also used by short-lived target probes. Do not claim
     // the single input connection until the client sends a real input message.
     let mut active_lease: Option<ActiveConnectionLease> = None;
+    let mut input_session =
+        ConnectionInputSession::new(Arc::clone(&state), auth.phone_id.clone(), connection_id);
     let mut pending_image: Option<ImageStart> = None;
     let mut monitored_session: Option<String> = None;
     let mut target_poll = tokio::time::interval(Duration::from_millis(120));
@@ -224,6 +240,10 @@ async fn serve_connection(
                     }
                 } else {
                     let message: ClientMessage = serde_json::from_value(value)?;
+                    let session_transition = SessionTransition::from_message(&message);
+                    if let Some(session_id) = session_transition.session_id() {
+                        input_session.track(session_id);
+                    }
                     monitored_session = match &message {
                         ClientMessage::Start(snapshot) | ClientMessage::Update(snapshot)
                             if !snapshot.session_id.is_empty() => Some(snapshot.session_id.clone()),
@@ -234,6 +254,11 @@ async fn serve_connection(
                         _ => monitored_session,
                     };
                     handle_client_message(&mut websocket, &state, &auth.phone_id, message).await?;
+                    if session_transition.completes_session()
+                        && let Some(session_id) = session_transition.session_id()
+                    {
+                        input_session.complete(session_id);
+                    }
                 }
             }
             Message::Binary(bytes) => {
@@ -297,6 +322,49 @@ async fn serve_connection(
         }
     }
     Ok(())
+}
+
+struct ControlConnectionLimiter {
+    phones: Mutex<HashMap<String, usize>>,
+}
+
+struct ControlConnectionLease {
+    limiter: Arc<ControlConnectionLimiter>,
+    phone_id: String,
+}
+
+impl ControlConnectionLimiter {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            phones: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn try_acquire(self: &Arc<Self>, phone_id: &str) -> Option<ControlConnectionLease> {
+        let mut phones = self.phones.lock().ok()?;
+        let active = phones.entry(phone_id.to_owned()).or_default();
+        if *active >= MAX_CONTROL_CONNECTIONS_PER_PHONE {
+            return None;
+        }
+        *active += 1;
+        Some(ControlConnectionLease {
+            limiter: Arc::clone(self),
+            phone_id: phone_id.to_owned(),
+        })
+    }
+}
+
+impl Drop for ControlConnectionLease {
+    fn drop(&mut self) {
+        if let Ok(mut phones) = self.limiter.phones.lock()
+            && let Some(active) = phones.get_mut(&self.phone_id)
+        {
+            *active = active.saturating_sub(1);
+            if *active == 0 {
+                phones.remove(&self.phone_id);
+            }
+        }
+    }
 }
 
 fn authenticate_phone(
@@ -446,6 +514,111 @@ struct ActiveConnectionLease {
     state: Arc<AppState>,
     phone_id: String,
     connection_id: u64,
+}
+
+struct ConnectionInputSession {
+    state: Arc<AppState>,
+    phone_id: String,
+    connection_id: u64,
+    session_id: Option<String>,
+}
+
+impl ConnectionInputSession {
+    fn new(state: Arc<AppState>, phone_id: String, connection_id: u64) -> Self {
+        Self {
+            state,
+            phone_id,
+            connection_id,
+            session_id: None,
+        }
+    }
+
+    fn track(&mut self, session_id: &str) {
+        self.session_id = Some(session_id.to_owned());
+    }
+
+    fn complete(&mut self, session_id: &str) {
+        if self.session_id.as_deref() == Some(session_id) {
+            self.session_id = None;
+        }
+    }
+}
+
+impl Drop for ConnectionInputSession {
+    fn drop(&mut self) {
+        let Some(session_id) = self.session_id.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let state = Arc::clone(&self.state);
+        let phone_id = self.phone_id.clone();
+        let connection_id = self.connection_id;
+        runtime.spawn(async move {
+            tokio::time::sleep(INPUT_SESSION_DISCONNECT_GRACE).await;
+            if has_replacement_connection(&state, &phone_id, connection_id) {
+                return;
+            }
+            let _ = state
+                .injector
+                .request(InjectorRequest::CancelInvalidSession { session_id })
+                .await;
+            state.mark_input_finished();
+        });
+    }
+}
+
+#[derive(Clone)]
+enum SessionTransition {
+    None,
+    Active(String),
+    Complete(String),
+}
+
+impl SessionTransition {
+    fn from_message(message: &ClientMessage) -> Self {
+        match message {
+            ClientMessage::Start(snapshot) | ClientMessage::Update(snapshot) => {
+                Self::Active(snapshot.session_id.clone())
+            }
+            ClientMessage::Finish(snapshot) => Self::Complete(snapshot.session_id.clone()),
+            ClientMessage::Resume(resume)
+                if resume.session_state == ClientSessionState::Finishing =>
+            {
+                Self::Complete(resume.session_id.clone())
+            }
+            ClientMessage::Resume(resume) => Self::Active(resume.session_id.clone()),
+            ClientMessage::Cancel(cancel) => Self::Complete(cancel.session_id.clone()),
+            ClientMessage::Probe(_)
+            | ClientMessage::HealthCheck(_)
+            | ClientMessage::SwitchAck(_) => Self::None,
+        }
+    }
+
+    fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::None => None,
+            Self::Active(session_id) | Self::Complete(session_id) => Some(session_id),
+        }
+    }
+
+    fn completes_session(&self) -> bool {
+        matches!(self, Self::Complete(_))
+    }
+}
+
+fn has_replacement_connection(state: &AppState, phone_id: &str, connection_id: u64) -> bool {
+    state
+        .active_connection
+        .lock()
+        .ok()
+        .and_then(|active| {
+            active
+                .as_ref()
+                .map(|active| active.phone_id == phone_id && active.connection_id != connection_id)
+        })
+        .unwrap_or(false)
 }
 
 async fn injector_request_async(
@@ -640,6 +813,9 @@ where
         }
     };
     snapshot.validate().map_err(|_| "invalid snapshot")?;
+    if snapshot.attach_existing && kind != "start" {
+        return Err("only start can attach existing text".into());
+    }
     if snapshot.phone_id != authenticated_phone_id {
         return send_json(
             websocket,
@@ -657,6 +833,10 @@ where
             state,
             InjectorRequest::BeginSession {
                 session_id: snapshot.session_id.clone(),
+                replaces_session_id: snapshot.replaces_session_id.clone(),
+                sequence: snapshot.sequence,
+                full_text: snapshot.full_text.clone(),
+                attach_existing: snapshot.attach_existing,
             },
         )
         .await
@@ -1097,4 +1277,52 @@ fn tls_acceptor(identity: &PcIdentity) -> Result<TlsAcceptor, Box<dyn std::error
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(identity.key_der.clone())),
         )?;
     Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
+#[cfg(test)]
+mod connection_limit_tests {
+    use super::ControlConnectionLimiter;
+
+    #[test]
+    fn limits_control_connections_per_authenticated_phone() {
+        let limiter = ControlConnectionLimiter::new();
+        let first = limiter.try_acquire("phone-a").unwrap();
+        let second = limiter.try_acquire("phone-a").unwrap();
+
+        assert!(limiter.try_acquire("phone-a").is_none());
+        assert!(limiter.try_acquire("phone-b").is_some());
+        drop(first);
+        assert!(limiter.try_acquire("phone-a").is_some());
+        drop(second);
+    }
+}
+
+#[cfg(test)]
+mod session_tracking_tests {
+    use flowtype_core::protocol::{ClientMessage, Snapshot};
+
+    use super::SessionTransition;
+
+    fn snapshot() -> Snapshot {
+        Snapshot {
+            protocol_version: flowtype_core::PROTOCOL_VERSION,
+            phone_id: "phone".to_owned(),
+            session_id: "session".to_owned(),
+            sequence: 1,
+            full_text: "text".to_owned(),
+            replaces_session_id: None,
+            attach_existing: false,
+        }
+    }
+
+    #[test]
+    fn unfinished_connection_tracks_session_for_disconnect_cleanup() {
+        let active = SessionTransition::from_message(&ClientMessage::Update(snapshot()));
+        assert_eq!(active.session_id(), Some("session"));
+        assert!(!active.completes_session());
+
+        let finished = SessionTransition::from_message(&ClientMessage::Finish(snapshot()));
+        assert_eq!(finished.session_id(), Some("session"));
+        assert!(finished.completes_session());
+    }
 }

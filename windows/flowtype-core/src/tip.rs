@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const TIP_PIPE_NAME: &str = r"\\.\pipe\flowtype-tip-v3";
+pub const TIP_PIPE_NAME: &str = r"\\.\pipe\flowtype-tip-v4";
 pub const CLSID_FLOWTYPE_TIP_VALUE: u128 = 0x9a50b266_9e86_4ff4_871b_8d47ad8c658b;
 pub const GUID_FLOWTYPE_PROFILE_VALUE: u128 = 0x567ab276_3af1_4874_8e2c_d47c31d5e46e;
 pub const FLOWTYPE_LANG_ID: u16 = 0x0804;
@@ -18,6 +18,9 @@ pub struct TipHello {
 pub enum TipCommand {
     Begin {
         session_id: String,
+        sequence: i64,
+        full_text: String,
+        attach_existing: bool,
     },
     Update {
         session_id: String,
@@ -59,13 +62,19 @@ pub struct TipSessionModel {
     session_id: Option<String>,
     sequence: i64,
     text: String,
-    terminated: bool,
+    composition_ended: bool,
+    target_modified: bool,
 }
 
 impl TipSessionModel {
-    pub fn begin(&mut self, session_id: &str) -> Result<(), TipResponse> {
+    pub fn begin(
+        &mut self,
+        session_id: &str,
+        sequence: i64,
+        full_text: &str,
+    ) -> Result<(), TipResponse> {
         if self.session_id.as_deref() == Some(session_id) {
-            return if self.terminated {
+            return if self.target_modified {
                 Err(TipResponse::CompositionTerminated)
             } else {
                 Ok(())
@@ -75,9 +84,11 @@ impl TipSessionModel {
             return Err(TipResponse::SessionMismatch);
         }
         self.session_id = Some(session_id.to_owned());
-        self.sequence = 0;
+        self.sequence = sequence;
         self.text.clear();
-        self.terminated = false;
+        self.text.push_str(full_text);
+        self.composition_ended = false;
+        self.target_modified = false;
         Ok(())
     }
 
@@ -90,7 +101,7 @@ impl TipSessionModel {
         if self.session_id.as_deref() != Some(session_id) {
             return Err(TipResponse::SessionMismatch);
         }
-        if self.terminated {
+        if self.target_modified {
             return Err(TipResponse::CompositionTerminated);
         }
         if sequence < self.sequence {
@@ -110,14 +121,18 @@ impl TipSessionModel {
     }
 
     pub fn terminate(&mut self) {
-        self.terminated = true;
+        self.target_modified = true;
+    }
+
+    pub fn end_composition(&mut self) {
+        self.composition_ended = true;
     }
 
     pub fn finish(&mut self, session_id: &str, sequence: i64) -> Result<(), TipResponse> {
         if self.session_id.as_deref() != Some(session_id) || self.sequence != sequence {
             return Err(TipResponse::SessionMismatch);
         }
-        if self.terminated {
+        if self.target_modified {
             return Err(TipResponse::CompositionTerminated);
         }
         self.clear();
@@ -136,7 +151,8 @@ impl TipSessionModel {
         self.session_id = None;
         self.sequence = 0;
         self.text.clear();
-        self.terminated = false;
+        self.composition_ended = false;
+        self.target_modified = false;
     }
 }
 
@@ -163,8 +179,7 @@ mod tests {
     #[test]
     fn full_snapshots_replace_the_active_composition() {
         let mut model = TipSessionModel::default();
-        model.begin("voice").unwrap();
-        assert_eq!(model.update("voice", 1, "现在是八点"), Ok(true));
+        model.begin("voice", 1, "现在是八点").unwrap();
         assert_eq!(model.update("voice", 2, "现在是八点一刻"), Ok(true));
         assert_eq!(model.update("voice", 3, "现在八点十四分"), Ok(true));
         model.finish("voice", 3).unwrap();
@@ -173,8 +188,7 @@ mod tests {
     #[test]
     fn duplicate_snapshots_are_idempotent_but_conflicts_are_rejected() {
         let mut model = TipSessionModel::default();
-        model.begin("voice").unwrap();
-        assert_eq!(model.update("voice", 1, "你好"), Ok(true));
+        model.begin("voice", 1, "你好").unwrap();
         assert_eq!(model.update("voice", 1, "你好"), Ok(false));
         assert_eq!(
             model.update("voice", 1, "不同内容"),
@@ -185,10 +199,9 @@ mod tests {
     #[test]
     fn repeated_begin_for_the_same_session_preserves_the_composition() {
         let mut model = TipSessionModel::default();
-        model.begin("voice").unwrap();
-        model.update("voice", 1, "已有正文").unwrap();
+        model.begin("voice", 1, "已有正文").unwrap();
 
-        model.begin("voice").unwrap();
+        model.begin("voice", 1, "已有正文").unwrap();
 
         assert_eq!(model.update("voice", 2, "修正正文"), Ok(true));
     }
@@ -196,18 +209,29 @@ mod tests {
     #[test]
     fn a_trailing_newline_remains_ordinary_composition_text() {
         let mut model = TipSessionModel::default();
-        model.begin("voice").unwrap();
-
-        assert_eq!(model.update("voice", 1, "第一行\n"), Ok(true));
+        model.begin("voice", 1, "第一行\n").unwrap();
+        model.end_composition();
         assert_eq!(model.update("voice", 2, "第一行\n第二行"), Ok(true));
         model.finish("voice", 2).unwrap();
     }
 
     #[test]
+    fn a_new_session_cannot_replace_an_unfinished_range() {
+        let mut model = TipSessionModel::default();
+        model.begin("voice-1", 1, "已有正文").unwrap();
+        model.end_composition();
+
+        assert_eq!(
+            model.begin("voice-2", 1, "新正文"),
+            Err(TipResponse::SessionMismatch)
+        );
+        assert_eq!(model.update("voice-1", 2, "修正正文"), Ok(true));
+    }
+
+    #[test]
     fn target_termination_is_never_acknowledged_as_applied() {
         let mut model = TipSessionModel::default();
-        model.begin("voice").unwrap();
-        model.update("voice", 1, "输入中").unwrap();
+        model.begin("voice", 1, "输入中").unwrap();
         model.terminate();
         assert_eq!(
             model.update("voice", 2, "修正后"),

@@ -147,6 +147,41 @@ class OutboundQueueTest {
         assertEquals("完整文本", next.snapshot.fullText)
     }
 
+    @Test
+    fun reconnectBeforeRetargetAckRetriesAtomicReplacement() {
+        val queue = OutboundQueue()
+        queue.onConnected()
+        queue.offer(
+            snapshot(1, "完整文本", SnapshotType.START, "new")
+                .copy(replacesSessionId = "old"),
+        )
+        queue.offer(
+            snapshot(2, "修正文本", SnapshotType.UPDATE, "new")
+                .copy(replacesSessionId = "old"),
+        )
+
+        queue.onDisconnected()
+        val retried = queue.onConnected()!!
+
+        assertEquals(SnapshotType.START, retried.snapshot.type)
+        assertEquals("old", retried.snapshot.replacesSessionId)
+        assertEquals("修正文本", retried.snapshot.fullText)
+    }
+
+    @Test
+    fun reconnectBeforeExplicitSyncAckPreservesTheOneTimeAttachmentIntent() {
+        val queue = OutboundQueue()
+        queue.onConnected()
+        queue.offer(snapshot(1, "完整文本").copy(attachExisting = true))
+        queue.offer(snapshot(2, "修正文本").copy(attachExisting = true))
+
+        queue.onDisconnected()
+        val retried = queue.onConnected()!!
+
+        assertEquals(SnapshotType.START, retried.snapshot.type)
+        assertTrue(retried.snapshot.attachExisting)
+    }
+
     private fun snapshot(
         sequence: Long,
         text: String,

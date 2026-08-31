@@ -22,6 +22,14 @@ pub struct Snapshot {
     pub session_id: String,
     pub sequence: i64,
     pub full_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub attach_existing: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,6 +196,13 @@ impl Snapshot {
         if self.phone_id.is_empty() || self.session_id.is_empty() {
             return Err(ValidationError::MissingIdentifier);
         }
+        if self
+            .replaces_session_id
+            .as_ref()
+            .is_some_and(|replaced| replaced.is_empty() || replaced == &self.session_id)
+        {
+            return Err(ValidationError::MissingIdentifier);
+        }
         if self.sequence <= 0 {
             return Err(ValidationError::InvalidSequence);
         }
@@ -276,10 +291,10 @@ mod tests {
 
     #[test]
     fn parses_language_neutral_contract_fixtures() {
-        let json = include_str!("../../../protocol/v1/valid-messages.json");
+        let json = include_str!("../../../protocol/v2/valid-messages.json");
         let values: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
 
-        for value in values.iter().take(3) {
+        for (index, value) in values.iter().take(3).enumerate() {
             let message: ClientMessage = serde_json::from_value(value.clone()).unwrap();
             let snapshot = match message {
                 ClientMessage::Start(value)
@@ -294,6 +309,7 @@ mod tests {
                 }
             };
             snapshot.validate().unwrap();
+            assert_eq!(snapshot.attach_existing, index == 0);
         }
 
         let ack: ServerMessage = serde_json::from_value(values[3].clone()).unwrap();
@@ -303,11 +319,13 @@ mod tests {
     #[test]
     fn rejects_non_positive_sequences() {
         let value = Snapshot {
-            protocol_version: 1,
+            protocol_version: crate::PROTOCOL_VERSION,
             phone_id: "phone".into(),
             session_id: "session".into(),
             sequence: 0,
             full_text: String::new(),
+            replaces_session_id: None,
+            attach_existing: false,
         };
         assert_eq!(value.validate(), Err(ValidationError::InvalidSequence));
     }
@@ -320,7 +338,7 @@ mod tests {
             (ErrorCode::TargetSubmitted, "TARGET_SUBMITTED"),
         ] {
             let message = ServerMessage::Error(ProtocolError {
-                protocol_version: 1,
+                protocol_version: crate::PROTOCOL_VERSION,
                 code,
                 session_id: Some("session".into()),
             });
@@ -335,7 +353,7 @@ mod tests {
     #[test]
     fn parses_session_cancellation() {
         let message: ClientMessage = serde_json::from_str(
-            r#"{"protocol_version":1,"type":"cancel","phone_id":"phone","session_id":"session"}"#,
+            r#"{"protocol_version":2,"type":"cancel","phone_id":"phone","session_id":"session"}"#,
         )
         .unwrap();
 
@@ -348,7 +366,7 @@ mod tests {
     #[test]
     fn validates_target_probe_and_result() {
         let probe = ClientMessage::Probe(super::Probe {
-            protocol_version: 1,
+            protocol_version: crate::PROTOCOL_VERSION,
             phone_id: "phone".into(),
         });
         let value = serde_json::to_value(&probe).unwrap();
@@ -356,7 +374,7 @@ mod tests {
         assert!(matches!(probe, ClientMessage::Probe(value) if value.validate().is_ok()));
 
         let result = ServerMessage::ProbeResult(super::ProbeResult {
-            protocol_version: 1,
+            protocol_version: crate::PROTOCOL_VERSION,
             target_state: super::ProbeState::Ready,
             target_name: Some("VS Code".into()),
             activity_age_ms: Some(42),
@@ -369,7 +387,7 @@ mod tests {
     #[test]
     fn serializes_switch_to_current_computer() {
         let value = serde_json::to_value(ServerMessage::SwitchComputer(SwitchComputer {
-            protocol_version: 1,
+            protocol_version: crate::PROTOCOL_VERSION,
             pc_id: "pc".into(),
             pc_name: "办公室电脑".into(),
             request_id: "request-1".into(),
@@ -384,18 +402,18 @@ mod tests {
     #[test]
     fn validates_health_check_and_switch_ack() {
         let health = ClientMessage::HealthCheck(HealthCheck {
-            protocol_version: 1,
+            protocol_version: crate::PROTOCOL_VERSION,
             phone_id: "phone".into(),
         });
         assert!(matches!(health, ClientMessage::HealthCheck(value) if value.validate().is_ok()));
         let value = serde_json::to_value(ServerMessage::HealthAck(HealthAck {
-            protocol_version: 1,
+            protocol_version: crate::PROTOCOL_VERSION,
         }))
         .unwrap();
         assert_eq!(value["type"], "health_ack");
 
         let ack = ClientMessage::SwitchAck(SwitchAck {
-            protocol_version: 1,
+            protocol_version: crate::PROTOCOL_VERSION,
             request_id: "request-1".into(),
             pc_id: "pc".into(),
             accepted: true,

@@ -117,4 +117,62 @@ class ComputerSessionsTest {
         assertEquals(fallbackBeforeActivation, stored["fallback"])
         assertEquals(winnerBeforeActivation, stored["winner"])
     }
+
+    @Test
+    fun newSessionPersistsTheOldRemoteSessionUntilReplacementStarts() {
+        val stored = mutableMapOf<String, ComputerSessions.ParkedSession>()
+        var nextId = 0
+        val sessions = ComputerSessions(
+            phoneId = "phone",
+            sessionIdFactory = { "session-${++nextId}" },
+            load = stored::get,
+            save = stored::set,
+            clear = stored::remove,
+        )
+        sessions.activate("pc")
+        sessions.current.onTextChanged("旧正文")
+
+        sessions.prepareNewSession()
+
+        assertEquals("session-1", stored["pc"]?.state?.replacementSessionId)
+        val next = sessions.current.onTextChanged("新正文")!!
+        assertEquals("session-1", next.replacesSessionId)
+        assertEquals("session-2", next.sessionId)
+    }
+
+    @Test
+    fun switchingAwayAndBackRetargetsWithoutReinsertingTheRestoredText() {
+        val stored = mutableMapOf<String, ComputerSessions.ParkedSession>()
+        var nextId = 0
+        val sessions = ComputerSessions(
+            phoneId = "phone",
+            sessionIdFactory = { "session-${++nextId}" },
+            load = stored::get,
+            save = stored::set,
+            clear = stored::remove,
+        )
+
+        sessions.activate("a")
+        val first = sessions.current.onTextChanged("一二三四五，上山打老虎。")!!
+        sessions.current.acknowledge(
+            app.flowtype.protocol.AckMessage(
+                first.sessionId,
+                first.sequence,
+                app.flowtype.protocol.ServerSessionState.ACTIVE,
+            ),
+        )
+        sessions.saveCurrent(remoteStarted = true)
+
+        sessions.activate("b")
+        sessions.current.onTextChanged("B 电脑正文")
+        sessions.saveCurrent(remoteStarted = true)
+
+        sessions.activate("a")
+        val replacement = sessions.current.restartAtCurrentCursor().single()
+
+        assertEquals("一二三四五，上山打老虎。", replacement.fullText)
+        assertEquals(first.sessionId, replacement.replacesSessionId)
+        assertNotEquals(first.sessionId, replacement.sessionId)
+        assertTrue(replacement.attachExisting)
+    }
 }

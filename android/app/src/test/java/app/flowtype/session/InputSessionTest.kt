@@ -10,6 +10,22 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class InputSessionTest {
+    @Test
+    fun failedDraftChangesStayLocalUntilExplicitlyStarted() {
+        val session = InputSession("phone") { "session-1" }
+
+        assertNull(session.onTextChanged("语音草稿", startIfNeeded = false))
+        assertNull(session.onTextChanged("语音修正稿", startIfNeeded = false))
+        assertNull(session.sessionId)
+        assertEquals("语音修正稿", session.currentText)
+        assertEquals(0L, session.latestSequence)
+
+        val start = session.startLocalDraft()!!
+        assertEquals(SnapshotType.START, start.type)
+        assertEquals("session-1", start.sessionId)
+        assertEquals("语音修正稿", start.fullText)
+    }
+
     private fun session() = InputSession("phone") { "session-1" }
 
     @Test
@@ -20,6 +36,7 @@ class InputSessionTest {
         assertEquals(SnapshotType.START, message.type)
         assertEquals(1L, message.sequence)
         assertEquals("你好", message.fullText)
+        assertFalse(message.attachExisting)
     }
 
     @Test
@@ -114,7 +131,8 @@ class InputSessionTest {
 
     @Test
     fun finishingSessionCanRestartAtCurrentCursorWithoutLosingText() {
-        val session = session()
+        var nextId = 0
+        val session = InputSession("phone") { "session-${++nextId}" }
         session.onTextChanged("保留的完整文本")
         session.finish()
 
@@ -124,13 +142,17 @@ class InputSessionTest {
         assertEquals(SnapshotType.START, messages[0].type)
         assertEquals(SnapshotType.FINISH, messages[1].type)
         assertEquals("保留的完整文本", messages[0].fullText)
+        assertEquals("session-1", messages[0].replacesSessionId)
+        assertEquals("session-2", messages[0].sessionId)
+        assertTrue(messages[0].attachExisting)
         assertEquals(messages[0].sessionId, messages[1].sessionId)
         assertTrue(session.finishing)
     }
 
     @Test
     fun activeSessionCanMoveToCurrentCursorAndRemainEditable() {
-        val session = session()
+        var nextId = 0
+        val session = InputSession("phone") { "session-${++nextId}" }
         session.onTextChanged("移动后继续输入")
 
         val messages = session.restartAtCurrentCursor()
@@ -138,8 +160,46 @@ class InputSessionTest {
         assertEquals(1, messages.size)
         assertEquals(SnapshotType.START, messages.single().type)
         assertEquals("移动后继续输入", messages.single().fullText)
+        assertEquals("session-1", messages.single().replacesSessionId)
+        assertEquals("session-2", messages.single().sessionId)
         assertEquals(1L, messages.single().sequence)
+        assertTrue(messages.single().attachExisting)
         assertFalse(session.finishing)
-        assertEquals(SnapshotType.UPDATE, session.onTextChanged("移动后继续输入。")!!.type)
+        val update = session.onTextChanged("移动后继续输入。")!!
+        assertEquals(SnapshotType.UPDATE, update.type)
+        assertEquals("session-1", update.replacesSessionId)
+
+        session.acknowledge(AckMessage("session-2", 2, ServerSessionState.ACTIVE))
+        assertNull(session.replacementSessionId)
+    }
+
+    @Test
+    fun pendingReplacementSurvivesStatePersistenceBeforeStartAck() {
+        var nextId = 0
+        val original = InputSession("phone") { "session-${++nextId}" }
+        original.onTextChanged("原位置")
+        original.restartAtCurrentCursor()
+
+        val restored = InputSession("phone") { "unused" }
+        restored.restore(original.state())
+
+        val recovery = restored.recoverySnapshot()!!
+        assertEquals("session-1", recovery.replacesSessionId)
+        assertEquals("session-2", recovery.sessionId)
+        assertTrue(recovery.attachExisting)
+    }
+
+    @Test
+    fun explicitLocalDraftStartChecksOnlyTheNewCursor() {
+        val session = session()
+        session.replaceLocalDraft("已有草稿")
+
+        val start = session.startLocalDraft(attachExistingAtCursor = true)!!
+        val update = session.onTextChanged("已有草稿修正")!!
+
+        assertTrue(start.attachExisting)
+        assertTrue(update.attachExisting)
+        session.acknowledge(AckMessage("session-1", 2, ServerSessionState.ACTIVE))
+        assertFalse(session.state().attachExistingAtCursor)
     }
 }

@@ -123,12 +123,12 @@ windows/flowtype-core/      Core protocol definitions, sequence state, and Unico
 windows/flowtype-app/       Windows main application, WSS server, and Win32 UI
 windows/flowtype-injector/  Elevated text injection service and TSF coordinator
 windows/flowtype-tip/       Windows Text Services Framework (TSF) component
-protocol/v1/                Language-neutral protocol contracts and test fixtures
+protocol/v2/                Language-neutral protocol contracts and test fixtures
 docs/                       Product requirements, architecture, security model, and roadmap
 installer/                  Inno Setup packaging scripts
 ```
 
-For deeper technical details, explore the [V1 Product Requirements](docs/requirements-v1.md), [V1 Architecture](docs/architecture-v1.md), [UI Architecture](docs/ui-architecture.md), and [Protocol v1 Specification](protocol/v1/README.md).
+For deeper technical details, explore the [V1 Product Requirements](docs/requirements-v1.md), [V1 Architecture](docs/architecture-v1.md), [UI Architecture](docs/ui-architecture.md), and [Protocol v2 Specification](protocol/v2/README.md).
 
 <details>
 <summary><strong>Build from Source</strong></summary>

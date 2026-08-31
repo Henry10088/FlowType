@@ -16,11 +16,15 @@ Android 的 `versionCode` 必须在每次 Android 发布时严格递增。Window
 
 当前版本：Windows `0.2.7`；Android `0.2.3`，`versionCode=23`。
 
-本次从旧工程标识迁移到 FlowType 会更换 Android applicationId、绑定 URI、认证前缀、mDNS 服务名和本地 IPC 名称；JSON 消息结构未变化，因此协议字段版本仍为 1。该迁移是 V1 内测阶段的兼容性断点，旧版本必须卸载并重新绑定，不承诺跨版本互通。
+当前 Android-Windows 网络协议为 v2。v2 的 `start` 可携带待替换的旧会话 ID，使“电脑端已编辑后同步到新光标”在取消消息丢失、断线和 Android 进程恢复后仍可原子重试。该变更不兼容 v1，两端必须同时更新。
 
 ## 协议版本
 
 网络协议版本独立于应用版本。只有改变协议兼容性时才提升协议版本；普通 UI、输入法、图片和稳定性改动不修改协议版本。
+
+Windows 的两层本地 IPC 也分别维护独立版本：主程序与 Injector 使用 `INJECTOR_IPC_VERSION`，Injector 与进程内 TIP 使用 `TIP_IPC_VERSION`。消息字段、状态机语义、连接生命周期或失败恢复规则发生不兼容变化时，必须提升对应 IPC 版本，不能用应用版本或“消息仍能反序列化”代替兼容性判断。
+
+TIP DLL 被文本宿主加载后通常要等宿主退出才能卸载。Injector 必须拒绝不同 `TIP_IPC_VERSION` 的驻留组件，并保持隔离连接以阻止旧组件频繁重连；不得向不兼容组件发送 `Begin` 或全文快照。发布前需要同时验证旧宿主仍驻留和新宿主首次启动两种升级场景，并用真实文本宿主覆盖换行导致组合态结束后继续全文替换的场景。
 
 ## 本地提交与远程发布
 
@@ -46,3 +50,4 @@ Android 的 `versionCode` 必须在每次 Android 发布时严格递增。Window
 2. 运行 `scripts\verify-version.ps1 -Platform Windows` 或 `-Platform Android`，确认目标平台版本高于其最近一次发布标签。
 3. 只运行目标平台测试、签名构建和产物校验。
 4. 使用目标平台标签 `windows-vX.Y.Z` 或 `android-vX.Y.Z` 触发对应 GitHub Release。
+5. Windows TIP 或 Injector 行为有变化时，运行同一连接的 `Begin -> Update* -> Finish` 回归和真实文本宿主测试；若兼容语义变化，先提升对应本地 IPC 版本，再验证旧驻留 DLL 被隔离且不会重连刷日志。

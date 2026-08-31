@@ -24,8 +24,6 @@ $androidCode = Read-RequiredMatch "android/app/build.gradle.kts" '^\s*versionCod
 $androidLabelVersion = Read-RequiredMatch "android/app/src/main/res/values/strings.xml" 'name="version_label">[^0-9]*([0-9]+\.[0-9]+\.[0-9]+)' "Android displayed version"
 $androidZhLabelVersion = Read-RequiredMatch "android/app/src/main/res/values-zh/strings.xml" 'name="version_label">[^0-9]*([0-9]+\.[0-9]+\.[0-9]+)' "Android Chinese displayed version"
 $installerVersion = Read-RequiredMatch "installer/flowtype.iss" '^#define AppVersion "([^" ]+)"' "installer version"
-$readmeVersion = Read-RequiredMatch "README.md" '^.*?([0-9]+\.[0-9]+\.[0-9]+)' "README version"
-$readmeZhVersion = Read-RequiredMatch "README.zh-CN.md" '^.*?([0-9]+\.[0-9]+\.[0-9]+)' "Chinese README version"
 $latestTagPattern = switch ($Platform) {
     "Windows" { "windows-v[0-9]*" }
     "Android" { "android-v[0-9]*" }
@@ -55,17 +53,11 @@ if ($Platform -eq "Windows") {
         throw "Android displayed version mismatch: versionName=$androidVersion, English=$androidLabelVersion, Chinese=$androidZhLabelVersion"
     }
 } else {
-    $versions = @{
-        "Cargo" = $cargoVersion
-        "Android" = $androidVersion
-        "Android displayed" = $androidLabelVersion
-        "Android Chinese displayed" = $androidZhLabelVersion
-        "Installer" = $installerVersion
+    if ($installerVersion -ne $cargoVersion) {
+        throw "Windows version mismatch: Cargo=$cargoVersion, Installer=$installerVersion"
     }
-    $mismatches = $versions.GetEnumerator() | Where-Object { $_.Value -ne $cargoVersion }
-    if ($mismatches) {
-        $details = ($versions.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ", "
-        throw "Version mismatch: $details"
+    if ($androidLabelVersion -ne $androidVersion -or $androidZhLabelVersion -ne $androidVersion) {
+        throw "Android displayed version mismatch: versionName=$androidVersion, English=$androidLabelVersion, Chinese=$androidZhLabelVersion"
     }
 }
 

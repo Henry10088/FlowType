@@ -2,7 +2,7 @@
 
 [简体中文](security-model.zh-CN.md)
 
-This document describes the security properties implemented by FlowType protocol v1. It is an implementation guide, not a third-party security audit or a claim that a compromised phone or PC can be made safe.
+This document describes the security properties implemented by FlowType protocol v2. It is an implementation guide, not a third-party security audit or a claim that a compromised phone or PC can be made safe.
 
 ## Key security assurances
 
@@ -114,7 +114,7 @@ This model is important for voice input: an Android input method may revise, rep
 
 Image clipboard transfer uses the same authenticated WSS connection. Its header includes the byte length and SHA-256 digest. Windows verifies the digest, encoded format, byte limits, decoded dimensions, and pixel limit before replacing the clipboard.
 
-For the protocol contract and message limits, see [FlowType protocol v1](../protocol/v1/README.md).
+For the protocol contract and message limits, see [FlowType protocol v2](../protocol/v2/README.md).
 
 ## Local key and content storage
 
@@ -134,6 +134,7 @@ Plaintext necessarily exists in application memory while text is displayed or sy
 - The Windows TLS identity private key is encrypted using Windows DPAPI for the current user before it is written to disk.
 - The certificate, public key, computer ID, paired phone public keys, device names, and pairing timestamps are not secrets. They are stored under the current user's application data.
 - Windows does not maintain a completed-input history. The active text exists in the main process and Injector memory while a session is being synchronized.
+- When the user selects Sync at a new cursor, the in-process TIP reads only the immediately preceding span whose length equals the complete Android text, solely for an exact duplicate check. That span stays on the PC, is not persisted, and is never logged. FlowType does not scan the target document at other times.
 - Injector diagnostics record process IDs, sequence numbers, text lengths, and errors, but not the input text itself.
 
 DPAPI protects the private key at rest within the Windows user boundary. It does not protect against an attacker already running with that user's credentials or administrator access.
@@ -145,10 +146,10 @@ FlowType separates the network-facing application from the component that needs 
 - `flowtype.exe` runs with normal user privileges and owns the UI, WSS server, TLS identity, pairing records, and protocol state.
 - `flowtype-injector.exe` runs elevated. It has no network listener and does not hold the long-lived TLS or phone pairing keys.
 - In installed builds, the Injector is launched through a registered scheduled task rather than accepting an arbitrary elevated command line.
-- The main app and Injector communicate over the `flowtype-input-v4` named pipe. Its DACL permits only the current user, Administrators, and SYSTEM.
+- The main app and Injector communicate over the `flowtype-input-v5` named pipe. Its DACL permits only the current user, Administrators, and SYSTEM.
 - The Injector checks the client process ID and installed main-program path. The main app checks the server process path, reported binary path, IPC version, instance ID, and elevated state.
 - IPC supports a fixed set of message types with a 1 MiB limit. It does not expose arbitrary command, script, or path execution.
-- The Injector and the target-process Text Services component use a separate `flowtype-tip-v3` IPC channel and reject mismatched component versions.
+- The Injector and the target-process Text Services component use a separate `flowtype-tip-v4` IPC channel and reject mismatched IPC versions.
 
 These controls reduce the exposed elevated surface. They are not a sandbox and do not attempt to defend against a Windows administrator, who is already inside the operating-system trust boundary.
 

@@ -123,12 +123,12 @@ windows/flowtype-core/      核心协议定义、序列号状态机与 Unicode �
 windows/flowtype-app/       Windows 主程序、WSS 服务端与 Win32 UI
 windows/flowtype-injector/  高权限文本注入服务与 TSF 协调器
 windows/flowtype-tip/       Windows 文本服务框架 (TSF) 核心组件
-protocol/v1/                跨语言协议契约与测试 Fixtures
+protocol/v2/                跨语言协议契约与测试 Fixtures
 docs/                       产品需求、系统架构、安全模型与开发规划
 installer/                  Inno Setup 安装包打包脚本
 ```
 
-技术资料建议从 [V1 产品需求](docs/requirements-v1.md)、[V1 技术方案](docs/architecture-v1.md)、[UI 架构](docs/ui-architecture.md)以及[协议 v1 约定](protocol/v1/README.md)开始阅读。
+技术资料建议从 [V1 产品需求](docs/requirements-v1.md)、[V1 技术方案](docs/architecture-v1.md)、[UI 架构](docs/ui-architecture.md)以及[协议 v2 约定](protocol/v2/README.md)开始阅读。
 
 <details>
 <summary><strong>从源码构建</strong></summary>

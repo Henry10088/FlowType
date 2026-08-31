@@ -2,6 +2,8 @@ package app.flowtype.protocol
 
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.json.JSONArray
 
@@ -16,6 +18,10 @@ class ProtocolTest {
             val message = ProtocolCodec.decodeSnapshot(expected.toString())
             assertEquals(expected.getString("type"), message.type.wireName)
             assertEquals(expected.getString("full_text"), message.fullText)
+            if (index == 0) {
+                assertEquals(expected.getString("replaces_session_id"), message.replacesSessionId)
+                assertTrue(message.attachExisting)
+            }
         }
 
         val ack = ProtocolCodec.decodeServer(fixtures.getJSONObject(3).toString())
@@ -32,6 +38,43 @@ class ProtocolTest {
             sequence = 1L,
             fullText = "你好\nWindows",
         ).validate()
+    }
+
+    @Test
+    fun retargetStartCarriesTheReplacedSession() {
+        val encoded = ProtocolCodec.encode(
+            SnapshotMessage(
+                type = SnapshotType.START,
+                phoneId = "phone",
+                sessionId = "new",
+                sequence = 1,
+                fullText = "完整正文",
+                replacesSessionId = "old",
+                attachExisting = true,
+            ),
+        )
+        val decoded = ProtocolCodec.decodeSnapshot(encoded)
+
+        assertEquals("old", decoded.replacesSessionId)
+        assertEquals("old", org.json.JSONObject(encoded).getString("replaces_session_id"))
+        assertTrue(decoded.attachExisting)
+        assertTrue(org.json.JSONObject(encoded).getBoolean("attach_existing"))
+    }
+
+    @Test
+    fun updateNeverRequestsANewCursorAttachment() {
+        val encoded = ProtocolCodec.encode(
+            SnapshotMessage(
+                type = SnapshotType.UPDATE,
+                phoneId = "phone",
+                sessionId = "session",
+                sequence = 2,
+                fullText = "修正正文",
+                attachExisting = true,
+            ),
+        )
+
+        assertFalse(org.json.JSONObject(encoded).has("attach_existing"))
     }
 
     @Test
@@ -63,7 +106,7 @@ class ProtocolTest {
         assertEquals("probe", org.json.JSONObject(json).getString("type"))
 
         val message = ProtocolCodec.decodeServer(
-            """{"protocol_version":1,"type":"probe_result","target_state":"ready","target_name":"VS Code","activity_age_ms":42}""",
+            """{"protocol_version":2,"type":"probe_result","target_state":"ready","target_name":"VS Code","activity_age_ms":42}""",
         )
         require(message is ServerMessage.ProbeResult)
         assertEquals(ProbeState.READY, message.value.targetState)
@@ -73,7 +116,7 @@ class ProtocolTest {
     @Test
     fun decodesSwitchToCurrentComputer() {
         val message = ProtocolCodec.decodeServer(
-            """{"protocol_version":1,"type":"switch_computer","pc_id":"pc","pc_name":"办公室电脑","request_id":"request-1"}""",
+            """{"protocol_version":2,"type":"switch_computer","pc_id":"pc","pc_name":"办公室电脑","request_id":"request-1"}""",
         )
         require(message is ServerMessage.SwitchComputer)
         assertEquals("pc", message.value.pcId)
@@ -86,7 +129,7 @@ class ProtocolTest {
         val health = ProtocolCodec.encode(HealthCheckMessage("phone"))
         assertEquals("health_check", org.json.JSONObject(health).getString("type"))
         require(
-            ProtocolCodec.decodeServer("""{"protocol_version":1,"type":"health_ack"}""")
+            ProtocolCodec.decodeServer("""{"protocol_version":2,"type":"health_ack"}""")
                 is ServerMessage.HealthAck,
         )
 
@@ -101,7 +144,7 @@ class ProtocolTest {
     @Test
     fun decodesInputServiceRecoveryRequired() {
         val message = ProtocolCodec.decodeServer(
-            """{"protocol_version":1,"type":"error","code":"RECOVERY_REQUIRED","session_id":"voice"}""",
+            """{"protocol_version":2,"type":"error","code":"RECOVERY_REQUIRED","session_id":"voice"}""",
         )
 
         require(message is ServerMessage.Error)
@@ -112,7 +155,7 @@ class ProtocolTest {
     @Test
     fun decodesTargetSubmitted() {
         val message = ProtocolCodec.decodeServer(
-            """{"protocol_version":1,"type":"error","code":"TARGET_SUBMITTED","session_id":"voice"}""",
+            """{"protocol_version":2,"type":"error","code":"TARGET_SUBMITTED","session_id":"voice"}""",
         )
 
         require(message is ServerMessage.Error)

@@ -213,7 +213,7 @@ V1 使用成熟的 ZXing Android 扫描组件，避免自行承担 Camera2 兼�
 
 ```text
 hello()
-begin_session(session_id)
+begin_session(session_id, replaces_session_id?, sequence, full_text, attach_existing)
 apply_state(session_id, sequence, full_text)
 finish_session(session_id, sequence)
 query_session(session_id)
@@ -223,7 +223,7 @@ cancel_invalid_session(session_id)
 
 `cancel_invalid_session` 只清理助手内存状态，不向目标窗口发送删除或恢复操作。
 
-本地协议与 Android 网络协议独立演进：Android-Windows WSS 使用 `protocol_version = 1`，主程序到助手使用 `flowtype-input-v4` / `INJECTOR_IPC_VERSION = 4`，助手到 TIP 使用 `flowtype-tip-v3` / `TIP_IPC_VERSION = 3`。TIP 握手同时核对组件版本，旧进程或旧 DLL 不能接入新管道。
+本地协议与 Android 网络协议独立演进：Android-Windows WSS 使用 `protocol_version = 2`，主程序到助手使用稳定命名管道 `flowtype-input-v5` / `INJECTOR_IPC_VERSION = 6`，助手到 TIP 使用稳定命名管道 `flowtype-tip-v4` / `TIP_IPC_VERSION = 8`。TIP 握手以 IPC 版本作为兼容边界；应用版本只用于诊断，旧进程或旧 DLL 不能接入新管道。管道名保持稳定，使已驻留的旧 TIP 能完成握手并被隔离，而不是持续重连。
 
 ## 7. 输入后端与会话租约
 
@@ -238,8 +238,10 @@ cancel_invalid_session(session_id)
 ### 7.2 TSF 状态应用
 
 1. `begin_session` 捕获当前前台 HWND、PID 和 GUI 线程 ID。
-2. 注入助手在目标 TIP 的焦点 `ITfContext` 调用 `StartComposition`；在 1.5 秒发现窗口内重试首选目标线程。仍无法建立时明确停止本次同步并保留手机全文，不使用按键回退。
+2. 注入助手把首份序号和全文随 `Begin` 交给目标 TIP，在焦点 `ITfContext` 的一个同步编辑事务中选择范围、应用首份正文并调用 `StartComposition`；在 1.5 秒发现窗口内重试首选目标线程。仍无法建立时明确停止本次同步并保留手机全文，不使用按键回退。
 3. TSF 通过 `ITfRange::SetText` 替换组合范围，承载中文、换行、emoji 和非 BMP 字符，不切换用户当前键盘输入法。
+   组合范围使用独立的 `ITfRange::Clone()` 保存，并设置起点向后、终点向前的重力；生成光标范围时再次独立克隆。保存范围失效后立即结束会话，不自动根据当前光标猜测原输入位置。
+   只有用户在新光标明确点击“同步”时，Android 的新 `start` 才携带 `attach_existing=true`。TIP 在折叠光标处只向前读取与 Android 完整正文等长的 UTF-16：完全一致时接管紧邻光标的最后一段且不写入；不一致时在原光标插入全文。它不继续向前清理重复，不做部分或模糊匹配；选区不执行向前检查。已有有效范围、自动首次输入、普通更新和重连都不执行该判断。
 4. `finish_session` 提交 TSF 组合，FlowType Speech Profile 保持激活和空闲。
 5. ACK 只在 TSF 组合范围编辑成功后返回；不能确认目标状态时不得 ACK，也不得改用另一种注入方式继续写入。
 
@@ -316,17 +318,13 @@ nonce 每次连接重新生成，防止重放。
 
 文本流量不值得为 CBOR 增加跨语言调试成本。图片使用 `image_start` JSON 元数据帧和紧随其后的独立二进制帧，复用现有认证后的 WSS 连接。
 
-### 9.3 文件传输
+### 9.2 图片剪贴板传输
 
-文件传输不复用文字 WebSocket 的正文通道，避免大文件排队影响实时输入。控制面继续使用已认证的 WSS，负责批次清单、能力协商、接受/拒绝、进度、取消和断点状态；正文使用独立 HTTPS/TLS 文件通道流式传输。Windows 作为文件服务端，手机上传使用 `POST`，电脑发送时手机通过出站 `GET` 下载，因此 Android 不需要开放入站端口。
+Android 在用户拍照或选择单张图片后发送 `image_start` 元数据和一个二进制帧。Windows 校验类型、尺寸、长度和 SHA-256 后写入当前用户剪贴板，不自动粘贴、不进入文字历史。图片复用已认证 WSS，但与文字会话状态相互独立，同一连接只允许一张图片在途。
 
-文件批次支持多文件、目录和 Windows 资源管理器拖放。清单使用 64 位大小、相对路径、文件类型、修改时间和 SHA-256，不设置软件层面的大小上限。接收端将正文写入临时文件并持久化已确认偏移；重连后跳过已完成文件，从当前文件偏移继续，完成哈希校验后再落盘。符号链接、Junction 和 Reparse Point 默认不跟随，文件冲突自动改名而不覆盖。
+通用双向文件、目录、拖放和批次断点续传尚未实现，也不属于 V1 架构或验收范围。后续方向见 [通用文件传输后续设计](file-transfer-design-future.md)。
 
-手机主动发送的批次由 Windows 自动保存到配置目录；电脑发送到手机时由 Android 对整个批次确认一次并选择目标目录。Android 在后台使用前台服务保持传输并显示通知。详细产品边界见 [文件传输设计基线](file-transfer-design-v1.md)。
-
-局域网不视为可信边界。TLS 1.3、证书 SPKI 固定、绑定身份认证和每批次一次性令牌始终启用；“安全传输”只是默认开启的增强模式，不允许切换为明文或绕过绑定认证。
-
-### 9.2 会话状态
+### 9.3 会话状态
 
 ```text
 idle
@@ -343,9 +341,10 @@ idle
 用户界面不直接展示这些内部名称，而是映射为具体原因和操作提示。
 
 - 正常连接时，第一次非空变化创建 `session_id`，`start` 同时携带第一份完整文本和 `sequence`。
+- 目标被电脑端编辑后，Android 保留全文并创建新会话；新 `start` 携带持久化的 `replaces_session_id`。Injector 串行校验并释放完全匹配的旧会话后才捕获当前光标，因此取消消息丢失或进程恢复不会把新会话永久卡在 `session_busy`，也不能误替换其他会话。
 - `waiting_target` 和 `reconnecting` 期间 Android 继续编辑并保存最新完整状态。
 - `finishing` 仅作为内部结束状态：用户点击“新会话”后立即保存本地历史、释放旧租约并创建新的空会话，不等待 Windows ACK；`finish`/`cancel` 仍可作为内部协议消息，但不直接显示给用户。
-- “同步”不结束会话，只发送当前完整状态；目标失效、电脑切换或离线恢复时，同一命令从当前光标同步全文。已确认应用且文本未变化时命令置灰。
+- “同步”不结束会话，只发送当前完整状态；目标失效、电脑切换或离线恢复时，同一命令从当前光标同步全文，并为新 `start` 设置一次性的 `attach_existing`。已确认应用且文本未变化时命令置灰。
 - 活跃会话删除到空文本后仍可点击“新会话”结束；空状态应用成功后关闭会话，但不创建空历史。
 - 电脑离线时产生的新草稿没有可验证目标，只保存在 Android。本次连接恢复后必须由用户放好光标并点击“同步”，不能自动锁定碰巧处于前台的窗口。
 - Windows 主程序、注入助手或目标进程失效后进入 `target_invalid`，只允许用户从新光标创建新会话。
@@ -376,8 +375,19 @@ idle
 - 最后一次 Windows 响应超过 30 秒后，首次文本变化先发轻量健康检查并紧接着发送正文；1.5 秒内没有健康 ACK、正文 ACK 或目标消息则立即重连。该能力由 `ready.capabilities` 协商，旧版本继续只用 Ping/Pong。
 - 重连只重置传输层，保留会话、序号、单条 in-flight 和最新 pending；恢复后发送 `resume + 最新完整文本`。
 - 同一电脑与手机只保留一条已认证连接；新连接认证成功后，旧连接不再允许提交业务消息。
+- 服务端同时限制全局连接数、单 IP 并发与速率；每个已认证手机最多保留 2 条 `control` 连接，以允许重连交叠但不能占满全局连接池。
 
 V1 不持久化 Windows 输入事务日志，也不承诺跨 Windows 主程序、注入助手或电脑重启自动实现恰好一次恢复。此类情况下保留 Android 全文，由用户在新光标处重新输入。
+
+Windows 主程序与 Injector 的诊断日志分别限制为 1 MiB，超限前轮转并只保留一个同等有界的备份；日志不记录正文、二维码、签名或密钥。
+
+Windows 输入链路必须保持以下性能不变量：
+
+- 当前用户只运行一份 Injector；单实例标识跨应用版本保持稳定，覆盖升级不能产生并行实例。
+- 全局键盘和鼠标钩子只在活动手机输入会话中安装，会话完成、取消、失败或 IPC 断开后立即卸载；空闲 Injector 不参与系统输入事件。
+- 高频服务轮询只读取 Injector 本地会话状态；访问目标应用 TSF/UI 线程的状态查询频率不高于每秒一次。
+- 成功的逐次全文更新不执行同步诊断日志写入；只记录会话生命周期、兼容性边界和错误。
+- 正文 WebSocket 异常断开时保留 1.5 秒替代连接窗口；同一手机在窗口内重新认证则继续原会话，超时后主动结束 Injector/TSF 会话并释放所有输入资源。
 
 ## 10. 局域网发现
 
@@ -453,9 +463,6 @@ V1 使用 Inno Setup：
 - Rust crate 关闭默认功能，只启用实际需要的后端和算法。
 - Release 使用 LTO、单 codegen unit、`panic=abort` 和符号剥离。
 - 安装包使用压缩后的 Release 产物，不附带调试符号。
-- 文件传输使用 Android 系统文件选择器、现有 OkHttp/TLS 和 Rust 现有 TLS 基础，不引入媒体库、浏览器内核或额外加密运行时。
-
-文件传输的初步增量估算：Android APK 约 20-100 KiB，Windows 主程序和压缩安装包各约 150-500 KiB，注入助手和 TIP 不增加。无限文件大小不会增加安装包体积，只增加运行时磁盘和恢复状态需求；实现后必须以干净 Release 构建复测。
 
 首个完整 Release 构建的目标：
 

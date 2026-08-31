@@ -91,6 +91,21 @@ begin
   DeleteKeyboardCategory(HKEY_LOCAL_MACHINE_32);
 end;
 
+procedure CleanupUserTipOverrides();
+var
+  TipClsid: String;
+  TipRoot: String;
+  ClassRoot: String;
+begin
+  TipClsid := '{9A50B266-9E86-4FF4-871B-8D47AD8C658B}';
+  TipRoot := 'Software\Microsoft\CTF\TIP\' + TipClsid;
+  ClassRoot := 'Software\Classes\CLSID\' + TipClsid;
+  RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER_64, TipRoot);
+  RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER_32, TipRoot);
+  RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER_64, ClassRoot);
+  RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER_32, ClassRoot);
+end;
+
 procedure CleanupAllTipRegistrations();
 var
   TipClsid: String;
@@ -104,7 +119,7 @@ begin
   RegDeleteKeyIncludingSubkeys(HKEY_LOCAL_MACHINE_32, TipRoot);
   RegDeleteKeyIncludingSubkeys(HKEY_LOCAL_MACHINE_64, ClassRoot);
   RegDeleteKeyIncludingSubkeys(HKEY_LOCAL_MACHINE_32, ClassRoot);
-  RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER, TipRoot);
+  CleanupUserTipOverrides();
 end;
 
 procedure UnregisterInstalledTipDlls();
@@ -220,6 +235,7 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   UnregisterInstalledTipDlls();
+  CleanupUserTipOverrides();
   CleanupKeyboardCategoryRegistrations();
   Result := '';
 end;

@@ -2,7 +2,7 @@
 
 [English](security-model.md)
 
-本文说明说写协议 v1 已实现的安全机制。它是实现层面的安全模型，不是第三方独立安全审计，也不承诺能让已经失陷的手机或电脑恢复安全。
+本文说明说写协议 v2 已实现的安全机制。它是实现层面的安全模型，不是第三方独立安全审计，也不承诺能让已经失陷的手机或电脑恢复安全。
 
 ## 关键安全结论
 
@@ -114,7 +114,7 @@ flowtype-auth-v1\0{pc_id}\0{phone_id}\0{nonce}
 
 图片剪贴板传输使用同一条已认证 WSS 连接。请求头包含文件长度和 SHA-256；Windows 在替换剪贴板前会验证摘要、编码格式、字节上限、解码尺寸和像素上限。
 
-协议消息和大小限制详见 [FlowType protocol v1](../protocol/v1/README.md)。
+协议消息和大小限制详见 [FlowType protocol v2](../protocol/v2/README.md)。
 
 ## 本地密钥与正文存储
 
@@ -134,6 +134,7 @@ flowtype-auth-v1\0{pc_id}\0{phone_id}\0{nonce}
 - Windows TLS 身份私钥写入磁盘前，使用当前用户作用域的 Windows DPAPI 加密。
 - 证书、公钥、电脑 ID、已绑定手机公钥、设备名称和绑定时间不是秘密，保存在当前用户的应用数据目录。
 - Windows 不建立已完成输入的历史。活动正文只在同步期间存在于主程序和 Injector 内存中。
+- 用户在新光标点击“同步”时，目标进程内的 TIP 只读取紧贴光标、与 Android 全文等长的一段用于精确防重；这段内容不离开本机、不持久化且不进入日志。其他时间不扫描目标文档。
 - Injector 诊断日志记录进程 ID、序号、文本长度和错误，不记录输入正文。
 
 DPAPI 保护 Windows 用户边界内的静态私钥，但不能防御已经取得该用户凭据或管理员权限的攻击者。
@@ -145,10 +146,10 @@ DPAPI 保护 Windows 用户边界内的静态私钥，但不能防御已经取�
 - `flowtype.exe` 以普通用户权限运行，负责 UI、WSS 服务、TLS 身份、绑定记录和协议状态。
 - `flowtype-injector.exe` 以高权限运行，但不监听网络，也不持有长期 TLS 或手机绑定密钥。
 - 正式安装后，Injector 只通过已经注册的计划任务启动，而不是接受任意高权限命令行。
-- 主程序与 Injector 通过 `flowtype-input-v4` 命名管道通信，DACL 只允许当前用户、Administrators 和 SYSTEM。
+- 主程序与 Injector 通过 `flowtype-input-v5` 命名管道通信，DACL 只允许当前用户、Administrators 和 SYSTEM。
 - Injector 校验客户端进程 ID 和已安装主程序路径；主程序反向校验服务端进程路径、自报二进制路径、IPC 版本、实例 ID 和高权限状态。
 - IPC 只支持固定消息类型，并设置 1 MiB 上限，不提供任意命令、脚本或路径执行。
-- Injector 和目标进程中的 Windows 文本服务组件使用独立的 `flowtype-tip-v3` IPC 通道，并拒绝组件版本不一致的连接。
+- Injector 和目标进程中的 Windows 文本服务组件使用独立的 `flowtype-tip-v4` IPC 通道，并拒绝 IPC 版本不一致的连接。
 
 这些措施用于缩小高权限攻击面，但它们不是沙箱，也不试图防御 Windows 管理员；管理员本来就在操作系统信任边界内。
 

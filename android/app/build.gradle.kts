@@ -51,7 +51,7 @@ android {
         }
     }
 
-    sourceSets.getByName("test").resources.srcDir("../../protocol/v1")
+    sourceSets.getByName("test").resources.srcDir("../../protocol/v2")
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

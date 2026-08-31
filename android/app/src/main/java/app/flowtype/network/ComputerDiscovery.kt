@@ -19,7 +19,7 @@ class ComputerDiscovery(
 
     private val discoveryListener = object : NsdManager.DiscoveryListener {
         override fun onDiscoveryStarted(serviceType: String) = Unit
-        override fun onDiscoveryStopped(serviceType: String) = Unit
+        override fun onDiscoveryStopped(serviceType: String) { started = false }
         override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) { started = false }
         override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) { started = false }
 
@@ -29,6 +29,7 @@ class ComputerDiscovery(
                 override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
 
                 override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
+                    if (!started) return
                     val pcId = serviceInfo.attributes["pc_id"]?.toString(Charsets.UTF_8)
                         ?: serviceInfo.serviceName
                     val binding = bindings.list().firstOrNull { it.pcId == pcId } ?: return
@@ -52,6 +53,14 @@ class ComputerDiscovery(
         started = true
         runCatching { manager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener) }
             .onFailure { started = false }
+    }
+
+    fun stop() {
+        if (!started) return
+        started = false
+        services.values.toSet().forEach { listener(it, null) }
+        services.clear()
+        runCatching { manager.stopServiceDiscovery(discoveryListener) }
     }
 
     companion object {

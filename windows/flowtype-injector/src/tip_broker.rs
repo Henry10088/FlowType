@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io;
+use std::io::{self, Read};
 use std::mem::size_of;
 use std::os::windows::io::FromRawHandle;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,6 +43,13 @@ pub enum TipBeginError {
     RebindRejected,
 }
 
+pub struct TipBegin<'a> {
+    pub session_id: &'a str,
+    pub sequence: i64,
+    pub full_text: &'a str,
+    pub attach_existing: bool,
+}
+
 #[derive(Clone)]
 struct Client {
     key: TipKey,
@@ -77,7 +84,7 @@ impl TipRegistry {
         &self,
         process_id: u32,
         preferred_thread_id: u32,
-        session_id: &str,
+        begin: TipBegin<'_>,
         timeout: Duration,
     ) -> Result<TipKey, TipBeginError> {
         let deadline = Instant::now() + timeout;
@@ -89,7 +96,10 @@ impl TipRegistry {
                 let response = self.send_to(
                     &client,
                     TipCommand::Begin {
-                        session_id: session_id.to_owned(),
+                        session_id: begin.session_id.to_owned(),
+                        sequence: begin.sequence,
+                        full_text: begin.full_text.to_owned(),
+                        attach_existing: begin.attach_existing,
                     },
                 );
                 diagnostics::log(format!(
@@ -98,7 +108,7 @@ impl TipRegistry {
                 ));
                 if matches!(
                     &response,
-                    Ok(TipResponse::Begun { session_id: begun }) if begun == session_id
+                    Ok(TipResponse::Begun { session_id: begun }) if begun == begin.session_id
                 ) {
                     return Ok(client.key);
                 }
@@ -191,6 +201,7 @@ impl TipRegistry {
                 "tip_client rejected pid={} thread={} reason=component_mismatch ipc={} component={}",
                 hello.process_id, hello.thread_id, hello.ipc_version, hello.component_version
             ));
+            quarantine_incompatible_client(&mut pipe);
             return;
         }
         if !pipe_client_matches(&pipe, hello.process_id) {
@@ -201,8 +212,8 @@ impl TipRegistry {
             return;
         }
         diagnostics::log(format!(
-            "tip_client connected pid={} thread={}",
-            hello.process_id, hello.thread_id
+            "tip_client connected pid={} thread={} ipc={} component={}",
+            hello.process_id, hello.thread_id, hello.ipc_version, hello.component_version
         ));
         let key = TipKey {
             process_id: hello.process_id,
@@ -294,6 +305,14 @@ fn pipe_client_matches(pipe: &File, expected_process_id: u32) -> bool {
     }
 }
 
+fn quarantine_incompatible_client(pipe: &mut File) {
+    // Old in-process TIP DLLs cannot be unloaded until their host application
+    // exits. Keeping the rejected pipe open prevents those DLLs from entering
+    // their reconnect loop and consuming CPU on the user's input thread.
+    let mut byte = [0_u8; 1];
+    let _ = pipe.read(&mut byte);
+}
+
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> io::Error {
     io::Error::other("TSF registry state unavailable")
 }
@@ -311,9 +330,11 @@ mod tests {
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
 
-    use flowtype_core::tip::{TipHello, TipResponse};
+    use flowtype_core::tip::{TipCommand, TipHello, TipResponse, TipSessionModel};
 
-    use super::{BrokerRequest, Client, TipBeginError, TipKey, TipRegistry, hello_is_compatible};
+    use super::{
+        BrokerRequest, Client, TipBegin, TipBeginError, TipKey, TipRegistry, hello_is_compatible,
+    };
 
     #[test]
     fn accepts_current_protocol_from_an_older_loaded_component() {
@@ -327,6 +348,133 @@ mod tests {
 
         hello.ipc_version -= 1;
         assert!(!hello_is_compatible(&hello));
+    }
+
+    #[test]
+    fn rejects_tip_versions_without_single_session_range_ownership() {
+        assert_eq!(flowtype_core::TIP_IPC_VERSION, 8);
+        for ipc_version in [3, 4, 5, 6, 7] {
+            let hello = TipHello {
+                ipc_version,
+                component_version: "0.2.7".to_owned(),
+                process_id: 1,
+                thread_id: 2,
+            };
+            assert!(!hello_is_compatible(&hello));
+        }
+    }
+
+    #[test]
+    fn one_tip_connection_preserves_the_full_session_lifecycle() {
+        let registry = TipRegistry::default();
+        let key = TipKey {
+            process_id: 70,
+            thread_id: 80,
+            generation: 1,
+        };
+        let (sender, receiver) = mpsc::sync_channel::<BrokerRequest>(8);
+        registry
+            .state
+            .lock()
+            .unwrap()
+            .clients
+            .insert((key.process_id, key.thread_id), Client { key, sender });
+        let worker = std::thread::spawn(move || {
+            let mut model = TipSessionModel::default();
+            for request in receiver {
+                let response = match request.command {
+                    TipCommand::Begin {
+                        session_id,
+                        sequence,
+                        full_text,
+                        ..
+                    } => model
+                        .begin(&session_id, sequence, &full_text)
+                        .map(|()| TipResponse::Begun { session_id })
+                        .unwrap_or_else(|response| response),
+                    TipCommand::Update {
+                        session_id,
+                        sequence,
+                        full_text,
+                    } => model
+                        .update(&session_id, sequence, &full_text)
+                        .map(|_| TipResponse::Applied {
+                            session_id,
+                            sequence,
+                        })
+                        .unwrap_or_else(|response| response),
+                    TipCommand::Finish {
+                        session_id,
+                        sequence,
+                    } => model
+                        .finish(&session_id, sequence)
+                        .map(|()| TipResponse::Finished {
+                            session_id,
+                            sequence,
+                        })
+                        .unwrap_or_else(|response| response),
+                    other => panic!("unexpected command: {other:?}"),
+                };
+                request.response.send(Ok(response)).unwrap();
+            }
+        });
+
+        let session_id = "voice";
+        let active = registry
+            .begin_for_target(
+                70,
+                80,
+                TipBegin {
+                    session_id,
+                    sequence: 1,
+                    full_text: "上山打老虎",
+                    attach_existing: false,
+                },
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        assert_eq!(active, key);
+        for (sequence, text) in [
+            (1, "上山打老虎"),
+            (2, "上山打老虎，老虎"),
+            (3, "上山打老虎，老虎没打到"),
+            (4, "上山打老虎"),
+        ] {
+            assert_eq!(
+                registry
+                    .send(
+                        active,
+                        TipCommand::Update {
+                            session_id: session_id.to_owned(),
+                            sequence,
+                            full_text: text.to_owned(),
+                        },
+                    )
+                    .unwrap(),
+                TipResponse::Applied {
+                    session_id: session_id.to_owned(),
+                    sequence,
+                }
+            );
+        }
+        assert_eq!(
+            registry
+                .send(
+                    active,
+                    TipCommand::Finish {
+                        session_id: session_id.to_owned(),
+                        sequence: 4,
+                    },
+                )
+                .unwrap(),
+            TipResponse::Finished {
+                session_id: session_id.to_owned(),
+                sequence: 4,
+            }
+        );
+
+        drop(registry);
+        worker.join().unwrap();
     }
 
     #[test]
@@ -365,7 +513,17 @@ mod tests {
 
         assert_eq!(
             registry
-                .begin_for_target(10, 20, "voice", Duration::from_millis(500))
+                .begin_for_target(
+                    10,
+                    20,
+                    TipBegin {
+                        session_id: "voice",
+                        sequence: 1,
+                        full_text: "正文",
+                        attach_existing: false,
+                    },
+                    Duration::from_millis(500)
+                )
                 .unwrap(),
             key,
         );
@@ -395,7 +553,17 @@ mod tests {
         });
 
         assert_eq!(
-            registry.begin_for_target(30, 40, "voice", Duration::from_millis(150)),
+            registry.begin_for_target(
+                30,
+                40,
+                TipBegin {
+                    session_id: "voice",
+                    sequence: 1,
+                    full_text: "正文",
+                    attach_existing: false,
+                },
+                Duration::from_millis(150)
+            ),
             Err(TipBeginError::Unsupported),
         );
         drop(registry);
@@ -407,7 +575,17 @@ mod tests {
         let registry = TipRegistry::default();
 
         assert_eq!(
-            registry.begin_for_target(50, 60, "voice", Duration::from_millis(20)),
+            registry.begin_for_target(
+                50,
+                60,
+                TipBegin {
+                    session_id: "voice",
+                    sequence: 1,
+                    full_text: "正文",
+                    attach_existing: false,
+                },
+                Duration::from_millis(20),
+            ),
             Err(TipBeginError::Unavailable),
         );
     }

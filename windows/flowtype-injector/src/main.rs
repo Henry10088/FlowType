@@ -11,14 +11,15 @@ use std::io;
 use std::mem::size_of;
 use std::os::windows::io::FromRawHandle;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use flowtype_core::ipc::{
     InjectorRequest, InjectorResponse, PIPE_NAME, read_message, write_message,
 };
 use flowtype_core::tip::{TipCommand, TipResponse};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_PIPE_CONNECTED, GetLastError, HANDLE,
+    INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -33,12 +34,14 @@ use windows_sys::Win32::System::Pipes::{
     PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken,
+    CreateMutexW, GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken,
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 
 use crate::target::TargetWindow;
-use crate::tip_broker::{TipBeginError, TipKey, TipRegistry};
+use crate::tip_broker::{TipBegin, TipBeginError, TipKey, TipRegistry};
+
+const TIP_STATE_QUERY_INTERVAL: Duration = Duration::from_secs(1);
 
 struct ActiveSession {
     id: String,
@@ -47,6 +50,8 @@ struct ActiveSession {
     target: TargetWindow,
     tip: TipKey,
     input_epoch: u64,
+    last_tip_query: Instant,
+    _input_monitor: input_monitor::InputMonitor,
 }
 
 struct CompletedSession {
@@ -57,12 +62,15 @@ struct CompletedSession {
 
 fn main() -> io::Result<()> {
     diagnostics::log("startup");
-    diagnostics::log(format!("input_monitor ready={}", input_monitor::start()));
     if let Err(error) = speech::initialize_com() {
         diagnostics::log(format!("speech com init failed: {error:?}"));
         return Err(io::Error::other(error));
     }
     let pipe_sddl = pipe_security_sddl()?;
+    let Some(_instance) = InjectorInstance::acquire(&pipe_sddl)? else {
+        diagnostics::log("startup existing_instance");
+        return Ok(());
+    };
     let tips = TipRegistry::start(pipe_sddl.clone());
     if let Err(error) = speech::ensure_flowtype_active() {
         diagnostics::log(format!("speech profile activation failed: {error:?}"));
@@ -94,6 +102,56 @@ fn main() -> io::Result<()> {
                 break;
             }
         }
+        // The elevated injector outlives the desktop app. Never let an app
+        // crash, update, or protocol restart strand a TSF composition.
+        end_failed_session(&mut session, &tips);
+        completed = None;
+    }
+}
+
+struct InjectorInstance(HANDLE);
+
+impl InjectorInstance {
+    fn acquire(sddl: &[u16]) -> io::Result<Option<Self>> {
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        let name: Vec<u16> = r"Local\FlowType.Injector"
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        let handle = unsafe { CreateMutexW(&attributes, 0, name.as_ptr()) };
+        let last_error = unsafe { GetLastError() };
+        unsafe { LocalFree(descriptor) };
+        if handle.is_null() {
+            return Err(io::Error::from_raw_os_error(last_error as i32));
+        }
+        if last_error == ERROR_ALREADY_EXISTS {
+            unsafe { CloseHandle(handle) };
+            Ok(None)
+        } else {
+            Ok(Some(Self(handle)))
+        }
+    }
+}
+
+impl Drop for InjectorInstance {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
     }
 }
 
@@ -238,7 +296,13 @@ fn handle_request(
                 .unwrap_or_default(),
             elevated,
         },
-        InjectorRequest::BeginSession { session_id } => {
+        InjectorRequest::BeginSession {
+            session_id,
+            replaces_session_id,
+            sequence,
+            full_text,
+            attach_existing,
+        } => {
             if let Some(active) = session.as_ref().filter(|active| active.id == session_id) {
                 diagnostics::log(format!(
                     "begin existing=active pid={} seq={}",
@@ -260,12 +324,19 @@ fn handle_request(
                     full_text: finished.text.clone(),
                 };
             }
-            if session.is_some() {
-                // A new START is the recovery boundary after a lost socket or
-                // a rejected resume. Do not let an orphaned injector session
-                // make every later attempt fail with session_busy.
-                diagnostics::log("begin replacing=stale_session");
-                end_failed_session(session, tips);
+            match classify_session_replacement(
+                session.as_ref().map(|active| active.id.as_str()),
+                replaces_session_id.as_deref(),
+            ) {
+                SessionReplacement::Reject => {
+                    diagnostics::log("begin rejected=session_busy");
+                    return InjectorResponse::InvalidRequest;
+                }
+                SessionReplacement::Replace => {
+                    diagnostics::log("begin replacing=matched_session");
+                    end_failed_session(session, tips);
+                }
+                SessionReplacement::Start => {}
             }
             let Some(target) = TargetWindow::capture_foreground() else {
                 diagnostics::log("begin rejected=target_invalid");
@@ -289,8 +360,15 @@ fn handle_request(
                     target_name: target.title(),
                 };
             }
+            let input_monitor = match input_monitor::InputMonitor::start() {
+                Ok(monitor) => monitor,
+                Err(error) => {
+                    diagnostics::log(format!("begin rejected=input_monitor error={error}"));
+                    return InjectorResponse::InjectionUnknown;
+                }
+            };
             diagnostics::log(format!(
-                "begin target_pid={} target_thread={} title_len={}",
+                "begin target_pid={} target_thread={} title_len={} attach_existing={attach_existing}",
                 target.process_id(),
                 target.thread_id(),
                 target.title().chars().count()
@@ -298,7 +376,12 @@ fn handle_request(
             let tip = match tips.begin_for_target(
                 target.process_id(),
                 target.thread_id(),
-                &session_id,
+                TipBegin {
+                    session_id: &session_id,
+                    sequence,
+                    full_text: &full_text,
+                    attach_existing,
+                },
                 Duration::from_millis(1_500),
             ) {
                 Ok(tip) => {
@@ -325,11 +408,13 @@ fn handle_request(
             *completed = None;
             *session = Some(ActiveSession {
                 id: session_id,
-                sequence: 0,
-                text: String::new(),
+                sequence,
+                text: full_text,
                 target,
                 tip,
                 input_epoch: input_monitor::epoch(),
+                last_tip_query: Instant::now(),
+                _input_monitor: input_monitor,
             });
             diagnostics::log("begin accepted");
             InjectorResponse::SessionBegun { target_name }
@@ -424,6 +509,24 @@ fn handle_request(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionReplacement {
+    Start,
+    Replace,
+    Reject,
+}
+
+fn classify_session_replacement(
+    active_session_id: Option<&str>,
+    replaces_session_id: Option<&str>,
+) -> SessionReplacement {
+    match active_session_id {
+        None => SessionReplacement::Start,
+        Some(active) if replaces_session_id == Some(active) => SessionReplacement::Replace,
+        Some(_) => SessionReplacement::Reject,
+    }
+}
+
 fn query_active_session(
     session: &mut Option<ActiveSession>,
     tips: &TipRegistry,
@@ -433,25 +536,37 @@ fn query_active_session(
     full_text: String,
     session_id: &str,
 ) -> InjectorResponse {
-    // A physical key/mouse event can terminate a TSF composition without a
-    // phone packet arriving. Query the TIP so the desktop can notify the
-    // phone immediately instead of replaying the old full text later.
-    if input_epoch != input_monitor::epoch() {
+    let current_input_epoch = input_monitor::epoch();
+    if input_epoch != current_input_epoch {
         let submitted = is_submitted_candidate(
             full_text.as_str(),
             input_epoch,
-            input_monitor::epoch(),
+            current_input_epoch,
             input_monitor::last_event_was_return(),
         );
-        if submitted {
-            end_failed_session(session, tips);
-        } else {
-            detach_session(session);
-        }
+        end_failed_session(session, tips);
         return if submitted {
             InjectorResponse::TargetSubmitted
         } else {
             InjectorResponse::TargetModified
+        };
+    }
+    let should_query_tip = session
+        .as_mut()
+        .filter(|active| active.id == session_id)
+        .is_some_and(|active| {
+            if active.last_tip_query.elapsed() < TIP_STATE_QUERY_INTERVAL {
+                false
+            } else {
+                active.last_tip_query = Instant::now();
+                true
+            }
+        });
+    if !should_query_tip {
+        return InjectorResponse::SessionActive {
+            session_id: session_id.to_owned(),
+            sequence,
+            full_text,
         };
     }
     match tips.send(
@@ -472,11 +587,7 @@ fn query_active_session(
                 input_monitor::epoch(),
                 input_monitor::last_event_was_return(),
             );
-            if submitted {
-                end_failed_session(session, tips);
-            } else {
-                detach_session(session);
-            }
+            end_failed_session(session, tips);
             if submitted {
                 InjectorResponse::TargetSubmitted
             } else {
@@ -497,12 +608,6 @@ fn is_submitted_candidate(
     last_event_was_return: bool,
 ) -> bool {
     full_text.ends_with('\n') && current_input_epoch != session_input_epoch && last_event_was_return
-}
-
-fn detach_session(session: &mut Option<ActiveSession>) {
-    // Keep the TIP's terminated composition range available for a verified
-    // rebind. The injector session itself is no longer accepted for updates.
-    session.take();
 }
 
 fn completed_apply_response(
@@ -601,7 +706,6 @@ fn apply_state(
         };
     }
 
-    let text_len = full_text.chars().count();
     let tip = active.tip;
     let response = tips.send(
         tip,
@@ -611,14 +715,22 @@ fn apply_state(
             full_text: full_text.clone(),
         },
     );
-    diagnostics::log(format!(
-        "update pid={} thread={} seq={} text_len={} result={:?}",
-        tip.process_id,
-        tip.thread_id,
-        sequence,
-        text_len,
-        response.as_ref().map_err(|error| error.to_string())
-    ));
+    if !matches!(
+        &response,
+        Ok(TipResponse::Applied {
+            session_id: applied_session,
+            sequence: applied_sequence,
+        }) if applied_session == session_id && *applied_sequence == sequence
+    ) {
+        diagnostics::log(format!(
+            "update pid={} thread={} seq={} text_len={} result={:?}",
+            tip.process_id,
+            tip.thread_id,
+            sequence,
+            full_text.chars().count(),
+            response.as_ref().map_err(|error| error.to_string())
+        ));
+    }
     match response {
         Ok(TipResponse::Applied {
             session_id: applied_session,
@@ -712,14 +824,42 @@ fn end_failed_session(session: &mut Option<ActiveSession>, tips: &TipRegistry) {
 
 #[cfg(test)]
 mod integration_tests {
-    use std::time::Duration;
+    use std::path::Path;
+    use std::process::{Child, Command};
+    use std::time::{Duration, Instant};
 
-    use flowtype_core::tip::{TipCommand, TipResponse};
+    use flowtype_core::{
+        ipc::{InjectorRequest, InjectorResponse},
+        tip::{TipCommand, TipResponse},
+    };
 
     use super::{
-        CompletedSession, completed_apply_response, is_submitted_candidate, pipe_security_sddl,
-        speech, target::TargetWindow, tip_broker::TipRegistry,
+        CompletedSession, SessionReplacement, classify_session_replacement,
+        completed_apply_response, handle_request, is_submitted_candidate, pipe_security_sddl,
+        speech,
+        target::TargetWindow,
+        tip_broker::{TipBegin, TipRegistry},
     };
+
+    #[test]
+    fn retarget_replaces_only_the_named_active_session() {
+        assert_eq!(
+            classify_session_replacement(Some("old"), Some("old")),
+            SessionReplacement::Replace,
+        );
+        assert_eq!(
+            classify_session_replacement(Some("old"), Some("different")),
+            SessionReplacement::Reject,
+        );
+        assert_eq!(
+            classify_session_replacement(Some("old"), None),
+            SessionReplacement::Reject,
+        );
+        assert_eq!(
+            classify_session_replacement(None, Some("already-cancelled")),
+            SessionReplacement::Start,
+        );
+    }
 
     #[test]
     fn only_a_newline_snapshot_after_a_real_return_is_submitted() {
@@ -752,14 +892,284 @@ mod integration_tests {
     }
 
     #[test]
-    #[ignore = "requires a registered FlowType TIP and a focused Notepad edit control"]
-    fn notepad_composition_smoke() {
+    #[ignore = "requires a registered FlowType TIP and Notepad++"]
+    fn notepad_retarget_moves_the_full_snapshot_to_the_new_foreground_editor() {
+        let (_first_process, first_target) = launch_notepad("FlowType-Retarget-Old");
+        let (_second_process, second_target) = launch_notepad("FlowType-Retarget-New");
+
         speech::initialize_com().unwrap();
-        let target = TargetWindow::capture_foreground().expect("no foreground window");
-        assert!(
-            target.title().to_ascii_lowercase().contains("notepad"),
-            "foreground window must be Notepad"
+        let tips = TipRegistry::start(pipe_security_sddl().unwrap());
+        let mut session = None;
+        let mut completed = None;
+
+        assert!(first_target.activate_for_input());
+        assert!(matches!(
+            handle_request(
+                InjectorRequest::BeginSession {
+                    session_id: "old-session".to_owned(),
+                    replaces_session_id: None,
+                    sequence: 1,
+                    full_text: "需要重新放置的全文".to_owned(),
+                    attach_existing: false,
+                },
+                &mut session,
+                &mut completed,
+                &tips,
+                "retarget-test",
+                false,
+            ),
+            InjectorResponse::SessionBegun { .. }
+        ));
+        assert_eq!(
+            handle_request(
+                InjectorRequest::ApplyState {
+                    session_id: "old-session".to_owned(),
+                    sequence: 1,
+                    full_text: "需要重新放置的全文".to_owned(),
+                },
+                &mut session,
+                &mut completed,
+                &tips,
+                "retarget-test",
+                false,
+            ),
+            InjectorResponse::Applied { sequence: 1 }
         );
+
+        assert!(second_target.activate_for_input());
+        assert!(matches!(
+            handle_request(
+                InjectorRequest::BeginSession {
+                    session_id: "new-session".to_owned(),
+                    replaces_session_id: Some("old-session".to_owned()),
+                    sequence: 1,
+                    full_text: "需要重新放置的全文".to_owned(),
+                    attach_existing: true,
+                },
+                &mut session,
+                &mut completed,
+                &tips,
+                "retarget-test",
+                false,
+            ),
+            InjectorResponse::SessionBegun { .. }
+        ));
+        assert_eq!(
+            handle_request(
+                InjectorRequest::ApplyState {
+                    session_id: "new-session".to_owned(),
+                    sequence: 1,
+                    full_text: "需要重新放置的全文".to_owned(),
+                },
+                &mut session,
+                &mut completed,
+                &tips,
+                "retarget-test",
+                false,
+            ),
+            InjectorResponse::Applied { sequence: 1 }
+        );
+        assert_eq!(
+            handle_request(
+                InjectorRequest::FinishSession {
+                    session_id: "new-session".to_owned(),
+                    sequence: 1,
+                },
+                &mut session,
+                &mut completed,
+                &tips,
+                "retarget-test",
+                false,
+            ),
+            InjectorResponse::Finished { sequence: 1 }
+        );
+
+        assert!(first_target.activate_for_input());
+        assert_eq!(
+            wait_for_text(&first_target, "需要重新放置的全文").as_deref(),
+            Some("需要重新放置的全文")
+        );
+        assert!(second_target.activate_for_input());
+        assert_eq!(
+            wait_for_text(&second_target, "需要重新放置的全文").as_deref(),
+            Some("需要重新放置的全文")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a registered FlowType TIP and Notepad++"]
+    fn notepad_explicit_sync_attaches_only_the_last_exact_suffix() {
+        let (_process, target) = launch_notepad("FlowType-Exact-Attach");
+
+        speech::initialize_com().unwrap();
+        let tips = TipRegistry::start(pipe_security_sddl().unwrap());
+
+        let initial_session = "flowtype-exact-attach-initial";
+        let initial = "会议记录：通天通天塔";
+        let first_tip = tips
+            .begin_for_target(
+                target.process_id(),
+                target.thread_id(),
+                TipBegin {
+                    session_id: initial_session,
+                    sequence: 1,
+                    full_text: initial,
+                    attach_existing: false,
+                },
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(
+            tips.send(
+                first_tip,
+                TipCommand::Finish {
+                    session_id: initial_session.to_owned(),
+                    sequence: 1,
+                },
+            )
+            .unwrap(),
+            TipResponse::Finished {
+                session_id: initial_session.to_owned(),
+                sequence: 1,
+            }
+        );
+        assert_eq!(wait_for_text(&target, initial).as_deref(), Some(initial));
+
+        let attached_session = "flowtype-exact-attach-replacement";
+        let attached_tip = tips
+            .begin_for_target(
+                target.process_id(),
+                target.thread_id(),
+                TipBegin {
+                    session_id: attached_session,
+                    sequence: 1,
+                    full_text: "通天塔",
+                    attach_existing: true,
+                },
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(
+            wait_for_text(&target, initial).as_deref(),
+            Some(initial),
+            "explicit sync inserted a duplicate instead of attaching the exact suffix"
+        );
+        assert_eq!(
+            tips.send(
+                attached_tip,
+                TipCommand::Update {
+                    session_id: attached_session.to_owned(),
+                    sequence: 2,
+                    full_text: "通天大厦".to_owned(),
+                },
+            )
+            .unwrap(),
+            TipResponse::Applied {
+                session_id: attached_session.to_owned(),
+                sequence: 2,
+            }
+        );
+        assert_eq!(
+            tips.send(
+                attached_tip,
+                TipCommand::Finish {
+                    session_id: attached_session.to_owned(),
+                    sequence: 2,
+                },
+            )
+            .unwrap(),
+            TipResponse::Finished {
+                session_id: attached_session.to_owned(),
+                sequence: 2,
+            }
+        );
+        assert_eq!(
+            wait_for_text(&target, "会议记录：通天通天大厦").as_deref(),
+            Some("会议记录：通天通天大厦")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a registered FlowType TIP and Notepad++"]
+    fn notepad_explicit_sync_inserts_when_the_exact_suffix_does_not_match() {
+        let (_process, target) = launch_notepad("FlowType-Exact-Attach-Mismatch");
+
+        speech::initialize_com().unwrap();
+        let tips = TipRegistry::start(pipe_security_sddl().unwrap());
+
+        let initial_session = "flowtype-exact-mismatch-initial";
+        let initial = "会议记录：通天通天塔";
+        let first_tip = tips
+            .begin_for_target(
+                target.process_id(),
+                target.thread_id(),
+                TipBegin {
+                    session_id: initial_session,
+                    sequence: 1,
+                    full_text: initial,
+                    attach_existing: false,
+                },
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        assert!(matches!(
+            tips.send(
+                first_tip,
+                TipCommand::Finish {
+                    session_id: initial_session.to_owned(),
+                    sequence: 1,
+                },
+            )
+            .unwrap(),
+            TipResponse::Finished { .. }
+        ));
+        assert_eq!(wait_for_text(&target, initial).as_deref(), Some(initial));
+
+        let inserted_session = "flowtype-exact-mismatch-replacement";
+        let inserted_tip = tips
+            .begin_for_target(
+                target.process_id(),
+                target.thread_id(),
+                TipBegin {
+                    session_id: inserted_session,
+                    sequence: 1,
+                    full_text: "通天大厦",
+                    attach_existing: true,
+                },
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(
+            wait_for_text(&target, "会议记录：通天通天塔通天大厦").as_deref(),
+            Some("会议记录：通天通天塔通天大厦")
+        );
+        assert_eq!(
+            tips.send(
+                inserted_tip,
+                TipCommand::Update {
+                    session_id: inserted_session.to_owned(),
+                    sequence: 2,
+                    full_text: "通天大楼".to_owned(),
+                },
+            )
+            .unwrap(),
+            TipResponse::Applied {
+                session_id: inserted_session.to_owned(),
+                sequence: 2,
+            }
+        );
+        assert_eq!(
+            wait_for_text(&target, "会议记录：通天通天塔通天大楼").as_deref(),
+            Some("会议记录：通天通天塔通天大楼")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a registered FlowType TIP and Notepad++"]
+    fn notepad_composition_smoke() {
+        let (_process, target) = launch_notepad("FlowType-TIP-Test");
+
+        speech::initialize_com().unwrap();
         let tips = TipRegistry::start(pipe_security_sddl().unwrap());
         let keyboard_before = speech::active_keyboard_profile().unwrap();
         let target_keyboard_before = speech::thread_keyboard_layout(target.thread_id());
@@ -769,29 +1179,41 @@ mod integration_tests {
             speech::thread_keyboard_layout(target.thread_id()),
             target_keyboard_before
         );
+        let mut committed_text = String::new();
         for round in 1..=3 {
             let session_id = format!("flowtype-notepad-smoke-{round}");
+            let mut revisions = (1..=20)
+                .map(|count| format!("第{round}轮：{}", "逐".repeat(count)))
+                .collect::<Vec<_>>();
+            revisions.extend([
+                format!("第{round}轮第一行\n"),
+                format!("第{round}轮第一行\n第二行"),
+                format!("第{round}轮第一行修正\n第二行修正"),
+                format!("第{round}轮缩短"),
+                format!("TSF 多行最终稿 {round}"),
+            ]);
             let tip = tips
                 .begin_for_target(
                     target.process_id(),
                     target.thread_id(),
-                    &session_id,
+                    TipBegin {
+                        session_id: &session_id,
+                        sequence: 1,
+                        full_text: &revisions[0],
+                        attach_existing: false,
+                    },
                     Duration::from_secs(5),
                 )
                 .unwrap();
-
-            for (sequence, text) in [
-                (1, format!("voice draft {round}")),
-                (2, format!("voice corrected {round}")),
-                (3, format!("TSF 中文最终稿 {round}")),
-            ] {
+            for (index, text) in revisions.iter().enumerate() {
+                let sequence = index as i64 + 1;
                 assert_eq!(
                     tips.send(
                         tip,
                         TipCommand::Update {
                             session_id: session_id.clone(),
                             sequence,
-                            full_text: text,
+                            full_text: text.clone(),
                         },
                     )
                     .unwrap(),
@@ -806,20 +1228,83 @@ mod integration_tests {
                     tip,
                     TipCommand::Finish {
                         session_id: session_id.clone(),
-                        sequence: 3,
+                        sequence: revisions.len() as i64,
                     },
                 )
                 .unwrap(),
                 TipResponse::Finished {
                     session_id,
-                    sequence: 3,
+                    sequence: revisions.len() as i64,
                 }
+            );
+            committed_text.push_str(revisions.last().unwrap());
+            assert_eq!(
+                wait_for_text(&target, &committed_text).as_deref(),
+                Some(committed_text.as_str()),
+                "Notepad++ committed text diverged after round {round}"
             );
             assert_eq!(speech::active_keyboard_profile().unwrap(), keyboard_before);
             assert_eq!(
                 speech::thread_keyboard_layout(target.thread_id()),
                 target_keyboard_before
             );
+        }
+    }
+
+    fn launch_notepad(title: &str) -> (TestProcess, TargetWindow) {
+        let notepad_path = [
+            r"C:\Program Files (x86)\Notepad++\notepad++.exe",
+            r"C:\Program Files\Notepad++\notepad++.exe",
+        ]
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+        .expect("Notepad++ is not installed");
+        let title_argument = format!("-titleAdd={title}");
+        let child = Command::new(notepad_path)
+            .args(["-multiInst", "-nosession", &title_argument])
+            .spawn()
+            .expect("could not start Notepad++");
+        let child = TestProcess(child);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut last_readiness = (false, false, false);
+        let target = loop {
+            if let Some(target) = TargetWindow::find_process_for_test(child.0.id()) {
+                let activated = target.activate_for_input();
+                let text_ready = target.text_for_test().is_some();
+                last_readiness = (true, activated, text_ready);
+                if activated && text_ready {
+                    break target;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Notepad++ editor did not become ready: found={}, activated={}, text_ready={}",
+                last_readiness.0,
+                last_readiness.1,
+                last_readiness.2,
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        (child, target)
+    }
+
+    fn wait_for_text(target: &TargetWindow, expected: &str) -> Option<String> {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            let actual = target.text_for_test();
+            if actual.as_deref() == Some(expected) || Instant::now() >= deadline {
+                return actual;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    struct TestProcess(Child);
+
+    impl Drop for TestProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
         }
     }
 
