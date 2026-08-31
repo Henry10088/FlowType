@@ -73,6 +73,7 @@ class SettingsScreen(
         val status = activity.findViewById<TextView>(R.id.updateStatus) ?: return
         val progress = activity.findViewById<ProgressBar>(R.id.updateProgress)
         val action = activity.findViewById<Button>(R.id.updateAction)
+        val checkAction = activity.findViewById<Button>(R.id.updateCheckAction)
         val repository = activity.findViewById<Button>(R.id.updateRepository)
         val history = activity.findViewById<Button>(R.id.updateHistory)
         status.text = state.message
@@ -88,6 +89,10 @@ class SettingsScreen(
             if (state.action == UpdateManager.Action.INSTALL) onInstallUpdate()
             else controller.updates.perform(state.action)
         }
+        checkAction.visibility = if (state.action == UpdateManager.Action.CHECK ||
+            state.action == UpdateManager.Action.CANCEL
+        ) View.GONE else View.VISIBLE
+        checkAction.setOnClickListener { controller.updates.perform(UpdateManager.Action.CHECK) }
         repository.setOnClickListener { onOpenRepository() }
         history.setOnClickListener { onOpenHistory() }
     }
