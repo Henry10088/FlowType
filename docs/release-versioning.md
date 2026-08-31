@@ -14,7 +14,7 @@
 
 Android 的 `versionCode` 必须在每次 Android 发布时严格递增。Windows 修复只发布 Windows，不要求重新构建 Android；Android 更新同理。两端仍共享协议版本和产品主版本策略，但不再强制版本号相同。
 
-当前版本：Windows `0.2.7`；Android `0.2.3`，`versionCode=23`。
+当前版本：Windows `0.2.8`；Android `0.2.4`，`versionCode=24`。
 
 当前 Android-Windows 网络协议为 v2。v2 的 `start` 可携带待替换的旧会话 ID，使“电脑端已编辑后同步到新光标”在取消消息丢失、断线和 Android 进程恢复后仍可原子重试。该变更不兼容 v1，两端必须同时更新。
 

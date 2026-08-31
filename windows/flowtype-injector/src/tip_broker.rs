@@ -356,7 +356,7 @@ mod tests {
         for ipc_version in [3, 4, 5, 6, 7] {
             let hello = TipHello {
                 ipc_version,
-                component_version: "0.2.7".to_owned(),
+                component_version: "0.2.8".to_owned(),
                 process_id: 1,
                 thread_id: 2,
             };

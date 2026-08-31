@@ -75,7 +75,7 @@
     <string name="a11y_recently_used">，最近使用</string>
     <string name="a11y_connected">，已连接</string>
     <string name="a11y_disconnected">，未连接</string>
-    <string name="version_label">版本 0.2.3</string>
+    <string name="version_label">版本 0.2.4</string>
     <string name="input_display">输入与显示</string>
     <string name="version_and_updates">版本与更新</string>
     <string name="check_updates">检查更新</string>
