@@ -1520,6 +1520,13 @@ mod tests {
     }
 
     #[test]
+    fn storage_preflight_rejects_a_batch_larger_than_the_volume() {
+        let root = test_root("insufficient-space");
+        assert!(!has_available_space(&root, u64::MAX));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn tagged_offer_round_trips_before_coordinator_validation() {
         let encoded =
             serde_json::to_string(&FileClientMessage::FileOffer(offer("batch-2"))).unwrap();
