@@ -194,7 +194,7 @@ LocalSend 是重要实现参考，不是兼容目标。说写不承诺与 LocalS
 - 大文件上传使用单次线性流式读取；接收端按 16 MiB 或 1 秒持久化确认偏移，避免按分块反复读取文件前缀造成平方级磁盘开销。
 - Windows 安装器同时开放控制端口 32187 和加密文件数据端口 32188，范围仍限制为本地子网和 Tailscale 地址段。
 
-发布构建实测：Android 未签名 Release APK 为 1,075,877 字节；Windows 未签名安装包为 3,418,584 字节。相对设计基线，Android 增量约 90 KiB；Windows 相对最近的 0.2.7 安装包增量约 84 KiB，均在预算内。
+发布构建实测：Android 未签名 Release APK 为 1,075,877 字节；Windows 未签名安装包为 3,418,592 字节。相对设计基线，Android 增量约 90 KiB；Windows 相对最近的 0.2.7 安装包增量约 84 KiB，均在预算内。
 
 验证结果：Windows workspace 共 94 项自动测试通过（其中 5 项需要已注册 TIP 和交互式编辑器的测试按设计忽略）；Android JVM 测试、Debug AndroidTest 构建和 API 36 模拟器上的 5 项仪器测试通过，包含数据库 4→6、5→6 升级与传输目标字段持久化。
 

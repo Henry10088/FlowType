@@ -220,7 +220,7 @@ impl FileOffer {
             || self.roots.len() > MAX_ROOT_SUMMARIES
             || self.roots.iter().any(|root| {
                 root.is_empty()
-                    || root.as_bytes().len() > MAX_ROOT_SUMMARY_BYTES
+                    || root.len() > MAX_ROOT_SUMMARY_BYTES
                     || root.chars().any(char::is_control)
             })
         {
@@ -306,7 +306,7 @@ impl ResumeEntry {
 
 pub fn validate_relative_path(path: &str) -> Result<(), ValidationError> {
     if path.is_empty()
-        || path.as_bytes().len() > MAX_RELATIVE_PATH_BYTES
+        || path.len() > MAX_RELATIVE_PATH_BYTES
         || path.starts_with('/')
         || path.ends_with('/')
         || path.contains('\\')

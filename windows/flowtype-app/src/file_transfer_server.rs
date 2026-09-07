@@ -171,25 +171,13 @@ impl FileTransferCoordinator {
                 .store
                 .begin_source_paths(&batch_id)
                 .map_err(|_| "cannot create outbound source index")?;
-            let mut next_ordinal = 0u64;
-            let mut actual_file_count = 0u64;
-            let mut actual_directory_count = 0u64;
-            let mut actual_total_bytes = 0u64;
+            let mut actual = OutboundStats::default();
             for (path, wire_name) in &prepared.roots {
-                write_outbound(
-                    path,
-                    wire_name,
-                    &mut next_ordinal,
-                    &mut actual_file_count,
-                    &mut actual_directory_count,
-                    &mut actual_total_bytes,
-                    &mut manifest,
-                    &mut sources,
-                )?;
+                write_outbound(path, wire_name, &mut actual, &mut manifest, &mut sources)?;
             }
-            if actual_file_count != prepared.file_count
-                || actual_directory_count != prepared.directory_count
-                || actual_total_bytes != prepared.total_bytes
+            if actual.file_count != prepared.file_count
+                || actual.directory_count != prepared.directory_count
+                || actual.total_bytes != prepared.total_bytes
             {
                 return Err("source changed while preparing transfer");
             }
@@ -199,7 +187,7 @@ impl FileTransferCoordinator {
             sources
                 .finish()
                 .map_err(|_| "cannot save outbound sources")?;
-            for ordinal in 0..next_ordinal {
+            for ordinal in 0..actual.next_ordinal {
                 let entry = self
                     .store
                     .manifest_entry(&batch_id, ordinal)
@@ -422,16 +410,14 @@ fn cleanup_expired(store: &FileTransferStore, cutoff: u64) {
             let _ = store.for_each_manifest_entry(&batch.batch_id, |entry| {
                 if batch.direction == TransferDirection::PhoneToComputer
                     && entry.kind == EntryKind::File
+                    && let Ok(target) = store.target_path(&batch.batch_id, entry.ordinal)
+                    && let Some(parent) = target.parent()
                 {
-                    if let Ok(target) = store.target_path(&batch.batch_id, entry.ordinal)
-                        && let Some(parent) = target.parent()
-                    {
-                        let part = parent.join(format!(
-                            ".flowtype-{}-{}.part",
-                            batch.batch_id, entry.entry_id
-                        ));
-                        let _ = fs::remove_file(part);
-                    }
+                    let part = parent.join(format!(
+                        ".flowtype-{}-{}.part",
+                        batch.batch_id, entry.entry_id
+                    ));
+                    let _ = fs::remove_file(part);
                 }
                 Ok(())
             });
@@ -443,6 +429,14 @@ fn cleanup_expired(store: &FileTransferStore, cutoff: u64) {
 struct OutboundPlan {
     roots: Vec<(PathBuf, String)>,
     summaries: Vec<String>,
+    file_count: u64,
+    directory_count: u64,
+    total_bytes: u64,
+}
+
+#[derive(Default)]
+struct OutboundStats {
+    next_ordinal: u64,
     file_count: u64,
     directory_count: u64,
     total_bytes: u64,
@@ -518,10 +512,7 @@ fn count_outbound(
 fn write_outbound(
     path: &std::path::Path,
     relative_path: &str,
-    next_ordinal: &mut u64,
-    file_count: &mut u64,
-    directory_count: &mut u64,
-    total_bytes: &mut u64,
+    stats: &mut OutboundStats,
     manifest: &mut ManifestWriter,
     sources: &mut crate::file_transfer_store::SourceWriter,
 ) -> Result<(), &'static str> {
@@ -532,11 +523,18 @@ fn write_outbound(
         return Err("symbolic links are not supported");
     }
     let kind = if metadata.is_dir() {
-        *directory_count = directory_count.checked_add(1).ok_or("batch is too large")?;
+        stats.directory_count = stats
+            .directory_count
+            .checked_add(1)
+            .ok_or("batch is too large")?;
         EntryKind::Directory
     } else {
-        *file_count = file_count.checked_add(1).ok_or("batch is too large")?;
-        *total_bytes = total_bytes
+        stats.file_count = stats
+            .file_count
+            .checked_add(1)
+            .ok_or("batch is too large")?;
+        stats.total_bytes = stats
+            .total_bytes
             .checked_add(metadata.len())
             .ok_or("batch is too large")?;
         EntryKind::File
@@ -546,9 +544,9 @@ fn write_outbound(
             .ok()
             .and_then(|value| i64::try_from(value.as_millis()).ok())
     });
-    let ordinal = *next_ordinal;
+    let ordinal = stats.next_ordinal;
     let entry = ManifestEntry {
-        ordinal: *next_ordinal,
+        ordinal: stats.next_ordinal,
         entry_id: Uuid::new_v4().to_string(),
         relative_path: relative_path.to_owned(),
         kind,
@@ -567,7 +565,10 @@ fn write_outbound(
     sources
         .append(ordinal, path)
         .map_err(|_| "cannot write outbound source")?;
-    *next_ordinal = next_ordinal.checked_add(1).ok_or("batch is too large")?;
+    stats.next_ordinal = stats
+        .next_ordinal
+        .checked_add(1)
+        .ok_or("batch is too large")?;
     if metadata.is_dir() {
         for child in sorted_children(path)? {
             let name = child
@@ -577,10 +578,7 @@ fn write_outbound(
             write_outbound(
                 &child.path(),
                 &format!("{relative_path}/{name}"),
-                next_ordinal,
-                file_count,
-                directory_count,
-                total_bytes,
+                stats,
                 manifest,
                 sources,
             )?;
@@ -892,10 +890,10 @@ async fn route_request(
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    if !content_type
+    if content_type
         .split(';')
         .next()
-        .is_some_and(|value| value.trim() == "application/x-ndjson")
+        .is_none_or(|value| value.trim() != "application/x-ndjson")
     {
         return Err((StatusCode::UNSUPPORTED_MEDIA_TYPE, "invalid_content_type"));
     }
@@ -1040,6 +1038,7 @@ async fn receive_file(
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&part)
         .map_err(|_| "target_unavailable")?;
     let staged_len = file.metadata().map_err(|_| "target_unavailable")?.len();
