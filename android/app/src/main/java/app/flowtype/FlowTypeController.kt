@@ -136,7 +136,7 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
             sendOffer = syncClient::sendFileOffer,
             sendDecision = syncClient::decideFileOffer,
             sendCancel = syncClient::cancelFileTransfer,
-            parallelism = { if (session.sessionId == null) 2 else 1 },
+            parallelism = { fileTransferParallelism(session.sessionId != null) },
             onChanged = { snapshot -> onMain {
                 val previous = fileTransfer
                 fileTransfer = snapshot
@@ -934,6 +934,9 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         const val BACKGROUND_DISCONNECT_DELAY_MS = 500L
     }
 }
+
+internal fun fileTransferParallelism(activeTextSession: Boolean): Int =
+    if (activeTextSession) 1 else 2
 
 internal fun shouldBeginAutoSelection(
     enabled: Boolean,

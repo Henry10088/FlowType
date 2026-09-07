@@ -1491,6 +1491,26 @@ mod tests {
     }
 
     #[test]
+    fn changed_receive_root_is_used_by_the_next_incoming_batch() {
+        let root = test_root("receive-root");
+        let original = root.join("original");
+        let changed = root.join("changed");
+        let coordinator = FileTransferCoordinator::new(
+            FileTransferStore::new(root.join("state")).unwrap(),
+            original,
+        );
+
+        coordinator.set_receive_root(changed.clone()).unwrap();
+        assert_eq!(coordinator.receive_root().unwrap(), changed);
+
+        coordinator
+            .accept_offer(&offer("batch-new-root"), "phone-1")
+            .unwrap();
+        assert_eq!(coordinator.receive_root().unwrap(), root.join("changed"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn outbound_directory_is_indexed_and_only_one_batch_is_active() {
         let root = test_root("outbound");
         let input = root.join("input");

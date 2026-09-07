@@ -34,6 +34,12 @@ class FlowTypeControllerTest {
         assertNull(recoveryBinding(emptyList(), recovery.pcId))
     }
 
+    @Test
+    fun activeTextInputReducesFileWorkersToOne() {
+        assertEquals(2, fileTransferParallelism(activeTextSession = false))
+        assertEquals(1, fileTransferParallelism(activeTextSession = true))
+    }
+
     private fun binding(pcId: String) = ComputerBinding(
         pcId = pcId,
         pcName = pcId,

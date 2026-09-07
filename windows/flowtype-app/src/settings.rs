@@ -24,13 +24,18 @@ pub fn default_receive_folder() -> io::Result<PathBuf> {
 }
 
 pub fn receive_folder() -> io::Result<PathBuf> {
-    let path = crate::identity::data_dir()?.join(RECEIVE_FOLDER_FILE);
+    receive_folder_from(&crate::identity::data_dir()?, default_receive_folder()?)
+}
+
+fn receive_folder_from(data_dir: &Path, default: PathBuf) -> io::Result<PathBuf> {
+    let path = data_dir.join(RECEIVE_FOLDER_FILE);
     let saved = fs::read_to_string(path)
         .ok()
         .map(|value| PathBuf::from(value.trim()));
-    Ok(saved
-        .filter(|value| value.is_absolute())
-        .unwrap_or(default_receive_folder()?))
+    if let Some(saved) = saved.filter(|value| value.is_absolute()) {
+        return Ok(saved);
+    }
+    Ok(default)
 }
 
 pub fn set_receive_folder(path: &Path) -> io::Result<()> {
@@ -151,4 +156,54 @@ fn check(result: u32) -> io::Result<()> {
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receive_folder_uses_persisted_absolute_path_after_restart() {
+        let root = test_root("persisted");
+        let data = root.join("data");
+        let saved = root.join("自定义接收目录");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(
+            data.join(RECEIVE_FOLDER_FILE),
+            saved.as_os_str().to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            receive_folder_from(&data, root.join("profile/Downloads/FlowType")).unwrap(),
+            saved,
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn receive_folder_ignores_relative_or_missing_saved_value() {
+        let root = test_root("fallback");
+        let data = root.join("data");
+        let profile = root.join("profile");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(data.join(RECEIVE_FOLDER_FILE), "relative-folder").unwrap();
+
+        assert_eq!(
+            receive_folder_from(&data, profile.join("Downloads").join("FlowType")).unwrap(),
+            profile.join("Downloads").join("FlowType"),
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn test_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "flowtype-settings-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ))
+    }
 }
