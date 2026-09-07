@@ -3,6 +3,7 @@ package app.flowtype.filetransfer
 import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.util.Log
 import app.flowtype.data.FileTransferBatch
 import app.flowtype.data.FileTransferStore
 import app.flowtype.data.StoredTransferEntry
@@ -690,6 +691,7 @@ class FileTransferManager(
     }
 
     private fun handleTransferFailure(batch: FileTransferBatch, error: Throwable) {
+        Log.e("FlowTypeFiles", "batch ${batch.batchId} transfer failed", error)
         val message = error.message ?: "transfer_failed"
         val permanent = listOf(
             "source_changed",

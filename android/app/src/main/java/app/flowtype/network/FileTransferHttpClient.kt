@@ -37,7 +37,7 @@ import javax.net.ssl.X509TrustManager
  * the permanent binding created by the QR pairing flow.
  */
 class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
-    private val controlUrl = binding.endpoint.toHttpUrl()
+    private val controlUrl = fileTransferBaseUrl(binding.endpoint).toHttpUrl()
     private val client = buildClient(binding)
 
     fun uploadManifest(
@@ -339,3 +339,9 @@ data class ManifestPage(
     val nextOrdinal: Long,
     val totalEntries: Long,
 )
+
+internal fun fileTransferBaseUrl(controlEndpoint: String): String = when {
+    controlEndpoint.startsWith("wss://") -> "https://" + controlEndpoint.removePrefix("wss://")
+    controlEndpoint.startsWith("ws://") -> "http://" + controlEndpoint.removePrefix("ws://")
+    else -> error("unsupported control endpoint")
+}

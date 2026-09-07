@@ -613,6 +613,19 @@ impl FileTransferStore {
         Ok((terminal, failed))
     }
 
+    pub(crate) fn failed_paths(&self, batch_id: &str, limit: usize) -> io::Result<Vec<String>> {
+        let mut paths = Vec::new();
+        self.for_each_manifest_entry(batch_id, |entry| {
+            if paths.len() < limit
+                && self.read_progress(batch_id, entry.ordinal)?.state == EntryState::Failed
+            {
+                paths.push(entry.relative_path);
+            }
+            Ok(())
+        })?;
+        Ok(paths)
+    }
+
     fn batch_dir(&self, batch_id: &str) -> io::Result<PathBuf> {
         validate_batch_id(batch_id).map_err(|_| invalid_data("invalid batch id"))?;
         Ok(self.root.join(batch_id))

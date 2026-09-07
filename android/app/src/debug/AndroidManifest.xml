@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver
+            android:name=".debug.E2ePairingReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="app.flowtype.E2E_PAIR" />
+            </intent-filter>
+        </receiver>
+        <provider
+            android:name=".debug.E2eFileProvider"
+            android:authorities="app.flowtype.e2e"
+            android:exported="false" />
+    </application>
+</manifest>

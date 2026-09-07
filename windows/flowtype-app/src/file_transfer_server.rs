@@ -61,6 +61,7 @@ pub(crate) struct FileTransferSnapshot {
     pub(crate) total_bytes: u64,
     pub(crate) completed_entries: u64,
     pub(crate) failed_entries: u64,
+    pub(crate) failed_paths: Vec<String>,
     pub(crate) total_entries: u64,
 }
 
@@ -355,6 +356,11 @@ impl FileTransferCoordinator {
             .store
             .progress_summary(&batch.batch_id, total_entries)
             .unwrap_or_default();
+        let failed_paths = if progress.failed_entries > 0 {
+            self.store.failed_paths(&batch.batch_id, 5).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         Some(FileTransferSnapshot {
             batch_id: batch.batch_id,
             direction: batch.direction,
@@ -363,6 +369,7 @@ impl FileTransferCoordinator {
             total_bytes: batch.total_bytes,
             completed_entries: progress.completed_entries.min(total_entries),
             failed_entries: progress.failed_entries.min(total_entries),
+            failed_paths,
             total_entries,
         })
     }

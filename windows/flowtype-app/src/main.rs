@@ -395,6 +395,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         file_transfers,
     });
 
+    #[cfg(debug_assertions)]
+    if let Ok(path) = std::env::var("FLOWTYPE_E2E_PAIRING_URI_FILE")
+        && let Some(uri) = state.current_pairing_uri(endpoint_host)
+    {
+        std::fs::write(path, uri)?;
+    }
+    #[cfg(debug_assertions)]
+    if let Some(path) = std::env::var_os("FLOWTYPE_E2E_SEND_PATH") {
+        let test_state = Arc::clone(&state);
+        let path = std::path::PathBuf::from(path);
+        std::thread::spawn(move || {
+            for _ in 0..120 {
+                if test_state.connected_phone_id().is_some() {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if let Err(error) = test_state.queue_files_to_connected_phone(vec![path]) {
+                        eprintln!("E2E outbound transfer could not start: {error}");
+                    }
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            eprintln!("E2E outbound transfer timed out waiting for the phone");
+        });
+    }
+
     if !ui_preview {
         let network_state = Arc::clone(&state);
         let network_error_state = Arc::clone(&state);
@@ -868,6 +893,12 @@ impl AppState {
     }
 
     fn begin_pairing(&self, host: IpAddr) -> Result<String, Box<dyn std::error::Error>> {
+        #[cfg(debug_assertions)]
+        if std::env::var_os("FLOWTYPE_E2E_PAIRING_URI_FILE").is_some()
+            && let Some(uri) = self.current_pairing_uri(host)
+        {
+            return Ok(uri);
+        }
         let token = random_token();
         *self
             .pairing_token

@@ -97,10 +97,8 @@ async fn serve_connection(
         return Err("authentication message too large".into());
     }
     let auth: AuthMessage = serde_json::from_str(&auth)?;
-    if authenticate_phone_async(&state, auth.clone(), nonce.clone())
-        .await
-        .is_err()
-    {
+    if let Err(error) = authenticate_phone_async(&state, auth.clone(), nonce.clone()).await {
+        eprintln!("authentication rejected for phone {}: {error}", auth.phone_id);
         send_json(
             &mut websocket,
             &ServerMessage::Error(ProtocolError {

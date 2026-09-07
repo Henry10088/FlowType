@@ -1,12 +1,21 @@
 package app.flowtype.filetransfer
 
 import app.flowtype.protocol.TransferDirection
+import app.flowtype.network.fileTransferBaseUrl
 import java.io.FileNotFoundException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class FileTransferFailureTest {
+    @Test
+    fun dataChannelConvertsWebSocketSchemesBeforeHttpParsing() {
+        assertEquals(
+            "https://10.0.2.2:32187/v1/sync",
+            fileTransferBaseUrl("wss://10.0.2.2:32187/v1/sync"),
+        )
+    }
+
     @Test
     fun onlyPermanentPerFileErrorsAreSkipped() {
         assertEquals(

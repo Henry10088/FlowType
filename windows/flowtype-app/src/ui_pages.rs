@@ -211,13 +211,29 @@ impl UiContext {
                 ButtonKind::Secondary,
             );
         }
+        if let Some(transfer) = snapshot.file_transfer.as_ref()
+            && !transfer.failed_paths.is_empty()
+        {
+            self.muted_text(
+                &format!(
+                    "{}：{}",
+                    tr("失败文件", "Failed files"),
+                    transfer.failed_paths.join(" · ")
+                ),
+                220,
+                252,
+                470,
+                42,
+                self.body_font,
+            );
+        }
         self.text(
             tr(
                 "也可以把文件或文件夹拖到此窗口",
                 "You can also drop files or folders here",
             ),
             220,
-            270,
+            310,
             470,
             30,
             self.body_font,
@@ -228,7 +244,7 @@ impl UiContext {
                 "Transfers are protected by the paired device identity and can resume.",
             ),
             220,
-            310,
+            350,
             470,
             48,
             self.body_font,
