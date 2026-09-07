@@ -24,7 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use flowtype_core::file_transfer::FileClientMessage;
+use flowtype_core::file_transfer::{FileClientMessage, FileOffer, FileServerMessage};
 use flowtype_core::ipc::{InjectorRequest, InjectorResponse};
 use flowtype_core::protocol::{
     Ack, Cancel, ClientMessage, ClientSessionState, ErrorCode, HealthAck, ProbeResult, ProbeState,
@@ -286,6 +286,7 @@ struct AppState {
     active_connection: Mutex<Option<ActiveConnection>>,
     online_connections: Mutex<HashMap<u64, OnlineConnection>>,
     switch_channels: Mutex<HashMap<u64, SwitchChannel>>,
+    file_offer_channels: Mutex<HashMap<u64, Sender<FileOffer>>>,
     pending_switch: Mutex<Option<PendingSwitch>>,
     runtime_status: Mutex<RuntimeStatus>,
     ui_hwnd: Arc<AtomicIsize>,
@@ -376,6 +377,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         active_connection: Mutex::new(None),
         online_connections: Mutex::new(HashMap::new()),
         switch_channels: Mutex::new(HashMap::new()),
+        file_offer_channels: Mutex::new(HashMap::new()),
         pending_switch: Mutex::new(None),
         runtime_status: Mutex::new(RuntimeStatus {
             summary: tr("等待手机连接", "Waiting for phone").to_owned(),
@@ -488,6 +490,16 @@ impl AppState {
             injector_ready: self.injector.is_ready(),
             update: self.update.snapshot(),
         }
+    }
+
+    fn connected_phone_id(&self) -> Option<String> {
+        self.online_connections.lock().ok().and_then(|connections| {
+            connections
+                .iter()
+                .filter(|(_, connection)| !connection.is_probe)
+                .max_by_key(|(connection_id, _)| *connection_id)
+                .map(|(_, connection)| connection.phone_id.clone())
+        })
     }
 
     fn update_status(&self, update: impl FnOnce(&mut RuntimeStatus)) {
@@ -758,6 +770,56 @@ impl AppState {
         if let Ok(mut channels) = self.switch_channels.lock() {
             channels.remove(&connection_id);
         }
+    }
+
+    fn register_file_offer_channel(&self, connection_id: u64, sender: Sender<FileOffer>) {
+        if let Ok(mut channels) = self.file_offer_channels.lock() {
+            channels.insert(connection_id, sender);
+        }
+    }
+
+    fn clear_file_offer_channel(&self, connection_id: u64) {
+        if let Ok(mut channels) = self.file_offer_channels.lock() {
+            channels.remove(&connection_id);
+        }
+    }
+
+    fn send_files_to_phone(
+        &self,
+        phone_id: &str,
+        paths: &[std::path::PathBuf],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let offer = self.file_transfers.create_outbound_offer(phone_id, paths)?;
+        let connection_id = self
+            .online_connections
+            .lock()
+            .ok()
+            .and_then(|connections| {
+                connections
+                    .iter()
+                    .filter(|(_, connection)| {
+                        connection.phone_id == phone_id && !connection.is_probe
+                    })
+                    .map(|(id, _)| *id)
+                    .max()
+            })
+            .ok_or("phone is not connected")?;
+        self.file_offer_channels
+            .lock()
+            .map_err(|_| "file offer channel unavailable")?
+            .get(&connection_id)
+            .ok_or("phone connection does not support file transfer")?
+            .try_send(offer)
+            .map_err(|_| "phone file queue is busy")?;
+        Ok(())
+    }
+
+    fn send_files_to_connected_phone(
+        &self,
+        paths: &[std::path::PathBuf],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let phone_id = self.connected_phone_id().ok_or("phone is not connected")?;
+        self.send_files_to_phone(&phone_id, paths)
     }
 
     fn begin_pairing(&self, host: IpAddr) -> Result<String, Box<dyn std::error::Error>> {

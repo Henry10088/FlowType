@@ -51,6 +51,8 @@ class MainActivity : ComponentActivity() {
     private var scanLaunched = false
     private var waitingForOverlayPermission = false
     private var waitingForUpdatePermission = false
+    private var choosingIncomingTarget = false
+    private var shownIncomingBatchId: String? = null
     private var imeWasVisible = false
     private var ignoreImeDismissUntil = 0L
     private var keepAwakeUntil = 0L
@@ -162,9 +164,15 @@ class MainActivity : ComponentActivity() {
     }
     private val directory = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
-            persistReadPermission(uri)
-            controller.sendDirectory(uri)
+            if (choosingIncomingTarget) {
+                persistTreePermission(uri)
+                controller.acceptIncomingFiles(uri)
+            } else {
+                persistReadPermission(uri)
+                controller.sendDirectory(uri)
+            }
         }
+        choosingIncomingTarget = false
         showInput(focus = false)
     }
 
@@ -379,6 +387,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun persistTreePermission(uri: Uri) {
+        runCatching {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+        }
+    }
+
     private fun formatBytes(value: Long): String = when {
         value >= 1024L * 1024 * 1024 -> String.format("%.1f GB", value / (1024.0 * 1024 * 1024))
         value >= 1024L * 1024 -> String.format("%.1f MB", value / (1024.0 * 1024))
@@ -402,6 +419,36 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun renderInput(state: FlowTypeController.UiState) {
+        state.fileTransfer.incomingOffer?.let { offer ->
+            if (shownIncomingBatchId != offer.batchId) {
+                shownIncomingBatchId = offer.batchId
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.incoming_files_title)
+                    .setMessage(
+                        getString(
+                            R.string.incoming_files_message,
+                            state.binding?.pcName ?: getString(R.string.default_computer),
+                            offer.fileCount,
+                            offer.directoryCount,
+                            formatBytes(offer.totalBytes),
+                            offer.roots.joinToString("、"),
+                        ),
+                    )
+                    .setNegativeButton(R.string.reject) { _, _ ->
+                        shownIncomingBatchId = null
+                        controller.rejectIncomingFiles()
+                    }
+                    .setPositiveButton(R.string.choose_save_location) { _, _ ->
+                        choosingIncomingTarget = true
+                        directory.launch(null)
+                    }
+                    .setOnCancelListener {
+                        shownIncomingBatchId = null
+                        controller.rejectIncomingFiles()
+                    }
+                    .show()
+            }
+        }
         computerName.text = state.binding?.pcName ?: getString(R.string.default_computer)
         status.text = state.status
         syncStatus.text = state.syncState

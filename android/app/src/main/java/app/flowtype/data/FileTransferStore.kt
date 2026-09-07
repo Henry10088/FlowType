@@ -28,6 +28,8 @@ data class StoredTransferEntry(
     val manifest: TransferManifestEntry,
     val sourceUri: String?,
     val targetUri: String?,
+    val targetName: String? = null,
+    val targetParentUri: String? = null,
     val state: TransferEntryState = TransferEntryState.PENDING,
     val committedOffset: Long = 0,
     val errorCode: String? = null,
@@ -40,6 +42,12 @@ data class StoredTransferEntry(
         }
         require(sourceUri == null || sourceUri.length <= MAX_URI_CHARS) { "source URI too long" }
         require(targetUri == null || targetUri.length <= MAX_URI_CHARS) { "target URI too long" }
+        require(targetName == null || (targetName.isNotBlank() && targetName.length <= 255)) {
+            "invalid target name"
+        }
+        require(targetParentUri == null || targetParentUri.length <= MAX_URI_CHARS) {
+            "target parent URI too long"
+        }
         require(errorCode == null || errorCode.matches(Regex("[a-z0-9_]{1,64}"))) {
             "invalid error code"
         }
@@ -140,6 +148,7 @@ class FileTransferStore(private val database: AppDatabase) {
         state: TransferEntryState,
         committedOffset: Long,
         targetUri: String? = null,
+        targetName: String? = null,
         errorCode: String? = null,
     ) {
         val current = entry(batchId, ordinal) ?: error("unknown entry")
@@ -159,7 +168,29 @@ class FileTransferStore(private val database: AppDatabase) {
                 put("state", state.wireName)
                 put("committed_offset", committedOffset)
                 if (targetUri != null) put("target_uri", targetUri)
+                if (targetName != null) put("target_name", targetName)
                 putNullable("error_code", errorCode)
+            },
+            "batch_id = ? AND ordinal = ?",
+            arrayOf(batchId, ordinal.toString()),
+        ).also { check(it == 1) }
+    }
+
+    fun setEntryTarget(
+        batchId: String,
+        ordinal: Long,
+        targetUri: String,
+        targetName: String?,
+        targetParentUri: String?,
+    ) {
+        require(targetUri.isNotBlank() && targetUri.length <= 32 * 1024)
+        require(targetName == null || (targetName.isNotBlank() && targetName.length <= 255))
+        database.writableDatabase.update(
+            "file_transfer_entries",
+            ContentValues().apply {
+                put("target_uri", targetUri)
+                putNullable("target_name", targetName)
+                putNullable("target_parent_uri", targetParentUri)
             },
             "batch_id = ? AND ordinal = ?",
             arrayOf(batchId, ordinal.toString()),
@@ -218,6 +249,14 @@ class FileTransferStore(private val database: AppDatabase) {
         null,
     ).use { cursor -> if (cursor.moveToFirst()) cursor.entry() else null }
 
+    fun manifestEntryCount(batchId: String): Long = database.readableDatabase.rawQuery(
+        "SELECT COUNT(*) FROM file_transfer_entries WHERE batch_id = ?",
+        arrayOf(batchId),
+    ).use { cursor ->
+        check(cursor.moveToFirst())
+        cursor.getLong(0)
+    }
+
     private fun FileTransferBatch.validate() {
         validateIdentifier(batchId, MAX_BATCH_ID_BYTES)
         require(pcId.isNotBlank() && pcId.length <= 128) { "invalid computer" }
@@ -243,6 +282,8 @@ class FileTransferStore(private val database: AppDatabase) {
         putNullable("mime_type", manifest.mimeType)
         putNullable("sha256", manifest.sha256)
         putNullable("target_uri", targetUri)
+        putNullable("target_name", targetName)
+        putNullable("target_parent_uri", targetParentUri)
         put("state", state.wireName)
         put("committed_offset", committedOffset)
         putNullable("error_code", errorCode)
@@ -274,9 +315,11 @@ class FileTransferStore(private val database: AppDatabase) {
         ),
         sourceUri = if (isNull(2)) null else getString(2),
         targetUri = if (isNull(9)) null else getString(9),
-        state = enumByWireName(getString(10)),
-        committedOffset = getLong(11),
-        errorCode = if (isNull(12)) null else getString(12),
+        targetName = if (isNull(10)) null else getString(10),
+        targetParentUri = if (isNull(11)) null else getString(11),
+        state = enumByWireName(getString(12)),
+        committedOffset = getLong(13),
+        errorCode = if (isNull(14)) null else getString(14),
     )
 
     private inline fun <reified T : Enum<T>> enumByWireName(value: String): T = enumValues<T>().single {
@@ -334,6 +377,8 @@ class FileTransferStore(private val database: AppDatabase) {
             "mime_type",
             "sha256",
             "target_uri",
+            "target_name",
+            "target_parent_uri",
             "state",
             "committed_offset",
             "error_code",

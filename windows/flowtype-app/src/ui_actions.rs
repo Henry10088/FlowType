@@ -1,6 +1,71 @@
 use super::*;
+use std::path::PathBuf;
+use windows::Win32::Foundation::HWND as WinHwnd;
+use windows::Win32::System::Com::{
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+    CoTaskMemFree, CoUninitialize,
+};
+use windows::Win32::UI::Shell::{
+    FOS_ALLOWMULTISELECT, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
+    FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH,
+};
 
 impl UiContext {
+    pub(super) fn choose_and_send_files(&mut self, folder: bool) {
+        let result = choose_paths(self.hwnd, folder).and_then(|paths| {
+            if paths.is_empty() {
+                Ok(())
+            } else {
+                self.state.send_files_to_connected_phone(&paths)
+            }
+        });
+        match result {
+            Ok(()) => self.show_save_notice(true, tr("已发送文件请求", "File transfer requested")),
+            Err(error) if error.to_string() == "canceled" => {}
+            Err(error) => self.show_save_notice(
+                false,
+                &format!("{}: {error}", tr("无法发送文件", "Could not send files")),
+            ),
+        }
+    }
+
+    pub(super) fn send_dropped_paths(&mut self, drop: windows_sys::Win32::UI::Shell::HDROP) {
+        let count = unsafe { DragQueryFileW(drop, u32::MAX, std::ptr::null_mut(), 0) };
+        let mut paths = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let length = unsafe { DragQueryFileW(drop, index, std::ptr::null_mut(), 0) };
+            if length == 0 {
+                continue;
+            }
+            let mut value = vec![0u16; length as usize + 1];
+            let copied =
+                unsafe { DragQueryFileW(drop, index, value.as_mut_ptr(), value.len() as u32) };
+            if copied > 0 {
+                paths.push(PathBuf::from(String::from_utf16_lossy(
+                    &value[..copied as usize],
+                )));
+            }
+        }
+        unsafe { DragFinish(drop) };
+        if self.page != Page::Files {
+            self.show_save_notice(
+                false,
+                tr("请先打开文件传输页面", "Open File transfer first"),
+            );
+            return;
+        }
+        if paths.is_empty() {
+            return;
+        }
+        match self.state.send_files_to_connected_phone(&paths) {
+            Ok(()) => self.show_save_notice(true, tr("已发送文件请求", "File transfer requested")),
+            Err(error) => self.show_save_notice(
+                false,
+                &format!("{}: {error}", tr("无法发送文件", "Could not send files")),
+            ),
+        }
+    }
+
     pub(super) fn set_page(&mut self, page: Page) {
         if self.page == Page::Pairing && page != Page::Pairing {
             self.state.cancel_pairing();
@@ -278,6 +343,10 @@ impl UiContext {
                     set_control_text(self.phone_statuses[index], &status);
                 }
             }
+            Page::Files => {
+                self.rebuild_page();
+                return;
+            }
             Page::Settings => {
                 set_control_text(
                     self.service_status,
@@ -364,5 +433,43 @@ impl UiContext {
         } else {
             self.state.perform_update_action(action);
         }
+    }
+}
+
+fn choose_paths(hwnd: HWND, folder: bool) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+    let result = (|| -> windows::core::Result<Vec<PathBuf>> {
+        let dialog: IFileOpenDialog =
+            unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)? };
+        let mut options = unsafe { dialog.GetOptions()? };
+        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
+        if folder {
+            options |= FOS_PICKFOLDERS;
+        } else {
+            options |= FOS_ALLOWMULTISELECT | FOS_FILEMUSTEXIST;
+        }
+        unsafe {
+            dialog.SetOptions(options)?;
+            dialog.Show(Some(WinHwnd(hwnd)))?;
+        }
+        let results = unsafe { dialog.GetResults()? };
+        let count = unsafe { results.GetCount()? };
+        let mut paths = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let item = unsafe { results.GetItemAt(index)? };
+            let value = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH)? };
+            let text = unsafe { value.to_string()? };
+            unsafe { CoTaskMemFree(Some(value.0.cast())) };
+            paths.push(PathBuf::from(text));
+        }
+        Ok(paths)
+    })();
+    if initialized {
+        unsafe { CoUninitialize() };
+    }
+    match result {
+        Ok(paths) => Ok(paths),
+        Err(error) if error.code().0 == 0x800704C7u32 as i32 => Err("canceled".into()),
+        Err(error) => Err(error.into()),
     }
 }

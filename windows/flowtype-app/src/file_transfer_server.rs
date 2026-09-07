@@ -10,8 +10,8 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use flowtype_core::file_transfer::{
-    BatchState, FILE_TRANSFER_VERSION, FileOffer, FileServerMessage, FileTicket, ManifestEntry,
-    TransferDirection,
+    BatchState, EntryKind, FILE_TRANSFER_VERSION, FileDecision, FileOffer, FileServerMessage,
+    FileTicket, ManifestEntry, TransferDirection, WindowsNameReservation,
 };
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
@@ -24,6 +24,7 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
+use uuid::Uuid;
 
 use crate::AppState;
 use crate::file_transfer_store::EntryProgress;
@@ -38,6 +39,7 @@ struct TicketGrant {
     phone_id: String,
     token_hash: [u8; 32],
     expires_at_epoch_seconds: u64,
+    direction: TransferDirection,
 }
 
 pub(crate) struct FileTransferCoordinator {
@@ -133,6 +135,158 @@ impl FileTransferCoordinator {
         Ok(())
     }
 
+    pub(crate) fn create_outbound_offer(
+        &self,
+        phone_id: &str,
+        roots: &[PathBuf],
+    ) -> Result<FileOffer, &'static str> {
+        let prepared = prepare_outbound_entries(roots)?;
+        let now = unix_time();
+        let batch_id = Uuid::new_v4().to_string();
+        let batch = BatchRecord::new(
+            batch_id.clone(),
+            phone_id.to_owned(),
+            TransferDirection::ComputerToPhone,
+            now,
+            prepared.file_count,
+            prepared.directory_count,
+            prepared.total_bytes,
+        )
+        .map_err(|_| "invalid outbound batch")?;
+        self.store
+            .create_batch(&batch)
+            .map_err(|_| "cannot create outbound batch")?;
+        let mut manifest = self
+            .store
+            .begin_manifest(&batch_id)
+            .map_err(|_| "cannot create outbound manifest")?;
+        for (entry, _) in &prepared.entries {
+            manifest
+                .append(entry)
+                .map_err(|_| "invalid outbound file")?;
+        }
+        manifest
+            .finish()
+            .map_err(|_| "cannot finish outbound manifest")?;
+        self.store
+            .write_source_paths(
+                &batch_id,
+                prepared
+                    .entries
+                    .iter()
+                    .map(|(entry, path)| (entry.ordinal, path.clone())),
+            )
+            .map_err(|_| "cannot save outbound sources")?;
+        for (entry, _) in &prepared.entries {
+            if entry.kind == EntryKind::Directory {
+                self.store
+                    .write_progress(
+                        &batch_id,
+                        entry.ordinal,
+                        EntryProgress {
+                            state: flowtype_core::file_transfer::EntryState::Completed,
+                            committed_offset: 0,
+                        },
+                    )
+                    .map_err(|_| "cannot initialize outbound directory")?;
+            }
+        }
+        Ok(FileOffer {
+            protocol_version: flowtype_core::PROTOCOL_VERSION,
+            transfer_version: FILE_TRANSFER_VERSION,
+            phone_id: phone_id.to_owned(),
+            batch_id,
+            direction: TransferDirection::ComputerToPhone,
+            file_count: prepared.file_count,
+            directory_count: prepared.directory_count,
+            total_bytes: prepared.total_bytes,
+            roots: prepared.roots,
+        })
+    }
+
+    pub(crate) fn accept_decision(
+        &self,
+        decision: &FileDecision,
+        phone_id: &str,
+    ) -> Result<Option<FileServerMessage>, &'static str> {
+        decision.validate().map_err(|_| "invalid file decision")?;
+        let batch = self
+            .store
+            .load_batch(&decision.batch_id)
+            .map_err(|_| "unknown batch")?;
+        if batch.phone_id != phone_id || batch.direction != TransferDirection::ComputerToPhone {
+            return Err("batch owner mismatch");
+        }
+        if !decision.accepted {
+            self.cancel(&decision.batch_id, phone_id)?;
+            return Ok(None);
+        }
+        if batch.state == BatchState::WaitingConfirmation {
+            self.store
+                .update_state(&decision.batch_id, BatchState::Queued, unix_time())
+                .map_err(|_| "cannot accept batch")?;
+        }
+        let state = self
+            .store
+            .load_batch(&decision.batch_id)
+            .map_err(|_| "unknown batch")?
+            .state;
+        if state == BatchState::Queued || state == BatchState::WaitingNetwork {
+            self.store
+                .update_state(&decision.batch_id, BatchState::Preparing, unix_time())
+                .map_err(|_| "cannot prepare batch")?;
+        }
+        if self
+            .store
+            .load_batch(&decision.batch_id)
+            .map_err(|_| "unknown batch")?
+            .state
+            == BatchState::Preparing
+        {
+            self.store
+                .update_state(&decision.batch_id, BatchState::Transferring, unix_time())
+                .map_err(|_| "cannot start batch")?;
+        }
+        Ok(Some(self.issue_ticket(&decision.batch_id, phone_id)?))
+    }
+
+    pub(crate) fn pending_outbound_offers(&self, phone_id: &str) -> Vec<FileOffer> {
+        self.store
+            .recoverable_batches()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|batch| {
+                batch.phone_id == phone_id && batch.direction == TransferDirection::ComputerToPhone
+            })
+            .filter_map(|batch| {
+                let mut roots = Vec::new();
+                self.store
+                    .for_each_manifest_entry(&batch.batch_id, |entry| {
+                        let root = entry.relative_path.split('/').next().unwrap_or_default();
+                        if !root.is_empty()
+                            && !roots.iter().any(|value| value == root)
+                            && roots.len() < 8
+                        {
+                            roots.push(root.to_owned());
+                        }
+                        Ok(())
+                    })
+                    .ok()?;
+                Some(FileOffer {
+                    protocol_version: flowtype_core::PROTOCOL_VERSION,
+                    transfer_version: FILE_TRANSFER_VERSION,
+                    phone_id: batch.phone_id,
+                    batch_id: batch.batch_id,
+                    direction: batch.direction,
+                    file_count: batch.file_count,
+                    directory_count: batch.directory_count,
+                    total_bytes: batch.total_bytes,
+                    roots,
+                })
+            })
+            .collect()
+    }
+
     fn issue_ticket(
         &self,
         batch_id: &str,
@@ -143,6 +297,11 @@ impl FileTransferCoordinator {
         let token = URL_SAFE_NO_PAD.encode(secret);
         let token_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
         let expires_at_epoch_seconds = unix_time().saturating_add(TICKET_LIFETIME.as_secs());
+        let direction = self
+            .store
+            .load_batch(batch_id)
+            .map_err(|_| "unknown batch")?
+            .direction;
         self.tickets
             .lock()
             .map_err(|_| "ticket service unavailable")?
@@ -152,6 +311,7 @@ impl FileTransferCoordinator {
                     phone_id: phone_id.to_owned(),
                     token_hash,
                     expires_at_epoch_seconds,
+                    direction,
                 },
             );
         Ok(FileServerMessage::FileTicket(FileTicket {
@@ -180,6 +340,122 @@ impl FileTransferCoordinator {
                 .load_batch(batch_id)
                 .is_ok_and(|batch| batch.phone_id == grant.phone_id && !batch.state.is_terminal())
     }
+
+    fn authorized_direction(&self, batch_id: &str, bearer: &str) -> Option<TransferDirection> {
+        self.authorize(batch_id, bearer)
+            .then(|| {
+                self.tickets
+                    .lock()
+                    .ok()?
+                    .get(batch_id)
+                    .map(|grant| grant.direction)
+            })
+            .flatten()
+    }
+}
+
+struct PreparedOutbound {
+    entries: Vec<(ManifestEntry, PathBuf)>,
+    roots: Vec<String>,
+    file_count: u64,
+    directory_count: u64,
+    total_bytes: u64,
+}
+
+fn prepare_outbound_entries(roots: &[PathBuf]) -> Result<PreparedOutbound, &'static str> {
+    if roots.is_empty() {
+        return Err("no files selected");
+    }
+    let mut root_names = WindowsNameReservation::new(Vec::new());
+    let mut entries = Vec::new();
+    let mut summaries = Vec::new();
+    for root in roots {
+        let metadata = fs::symlink_metadata(root).map_err(|_| "source unavailable")?;
+        if metadata.file_type().is_symlink() {
+            return Err("symbolic links are not supported");
+        }
+        let name = root
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or("source name is not Unicode")?;
+        let wire_name = root_names.reserve(name, metadata.is_dir());
+        summaries.push(wire_name.clone());
+        append_outbound(root, &wire_name, &mut entries)?;
+    }
+    let file_count = entries
+        .iter()
+        .filter(|(entry, _)| entry.kind == EntryKind::File)
+        .count() as u64;
+    let directory_count = entries.len() as u64 - file_count;
+    let total_bytes = entries.iter().try_fold(0u64, |total, (entry, _)| {
+        total.checked_add(entry.size).ok_or("batch is too large")
+    })?;
+    if total_bytes > flowtype_core::file_transfer::MAX_WIRE_INTEGER {
+        return Err("batch is too large");
+    }
+    Ok(PreparedOutbound {
+        entries,
+        roots: summaries.into_iter().take(8).collect(),
+        file_count,
+        directory_count,
+        total_bytes,
+    })
+}
+
+fn append_outbound(
+    path: &std::path::Path,
+    relative_path: &str,
+    output: &mut Vec<(ManifestEntry, PathBuf)>,
+) -> Result<(), &'static str> {
+    flowtype_core::file_transfer::validate_relative_path(relative_path)
+        .map_err(|_| "source path is not transferable")?;
+    let metadata = fs::symlink_metadata(path).map_err(|_| "source unavailable")?;
+    if metadata.file_type().is_symlink() {
+        return Err("symbolic links are not supported");
+    }
+    let kind = if metadata.is_dir() {
+        EntryKind::Directory
+    } else {
+        EntryKind::File
+    };
+    let modified_at_epoch_millis = metadata.modified().ok().and_then(|time| {
+        time.duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|value| i64::try_from(value.as_millis()).ok())
+    });
+    let ordinal = output.len() as u64;
+    output.push((
+        ManifestEntry {
+            ordinal,
+            entry_id: Uuid::new_v4().to_string(),
+            relative_path: relative_path.to_owned(),
+            kind,
+            size: if metadata.is_file() {
+                metadata.len()
+            } else {
+                0
+            },
+            modified_at_epoch_millis,
+            mime_type: None,
+            sha256: None,
+        },
+        path.to_path_buf(),
+    ));
+    if metadata.is_dir() {
+        let mut children = fs::read_dir(path)
+            .map_err(|_| "source directory cannot be read")?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "source directory cannot be read")?;
+        children.sort_by_key(|entry| entry.file_name().to_string_lossy().to_lowercase());
+        for child in children {
+            let name = child
+                .file_name()
+                .into_string()
+                .map_err(|_| "source name is not Unicode")?;
+            append_outbound(&child.path(), &format!("{relative_path}/{name}"), output)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn run_file_transfer_server(
@@ -245,6 +521,9 @@ async fn route_request(
     if !coordinator.authorize(&batch_id, bearer) {
         return Err((StatusCode::UNAUTHORIZED, "unauthorized"));
     }
+    let direction = coordinator
+        .authorized_direction(&batch_id, bearer)
+        .ok_or((StatusCode::UNAUTHORIZED, "unauthorized"))?;
 
     if action == "complete" {
         if request.method() != Method::POST {
@@ -270,6 +549,60 @@ async fn route_request(
         ));
     }
 
+    if let Some(entry_id) = action.strip_prefix("verify/") {
+        if direction != TransferDirection::ComputerToPhone || request.method() != Method::POST {
+            return Err((StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"));
+        }
+        let ordinal = request
+            .headers()
+            .get("x-flowtype-ordinal")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or((StatusCode::BAD_REQUEST, "invalid_ordinal"))?;
+        let supplied_hash = request
+            .headers()
+            .get("x-flowtype-sha256")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .ok_or((StatusCode::BAD_REQUEST, "invalid_hash"))?;
+        let entry = coordinator
+            .store
+            .manifest_entry(&batch_id, ordinal)
+            .map_err(|_| (StatusCode::NOT_FOUND, "entry_not_found"))?;
+        if entry.entry_id != entry_id || entry.kind != EntryKind::File {
+            return Err((StatusCode::NOT_FOUND, "entry_not_found"));
+        }
+        let source = coordinator
+            .store
+            .source_path(&batch_id, ordinal)
+            .map_err(|_| (StatusCode::NOT_FOUND, "source_unavailable"))?;
+        let metadata =
+            fs::metadata(&source).map_err(|_| (StatusCode::NOT_FOUND, "source_unavailable"))?;
+        if !metadata.is_file() || metadata.len() != entry.size {
+            return Err((StatusCode::CONFLICT, "source_changed"));
+        }
+        let source_hash =
+            hash_file(&source).map_err(|_| (StatusCode::CONFLICT, "source_unavailable"))?;
+        if !source_hash.eq_ignore_ascii_case(supplied_hash) {
+            return Err((StatusCode::CONFLICT, "integrity_failed"));
+        }
+        coordinator
+            .store
+            .write_progress(
+                &batch_id,
+                ordinal,
+                EntryProgress {
+                    state: flowtype_core::file_transfer::EntryState::Completed,
+                    committed_offset: entry.size,
+                },
+            )
+            .map_err(|_| (StatusCode::CONFLICT, "progress_unavailable"))?;
+        return Ok(json_response(
+            StatusCode::OK,
+            serde_json::json!({"verified": true, "sha256": source_hash}).to_string(),
+        ));
+    }
+
     if let Some(entry_id) = action.strip_prefix("entries/") {
         let ordinal = request
             .headers()
@@ -284,6 +617,46 @@ async fn route_request(
         if entry.entry_id != entry_id || entry.kind != flowtype_core::file_transfer::EntryKind::File
         {
             return Err((StatusCode::NOT_FOUND, "entry_not_found"));
+        }
+        if direction == TransferDirection::ComputerToPhone && request.method() == Method::GET {
+            let range = request
+                .headers()
+                .get("range")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| parse_range(value, entry.size))
+                .ok_or((StatusCode::RANGE_NOT_SATISFIABLE, "invalid_range"))?;
+            let source = coordinator
+                .store
+                .source_path(&batch_id, ordinal)
+                .map_err(|_| (StatusCode::NOT_FOUND, "source_unavailable"))?;
+            let metadata =
+                fs::metadata(&source).map_err(|_| (StatusCode::NOT_FOUND, "source_unavailable"))?;
+            if !metadata.is_file() || metadata.len() != entry.size {
+                return Err((StatusCode::CONFLICT, "source_changed"));
+            }
+            let (start, end) = range;
+            let length = end - start + 1;
+            let mut file = std::fs::File::open(source)
+                .map_err(|_| (StatusCode::NOT_FOUND, "source_unavailable"))?;
+            file.seek(SeekFrom::Start(start))
+                .map_err(|_| (StatusCode::CONFLICT, "source_unavailable"))?;
+            let mut bytes = vec![0u8; length as usize];
+            file.read_exact(&mut bytes)
+                .map_err(|_| (StatusCode::CONFLICT, "source_changed"))?;
+            return Ok(Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(CONTENT_TYPE, "application/octet-stream")
+                .header(
+                    "content-range",
+                    format!("bytes {start}-{end}/{}", entry.size),
+                )
+                .header("content-length", length)
+                .header("cache-control", "no-store")
+                .body(Full::new(Bytes::from(bytes)))
+                .expect("valid HTTP response"));
+        }
+        if direction != TransferDirection::PhoneToComputer {
+            return Err((StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"));
         }
         if request.method() == Method::HEAD {
             let progress = coordinator
@@ -331,6 +704,44 @@ async fn route_request(
     if action != "manifest" {
         return Err((StatusCode::NOT_FOUND, "not_found"));
     }
+    if direction == TransferDirection::ComputerToPhone && request.method() == Method::GET {
+        let start = request
+            .headers()
+            .get("x-flowtype-start")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let batch = coordinator
+            .store
+            .load_batch(&batch_id)
+            .map_err(|_| (StatusCode::NOT_FOUND, "batch_not_found"))?;
+        let count = batch.file_count.saturating_add(batch.directory_count);
+        if start > count {
+            return Err((StatusCode::BAD_REQUEST, "invalid_ordinal"));
+        }
+        let end = start.saturating_add(256).min(count);
+        let mut body = Vec::new();
+        for ordinal in start..end {
+            let entry = coordinator
+                .store
+                .manifest_entry(&batch_id, ordinal)
+                .map_err(|_| (StatusCode::CONFLICT, "manifest_unavailable"))?;
+            serde_json::to_writer(&mut body, &entry)
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "manifest_unavailable"))?;
+            body.push(b'\n');
+        }
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "application/x-ndjson")
+            .header("x-flowtype-next", end)
+            .header("x-flowtype-count", count)
+            .header("cache-control", "no-store")
+            .body(Full::new(Bytes::from(body)))
+            .expect("valid HTTP response"));
+    }
+    if direction != TransferDirection::PhoneToComputer {
+        return Err((StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"));
+    }
     if request.method() != Method::POST {
         return Err((StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"));
     }
@@ -359,6 +770,27 @@ async fn route_request(
         StatusCode::CREATED,
         r#"{"accepted":true}"#.to_owned(),
     ))
+}
+
+fn parse_range(value: &str, total: u64) -> Option<(u64, u64)> {
+    if total == 0 {
+        return None;
+    }
+    let (start, requested_end) = value.strip_prefix("bytes=")?.split_once('-')?;
+    let start = start.parse::<u64>().ok()?;
+    if start >= total {
+        return None;
+    }
+    let requested_end = if requested_end.is_empty() {
+        total - 1
+    } else {
+        requested_end.parse::<u64>().ok()?.min(total - 1)
+    };
+    if requested_end < start {
+        return None;
+    }
+    let end = requested_end.min(start.saturating_add(8 * 1024 * 1024 - 1));
+    Some((start, end))
 }
 
 async fn ingest_manifest(
@@ -689,8 +1121,10 @@ mod tests {
     }
 
     fn ticket_token(message: FileServerMessage) -> String {
-        let FileServerMessage::FileTicket(ticket) = message;
-        ticket.token
+        match message {
+            FileServerMessage::FileTicket(ticket) => ticket.token,
+            FileServerMessage::FileOffer(_) => panic!("expected a ticket"),
+        }
     }
 
     fn test_root(label: &str) -> PathBuf {

@@ -122,4 +122,8 @@
     <string name="file_transfer_progress">Sending %1$s / %2$s</string>
     <string name="file_transfer_complete">Files sent</string>
     <string name="file_waiting_network">File transfer is waiting for the network</string>
+    <string name="incoming_files_title">Files from computer</string>
+    <string name="incoming_files_message">%1$s wants to send %2$d files and %3$d folders (%4$s).\n\n%5$s</string>
+    <string name="reject">Reject</string>
+    <string name="choose_save_location">Choose save location</string>
 </resources>

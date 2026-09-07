@@ -36,6 +36,7 @@ impl UiContext {
                 }
                 let icon = match target {
                     Page::Status => "\u{e7f4}",
+                    Page::Files => "\u{e8b7}",
                     Page::Phones | Page::Pairing => "\u{e8ea}",
                     Page::Settings => "\u{e713}",
                 };
@@ -231,6 +232,7 @@ impl UiContext {
                     logical_height,
                     &StatusLayout::new(self.logical_client_width()),
                 )),
+                Page::Files => None,
                 Page::Settings if self.save_notice.is_none() => Some(painter.paint_settings(
                     logical_height,
                     &SettingsLayout::new(self.logical_client_width()),
@@ -296,6 +298,7 @@ impl UiContext {
                 }
             }
             Page::Phones => {}
+            Page::Files => {}
             Page::Settings => {
                 draw_line(
                     dc,

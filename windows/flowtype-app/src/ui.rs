@@ -24,8 +24,8 @@ use windows_sys::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext,
 };
 use windows_sys::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
-    Shell_NotifyIconW,
+    DragAcceptFiles, DragFinish, DragQueryFileW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD,
+    NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -79,6 +79,7 @@ struct SaveNotice {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Status,
+    Files,
     Phones,
     Settings,
     Pairing,
@@ -298,6 +299,7 @@ unsafe extern "system" fn window_proc(
             let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
             ui.direct2d = Direct2dPainter::new(hwnd, width as u32, height as u32, dpi).ok();
             ui.rebuild_page();
+            unsafe { DragAcceptFiles(hwnd, 1) };
             ui.add_tray();
             if ui.floating_enabled_checked {
                 ui.ball_hwnd = ui_floating::create(ui.state.clone(), hwnd);
@@ -335,6 +337,8 @@ unsafe extern "system" fn window_proc(
                     let _ = ui.state.open_update_history();
                 }
                 Some(UiCommand::OpenLanguageMenu) => ui.show_language_menu(),
+                Some(UiCommand::ChooseFiles) => ui.choose_and_send_files(false),
+                Some(UiCommand::ChooseFolder) => ui.choose_and_send_files(true),
                 Some(UiCommand::Exit) => {
                     crate::diagnostics::log(format!("window command exit id={id}"));
                     unsafe { DestroyWindow(hwnd) };
@@ -386,6 +390,10 @@ unsafe extern "system" fn window_proc(
         }
         WM_PAINT => {
             ui.paint();
+            0
+        }
+        WM_DROPFILES => {
+            ui.send_dropped_paths(wparam as _);
             0
         }
         WM_SIZE => {
@@ -504,10 +512,19 @@ fn create_navigation(ui: &mut UiContext) {
         ButtonKind::Navigation(Page::Status),
     );
     ui.owner_button(
+        tr("文件传输", "File transfer"),
+        ID_NAV_FILES,
+        0,
+        66,
+        180,
+        48,
+        ButtonKind::Navigation(Page::Files),
+    );
+    ui.owner_button(
         tr("已绑定手机", "Paired phones"),
         ID_NAV_PHONES,
         0,
-        66,
+        114,
         180,
         48,
         ButtonKind::Navigation(Page::Phones),
@@ -516,7 +533,7 @@ fn create_navigation(ui: &mut UiContext) {
         tr("设置", "Settings"),
         ID_NAV_SETTINGS,
         0,
-        114,
+        162,
         180,
         48,
         ButtonKind::Navigation(Page::Settings),

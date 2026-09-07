@@ -148,6 +148,7 @@ async fn serve_connection(
         }
     });
     let (switch_tx, mut switch_rx) = channel(4);
+    let (file_offer_tx, mut file_offer_rx) = channel(4);
     state.register_switch_channel(
         connection_id,
         switch_tx,
@@ -155,6 +156,16 @@ async fn serve_connection(
         auth.capabilities.iter().any(|value| value == "switch_ack"),
     );
     let _switch_lease = SwitchChannelLease {
+        state: Arc::clone(&state),
+        connection_id,
+    };
+    state.register_file_offer_channel(connection_id, file_offer_tx.clone());
+    if !is_control {
+        for offer in state.file_transfers.pending_outbound_offers(&auth.phone_id) {
+            let _ = file_offer_tx.try_send(offer);
+        }
+    }
+    let _file_offer_lease = FileOfferChannelLease {
         state: Arc::clone(&state),
         connection_id,
     };
@@ -192,6 +203,12 @@ async fn serve_connection(
                         pc_name: request.pc_name,
                         request_id: request.request_id,
                     }),
+                ).await?;
+            }
+            Some(offer) = file_offer_rx.recv() => {
+                send_json(
+                    &mut websocket,
+                    &FileServerMessage::FileOffer(offer),
                 ).await?;
             }
             inbound = websocket.next() => {
@@ -249,7 +266,12 @@ async fn serve_connection(
                                 .cancel(&cancel.batch_id, &auth.phone_id)?;
                         }
                         FileClientMessage::FileDecision(decision) => {
-                            decision.validate().map_err(|_| "invalid file decision")?;
+                            if let Some(ticket) = state
+                                .file_transfers
+                                .accept_decision(&decision, &auth.phone_id)?
+                            {
+                                send_json(&mut websocket, &ticket).await?;
+                            }
                         }
                     }
                 } else if value.get("type").and_then(serde_json::Value::as_str) == Some("image_start") {
@@ -713,6 +735,11 @@ struct SwitchChannelLease {
     connection_id: u64,
 }
 
+struct FileOfferChannelLease {
+    state: Arc<AppState>,
+    connection_id: u64,
+}
+
 struct OnlineConnectionLease {
     state: Arc<AppState>,
     connection_id: u64,
@@ -727,6 +754,12 @@ impl Drop for OnlineConnectionLease {
 impl Drop for SwitchChannelLease {
     fn drop(&mut self) {
         self.state.clear_switch_channel(self.connection_id);
+    }
+}
+
+impl Drop for FileOfferChannelLease {
+    fn drop(&mut self) {
+        self.state.clear_file_offer_channel(self.connection_id);
     }
 }
 

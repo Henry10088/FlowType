@@ -17,6 +17,8 @@ const MANIFEST_INDEX_FILE: &str = "manifest-index-v1.bin";
 const MANIFEST_COMPLETE_FILE: &str = "manifest-complete.json";
 const TARGETS_FILE: &str = "targets.ndjson";
 const TARGETS_INDEX_FILE: &str = "targets-index-v1.bin";
+const SOURCES_FILE: &str = "sources.ndjson";
+const SOURCES_INDEX_FILE: &str = "sources-index-v1.bin";
 const PROGRESS_FILE: &str = "progress-v1.bin";
 const PROGRESS_RECORD_BYTES: u64 = 16;
 const PROGRESS_RECORD_VERSION: u8 = 1;
@@ -108,6 +110,12 @@ struct ManifestComplete {
 struct TargetRecord {
     ordinal: u64,
     relative_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SourceRecord {
+    ordinal: u64,
+    path: String,
 }
 
 pub(crate) struct FileTransferStore {
@@ -434,6 +442,68 @@ impl FileTransferStore {
             return Err(invalid_data("target path escaped its root"));
         }
         Ok(result)
+    }
+
+    pub(crate) fn write_source_paths(
+        &self,
+        batch_id: &str,
+        paths: impl IntoIterator<Item = (u64, PathBuf)>,
+    ) -> io::Result<()> {
+        let directory = self.batch_dir(batch_id)?;
+        let mut data = BufWriter::with_capacity(
+            256 * 1024,
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(directory.join(SOURCES_FILE))?,
+        );
+        let mut index = BufWriter::with_capacity(
+            64 * 1024,
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(directory.join(SOURCES_INDEX_FILE))?,
+        );
+        let mut next_ordinal = 0u64;
+        let mut next_offset = 0u64;
+        for (ordinal, path) in paths {
+            if ordinal != next_ordinal || !path.is_absolute() {
+                return Err(invalid_data("invalid source path mapping"));
+            }
+            let record = SourceRecord {
+                ordinal,
+                path: path.to_string_lossy().into_owned(),
+            };
+            let mut line = serde_json::to_vec(&record).map_err(json_error)?;
+            line.push(b'\n');
+            index.write_all(&next_offset.to_le_bytes())?;
+            data.write_all(&line)?;
+            next_offset = next_offset
+                .checked_add(line.len() as u64)
+                .ok_or_else(|| invalid_data("source mapping offset overflow"))?;
+            next_ordinal += 1;
+        }
+        data.flush()?;
+        data.get_ref().sync_all()?;
+        index.flush()?;
+        index.get_ref().sync_all()
+    }
+
+    pub(crate) fn source_path(&self, batch_id: &str, ordinal: u64) -> io::Result<PathBuf> {
+        let directory = self.batch_dir(batch_id)?;
+        let record: SourceRecord = read_indexed_json_line(
+            &directory.join(SOURCES_FILE),
+            &directory.join(SOURCES_INDEX_FILE),
+            ordinal,
+        )?;
+        if record.ordinal != ordinal {
+            return Err(invalid_data("source index does not match entry"));
+        }
+        let path = PathBuf::from(record.path);
+        if !path.is_absolute() {
+            return Err(invalid_data("source path is not absolute"));
+        }
+        Ok(path)
     }
 
     pub(crate) fn read_progress(&self, batch_id: &str, ordinal: u64) -> io::Result<EntryProgress> {

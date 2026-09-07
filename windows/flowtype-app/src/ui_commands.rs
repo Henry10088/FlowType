@@ -3,6 +3,7 @@ use super::Page;
 pub(super) const ID_NAV_STATUS: usize = 100;
 pub(super) const ID_NAV_PHONES: usize = 101;
 pub(super) const ID_NAV_SETTINGS: usize = 102;
+pub(super) const ID_NAV_FILES: usize = 103;
 pub(super) const ID_PAIR: usize = 110;
 pub(super) const ID_SAVE_SETTINGS: usize = 120;
 pub(super) const ID_REPAIR: usize = 121;
@@ -13,6 +14,8 @@ pub(super) const ID_UPDATE_ACTION: usize = 125;
 pub(super) const ID_UPDATE_REPOSITORY: usize = 126;
 pub(super) const ID_UPDATE_HISTORY: usize = 127;
 pub(super) const ID_LANGUAGE_MENU: usize = 128;
+pub(super) const ID_CHOOSE_FILES: usize = 129;
+pub(super) const ID_CHOOSE_FOLDER: usize = 130;
 pub(super) const ID_UNPAIR_BASE: usize = 3000;
 pub(super) const ID_TRAY_OPEN: usize = 4001;
 pub(super) const ID_TRAY_PAIR: usize = 4002;
@@ -30,6 +33,8 @@ pub(super) enum UiCommand {
     OpenUpdateRepository,
     OpenUpdateHistory,
     OpenLanguageMenu,
+    ChooseFiles,
+    ChooseFolder,
     Exit,
     Unpair(usize),
 }
@@ -39,6 +44,7 @@ pub(super) fn command_for_id(id: usize) -> Option<UiCommand> {
         ID_NAV_STATUS | ID_TRAY_OPEN => UiCommand::Navigate(Page::Status),
         ID_NAV_PHONES => UiCommand::Navigate(Page::Phones),
         ID_NAV_SETTINGS | ID_TRAY_UPDATE => UiCommand::Navigate(Page::Settings),
+        ID_NAV_FILES => UiCommand::Navigate(Page::Files),
         ID_PAIR | ID_TRAY_PAIR => UiCommand::Pair,
         ID_SAVE_SETTINGS => UiCommand::SaveSettings,
         ID_AUTO_START => UiCommand::ToggleAutoStart,
@@ -48,6 +54,8 @@ pub(super) fn command_for_id(id: usize) -> Option<UiCommand> {
         ID_UPDATE_REPOSITORY => UiCommand::OpenUpdateRepository,
         ID_UPDATE_HISTORY => UiCommand::OpenUpdateHistory,
         ID_LANGUAGE_MENU => UiCommand::OpenLanguageMenu,
+        ID_CHOOSE_FILES => UiCommand::ChooseFiles,
+        ID_CHOOSE_FOLDER => UiCommand::ChooseFolder,
         ID_TRAY_EXIT => UiCommand::Exit,
         value if (ID_UNPAIR_BASE..ID_UNPAIR_BASE + 1000).contains(&value) => {
             UiCommand::Unpair(value - ID_UNPAIR_BASE)

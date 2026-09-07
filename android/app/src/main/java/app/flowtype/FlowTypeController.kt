@@ -23,6 +23,7 @@ import app.flowtype.protocol.AckMessage
 import app.flowtype.protocol.ErrorCode
 import app.flowtype.protocol.ErrorMessage
 import app.flowtype.protocol.FileTicketMessage
+import app.flowtype.protocol.FileOfferMessage
 import app.flowtype.protocol.SnapshotMessage
 import app.flowtype.protocol.SnapshotType
 import app.flowtype.protocol.TargetMessage
@@ -130,6 +131,7 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
             store = fileTransferStore,
             phoneId = bindings.phoneId,
             sendOffer = syncClient::sendFileOffer,
+            sendDecision = syncClient::decideFileOffer,
             onChanged = { snapshot -> onMain {
                 fileTransfer = snapshot
                 notifyChanged()
@@ -260,6 +262,14 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
 
     fun sendDirectory(uri: Uri) {
         fileTransfers.createDirectory(uri)
+    }
+
+    fun acceptIncomingFiles(targetTree: Uri) {
+        fileTransfers.acceptIncoming(targetTree)
+    }
+
+    fun rejectIncomingFiles() {
+        fileTransfers.rejectIncoming()
     }
 
     fun textChanged(text: String) {
@@ -696,6 +706,10 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
 
     override fun onFileTicket(ticket: FileTicketMessage) {
         fileTransfers.onTicket(ticket)
+    }
+
+    override fun onFileOffer(offer: FileOfferMessage) {
+        fileTransfers.onOffer(offer)
     }
 
     private fun connect(binding: ComputerBinding) {

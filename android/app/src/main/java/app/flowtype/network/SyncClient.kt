@@ -65,6 +65,7 @@ class SyncClient(
         fun onImageTransferred(transferId: String)
         fun onImageTransferFailed(transferId: String)
         fun onFileTicket(ticket: FileTicketMessage) = Unit
+        fun onFileOffer(offer: FileOfferMessage) = Unit
     }
 
     private val lock = Any()
@@ -87,6 +88,7 @@ class SyncClient(
     private var healthCheckSupported = false
     private var pendingImageId: String? = null
     private val pendingFileOffers = mutableSetOf<String>()
+    private val acceptedIncomingBatches = mutableSetOf<String>()
 
     fun connect(binding: ComputerBinding) {
         synchronized(lock) {
@@ -152,6 +154,15 @@ class SyncClient(
         if (!ready) return@synchronized false
         pendingFileOffers -= batchId
         socket?.send(FileTransferCodec.encodeCancel(FileCancelMessage(batchId))) == true
+    }
+
+    fun decideFileOffer(batchId: String, accepted: Boolean): Boolean = synchronized(lock) {
+        if (!ready) return@synchronized false
+        val decision = app.flowtype.protocol.FileDecisionMessage(batchId, accepted)
+        decision.validate()
+        val sent = socket?.send(FileTransferCodec.encodeDecision(decision)) == true
+        if (sent && accepted) acceptedIncomingBatches += batchId else acceptedIncomingBatches -= batchId
+        sent
     }
 
     fun abandonSession(sessionId: String) {
@@ -432,8 +443,13 @@ class SyncClient(
                         val ticket = FileTransferCodec.decodeTicket(text).also {
                             it.validate(System.currentTimeMillis() / 1_000)
                         }
-                        if (!pendingFileOffers.remove(ticket.batchId)) return
+                        if (!pendingFileOffers.remove(ticket.batchId) && !acceptedIncomingBatches.remove(ticket.batchId)) return
                         listener.onFileTicket(ticket)
+                    }
+                    "file_offer" -> {
+                        val offer = FileTransferCodec.decodeOffer(text).also { it.validate(phoneId) }
+                        if (offer.direction != app.flowtype.protocol.TransferDirection.COMPUTER_TO_PHONE) return
+                        listener.onFileOffer(offer)
                     }
                     else -> when (val message = ProtocolCodec.decodeServer(text)) {
                         is ServerMessage.ProbeResult -> {

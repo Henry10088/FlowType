@@ -157,6 +157,65 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
         }
     }
 
+    fun downloadManifestPage(ticket: FileTicketMessage, startOrdinal: Long): ManifestPage {
+        val request = authorizedRequest(ticket, "manifest")
+            .header("x-flowtype-start", startOrdinal.toString())
+            .get()
+            .build()
+        client.newCall(request).execute().use { response ->
+            check(response.isSuccessful) { "manifest download failed: ${response.code}" }
+            val entries = requireNotNull(response.body).source().use { source ->
+                buildList {
+                    while (!source.exhausted()) {
+                        val line = source.readUtf8Line() ?: break
+                        if (line.isNotEmpty()) add(FileTransferCodec.decodeManifestEntry(line))
+                    }
+                }
+            }
+            val next = response.header("x-flowtype-next")?.toLongOrNull()
+                ?: error("manifest cursor is unavailable")
+            val count = response.header("x-flowtype-count")?.toLongOrNull()
+                ?: error("manifest count is unavailable")
+            check(next >= startOrdinal && next <= count)
+            return ManifestPage(entries, next, count)
+        }
+    }
+
+    fun downloadChunk(
+        ticket: FileTicketMessage,
+        entry: TransferManifestEntry,
+        offset: Long,
+    ): ByteArray {
+        require(offset in 0 until entry.size)
+        val request = authorizedRequest(ticket, "entries/${entry.entryId}")
+            .header("x-flowtype-ordinal", entry.ordinal.toString())
+            .header("Range", "bytes=$offset-")
+            .get()
+            .build()
+        client.newCall(request).execute().use { response ->
+            check(response.code == 206) { "file download failed: ${response.code}" }
+            val bytes = requireNotNull(response.body).bytes()
+            check(bytes.isNotEmpty() && offset + bytes.size <= entry.size) { "invalid file chunk" }
+            return bytes
+        }
+    }
+
+    fun verifyDownloadedFile(
+        ticket: FileTicketMessage,
+        entry: TransferManifestEntry,
+        sha256: String,
+    ) {
+        require(sha256.matches(Regex("[0-9a-f]{64}")))
+        val request = authorizedRequest(ticket, "verify/${entry.entryId}")
+            .header("x-flowtype-ordinal", entry.ordinal.toString())
+            .header("x-flowtype-sha256", sha256)
+            .post(EMPTY_BODY)
+            .build()
+        client.newCall(request).execute().use { response ->
+            check(response.isSuccessful) { "file verification failed: ${response.code}" }
+        }
+    }
+
     private fun authorizedRequest(ticket: FileTicketMessage, action: String): Request.Builder {
         ticket.validate(System.currentTimeMillis() / 1_000)
         val url = controlUrl.newBuilder()
@@ -225,4 +284,10 @@ data class FileUploadReceipt(
     val committedOffset: Long,
     val completed: Boolean,
     val sha256: String?,
+)
+
+data class ManifestPage(
+    val entries: List<TransferManifestEntry>,
+    val nextOrdinal: Long,
+    val totalEntries: Long,
 )

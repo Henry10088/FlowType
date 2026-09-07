@@ -124,6 +124,7 @@ impl UiContext {
         create_navigation(self);
         match self.page {
             Page::Status => self.build_status(),
+            Page::Files => self.build_files(),
             Page::Phones => self.build_phones(),
             Page::Settings => self.build_settings(),
             Page::Pairing => self.build_pairing(),
@@ -139,6 +140,72 @@ impl UiContext {
                 RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN,
             );
         }
+    }
+
+    pub(super) fn build_files(&mut self) {
+        let snapshot = self.state.snapshot();
+        self.text(
+            tr("文件传输", "File transfer"),
+            220,
+            28,
+            300,
+            34,
+            self.title_font,
+        );
+        self.text(
+            tr("发送到手机", "Send to phone"),
+            220,
+            96,
+            260,
+            30,
+            self.heading_font,
+        );
+        let destination = snapshot
+            .status
+            .connected_phone
+            .as_deref()
+            .unwrap_or(tr("手机未连接", "Phone is not connected"));
+        self.muted_text(destination, 220, 132, 440, 26, self.body_font);
+        self.owner_button(
+            tr("选择文件", "Choose files"),
+            ID_CHOOSE_FILES,
+            220,
+            184,
+            128,
+            38,
+            ButtonKind::Secondary,
+        );
+        self.owner_button(
+            tr("选择文件夹", "Choose folder"),
+            ID_CHOOSE_FOLDER,
+            360,
+            184,
+            128,
+            38,
+            ButtonKind::Secondary,
+        );
+        self.text(
+            tr(
+                "也可以把文件或文件夹拖到此窗口",
+                "You can also drop files or folders here",
+            ),
+            220,
+            270,
+            470,
+            30,
+            self.body_font,
+        );
+        self.muted_text(
+            tr(
+                "传输经过设备绑定密钥保护，支持断点继续。",
+                "Transfers are protected by the paired device identity and can resume.",
+            ),
+            220,
+            310,
+            470,
+            48,
+            self.body_font,
+        );
     }
 
     pub(super) fn build_status(&mut self) {
