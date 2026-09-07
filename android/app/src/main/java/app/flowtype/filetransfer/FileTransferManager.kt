@@ -327,9 +327,7 @@ class FileTransferManager(
                 store.updateBatchState(batch.batchId, TransferBatchState.PREPARING, System.currentTimeMillis())
             }
             withActiveClient(binding) { client ->
-                client.uploadManifest(ticket, manifestSequence(batch.batchId)).use { response ->
-                    check(response.isSuccessful) { "manifest upload failed: ${response.code}" }
-                }
+                client.uploadManifest(ticket, manifestSequence(batch.batchId))
                 reportStoredFailures(client, ticket, batch.batchId)
                 store.updateBatchState(batch.batchId, TransferBatchState.TRANSFERRING, System.currentTimeMillis())
                 val transferred = AtomicLong(transferredBytes(batch.batchId))
@@ -707,6 +705,7 @@ class FileTransferManager(
         val permanent = listOf(
             "source_changed",
             "integrity_failed",
+            "insufficient_space",
             "manifest summary mismatch",
             "batch id conflict",
             "invalid manifest",
@@ -809,6 +808,8 @@ internal fun permanentEntryFailureCode(
             "remote file size changed" in message -> "source_changed"
         "source_unavailable" in message || "source uri" in message -> "source_unavailable"
         "integrity_failed" in message || "integrity check failed" in message -> "integrity_failed"
+        "insufficient_space" in message || "enospc" in message || "no space left" in message ->
+            "insufficient_space"
         "target_exists" in message -> "target_exists"
         else -> null
     }

@@ -138,6 +138,7 @@
     <string name="file_transfer_complete_message">The file transfer completed.</string>
     <string name="file_transfer_failed_title">File transfer stopped</string>
     <string name="file_transfer_failed_message">Open FlowType to review and retry the transfer.</string>
+    <string name="file_transfer_insufficient_space">Not enough storage space to receive these files</string>
     <string name="file_transfer_partial_failure">Some files were not transferred</string>
     <string name="file_transfer_partial_failure_count">%1$d files were not transferred</string>
     <string name="file_transfer_failed_files">Successful files were kept. Failed files:\n\n%1$s</string>

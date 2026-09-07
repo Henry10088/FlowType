@@ -604,7 +604,15 @@ class MainActivity : ComponentActivity() {
                 R.string.file_transfer_partial_failure_count,
                 state.fileTransfer.failedPaths.size,
             )
-        } else if (state.fileTransfer.batchId != null && state.fileTransfer.error == null) {
+        } else if (state.fileTransfer.error != null) {
+            syncStatus.setText(
+                if ("insufficient_space" in state.fileTransfer.error) {
+                    R.string.file_transfer_insufficient_space
+                } else {
+                    R.string.file_transfer_failed_title
+                },
+            )
+        } else if (state.fileTransfer.batchId != null) {
             syncStatus.setText(R.string.file_transfer_complete)
         }
         status.setTextColor(getColor(

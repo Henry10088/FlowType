@@ -43,7 +43,7 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
     fun uploadManifest(
         ticket: FileTicketMessage,
         entries: Sequence<TransferManifestEntry>,
-    ): Response {
+    ) {
         ticket.validate(System.currentTimeMillis() / 1_000)
         val url = controlUrl.newBuilder()
             .scheme("https")
@@ -69,7 +69,9 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
             .header("Cache-Control", "no-store")
             .post(body)
             .build()
-        return client.newCall(request).execute()
+        client.newCall(request).execute().use { response ->
+            checkResponse(response, "manifest upload failed")
+        }
     }
 
     fun queryCommittedOffset(ticket: FileTicketMessage, entry: TransferManifestEntry): Long {

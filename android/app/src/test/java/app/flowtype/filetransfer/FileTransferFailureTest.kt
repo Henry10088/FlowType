@@ -1,12 +1,14 @@
 package app.flowtype.filetransfer
 
-import app.flowtype.protocol.TransferDirection
 import app.flowtype.protocol.TransferBatchState
-import app.flowtype.network.fileTransferBaseUrl
+import app.flowtype.protocol.TransferDirection
 import app.flowtype.network.FILE_IO_IDLE_TIMEOUT_SECONDS
+import app.flowtype.network.fileTransferBaseUrl
 import java.io.FileNotFoundException
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FileTransferFailureTest {
@@ -17,10 +19,10 @@ class FileTransferFailureTest {
 
     @Test
     fun processRecoveryDoesNotMoveAnActiveBatchBackwards() {
-        assertEquals(true, shouldEnterPreparing(TransferBatchState.QUEUED))
-        assertEquals(true, shouldEnterPreparing(TransferBatchState.WAITING_NETWORK))
-        assertEquals(false, shouldEnterPreparing(TransferBatchState.PREPARING))
-        assertEquals(false, shouldEnterPreparing(TransferBatchState.TRANSFERRING))
+        assertTrue(shouldEnterPreparing(TransferBatchState.QUEUED))
+        assertTrue(shouldEnterPreparing(TransferBatchState.WAITING_NETWORK))
+        assertFalse(shouldEnterPreparing(TransferBatchState.PREPARING))
+        assertFalse(shouldEnterPreparing(TransferBatchState.TRANSFERRING))
     }
 
     @Test
@@ -58,6 +60,13 @@ class FileTransferFailureTest {
             permanentEntryFailureCode(
                 IllegalStateException("connection reset"),
                 TransferDirection.PHONE_TO_COMPUTER,
+            ),
+        )
+        assertEquals(
+            "insufficient_space",
+            permanentEntryFailureCode(
+                IllegalStateException("file download failed: insufficient_space"),
+                TransferDirection.COMPUTER_TO_PHONE,
             ),
         )
         assertNull(

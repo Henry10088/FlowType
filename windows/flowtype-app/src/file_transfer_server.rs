@@ -1249,7 +1249,13 @@ async fn receive_file(
         if received > entry.size {
             return Err("size_mismatch");
         }
-        file.write_all(&data).map_err(|_| "write_failed")?;
+        file.write_all(&data).map_err(|_| {
+            if has_available_space(parent, entry.size.saturating_sub(received)) {
+                "write_failed"
+            } else {
+                "insufficient_space"
+            }
+        })?;
         hasher.update(&data);
         if received.saturating_sub(persisted) >= 16 * 1024 * 1024
             || last_persist.elapsed() >= Duration::from_secs(1)
