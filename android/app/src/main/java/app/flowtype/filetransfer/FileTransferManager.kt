@@ -1,8 +1,11 @@
 package app.flowtype.filetransfer
 
 import android.content.Context
+import android.database.sqlite.SQLiteFullException
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.system.ErrnoException
+import android.system.OsConstants
 import android.util.Log
 import app.flowtype.data.FileTransferBatch
 import app.flowtype.data.FileTransferStore
@@ -397,6 +400,7 @@ class FileTransferManager(
                             }
                         } catch (error: Throwable) {
                             val code = permanentEntryFailureCode(error, batch.direction) ?: throw error
+                            if (code == "insufficient_space") throw error
                             val current = store.entry(batch.batchId, entry.manifest.ordinal) ?: entry
                             store.updateEntryProgress(
                                 batch.batchId,
@@ -467,6 +471,7 @@ class FileTransferManager(
                             }
                         } catch (error: Throwable) {
                             val code = permanentEntryFailureCode(error, batch.direction) ?: throw error
+                            if (code == "insufficient_space") throw error
                             val current = store.entry(batch.batchId, stored.manifest.ordinal) ?: stored
                             store.updateEntryProgress(
                                 batch.batchId,
@@ -701,7 +706,8 @@ class FileTransferManager(
 
     private fun handleTransferFailure(batch: FileTransferBatch, error: Throwable) {
         Log.e("FlowTypeFiles", "batch ${batch.batchId} transfer failed", error)
-        val message = error.message ?: "transfer_failed"
+        val storageFull = isInsufficientStorage(error)
+        val message = if (storageFull) "insufficient_space" else error.message ?: "transfer_failed"
         val permanent = listOf(
             "source_changed",
             "integrity_failed",
@@ -736,6 +742,9 @@ class FileTransferManager(
             return
         }
         if (permanent) {
+            if (storageFull && batch.direction == TransferDirection.COMPUTER_TO_PHONE) {
+                cleanupPartialTargets(batch.batchId)
+            }
             runCatching {
                 store.updateBatchState(
                     batch.batchId,
@@ -802,6 +811,7 @@ internal fun permanentEntryFailureCode(
     ) {
         return "source_unavailable"
     }
+    if (isInsufficientStorage(error)) return "insufficient_space"
     val message = error.message.orEmpty().lowercase()
     return when {
         "source_changed" in message || "source became" in message ||
@@ -813,6 +823,27 @@ internal fun permanentEntryFailureCode(
         "target_exists" in message -> "target_exists"
         else -> null
     }
+}
+
+internal fun isInsufficientStorage(error: Throwable): Boolean {
+    var current: Throwable? = error
+    val visited = HashSet<Throwable>()
+    while (current != null && visited.add(current)) {
+        if (current is SQLiteFullException ||
+            current is ErrnoException && current.errno == OsConstants.ENOSPC
+        ) {
+            return true
+        }
+        val message = current.message.orEmpty().lowercase()
+        if ("insufficient_space" in message || "enospc" in message ||
+            "no space left" in message || "database or disk is full" in message ||
+            "sqlite_full" in message
+        ) {
+            return true
+        }
+        current = current.cause
+    }
+    return false
 }
 
 internal fun shouldEnterPreparing(state: TransferBatchState): Boolean =

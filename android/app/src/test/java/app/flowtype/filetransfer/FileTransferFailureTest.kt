@@ -76,4 +76,21 @@ class FileTransferFailureTest {
             ),
         )
     }
+
+    @Test
+    fun fullAndroidStorageIsNotRetriedAsANetworkFailure() {
+        assertTrue(isInsufficientStorage(IllegalStateException("database or disk is full (code 13 SQLITE_FULL)")))
+        assertTrue(
+            isInsufficientStorage(
+                IllegalStateException("write failed", IllegalStateException("ENOSPC")),
+            ),
+        )
+        assertEquals(
+            "insufficient_space",
+            permanentEntryFailureCode(
+                IllegalStateException("database or disk is full (code 13 SQLITE_FULL)"),
+                TransferDirection.COMPUTER_TO_PHONE,
+            ),
+        )
+    }
 }
