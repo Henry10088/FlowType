@@ -93,19 +93,19 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
         ticket: FileTicketMessage,
         stored: StoredTransferEntry,
         offset: Long,
+        onProgress: (Long) -> Unit,
     ): FileUploadReceipt {
         val source = Uri.parse(requireNotNull(stored.sourceUri) { "source URI is unavailable" })
         val entry = stored.manifest
         entry.validate()
         require(offset in 0..entry.size)
         var localHash: String? = null
-        val chunkLength = minOf(entry.size - offset, MAX_CHUNK_BYTES)
+        val remainingLength = entry.size - offset
         val body = object : RequestBody() {
             override fun contentType() = OCTET_STREAM
-            override fun contentLength(): Long = chunkLength
+            override fun contentLength(): Long = remainingLength
 
             override fun writeTo(sink: BufferedSink) {
-                val digest = MessageDigest.getInstance("SHA-256")
                 resolver.openInputStream(source).use { input ->
                     requireNotNull(input) { "source URI cannot be opened" }
                     val buffer = ByteArray(512 * 1024)
@@ -113,24 +113,19 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
                     while (prefix > 0) {
                         val read = input.read(buffer, 0, minOf(prefix, buffer.size.toLong()).toInt())
                         if (read < 0) throw EOFException("source became shorter")
-                        digest.update(buffer, 0, read)
                         prefix -= read
                     }
-                    var remaining = chunkLength
+                    var remaining = remainingLength
                     while (remaining > 0) {
                         val read = input.read(buffer, 0, minOf(remaining, buffer.size.toLong()).toInt())
                         if (read < 0) throw EOFException("source became shorter")
                         sink.write(buffer, 0, read)
-                        digest.update(buffer, 0, read)
+                        onProgress(read.toLong())
                         remaining -= read
                     }
-                    if (offset + chunkLength == entry.size) {
-                        check(input.read() == -1) { "source became larger" }
-                    }
+                    check(input.read() == -1) { "source became larger" }
                 }
-                if (offset + chunkLength == entry.size) {
-                    localHash = digest.digest().joinToString("") { "%02x".format(it) }
-                }
+                localHash = hashSource(resolver, source)
             }
         }
         val request = authorizedRequest(ticket, "entries/${entry.entryId}")
@@ -254,6 +249,20 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
         client.connectionPool.evictAll()
     }
 
+    private fun hashSource(resolver: ContentResolver, source: Uri): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        resolver.openInputStream(source).use { input ->
+            requireNotNull(input) { "source URI cannot be opened" }
+            val buffer = ByteArray(512 * 1024)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
     private fun buildClient(binding: ComputerBinding): OkHttpClient {
         val trustManager = PinnedTrustManager(binding.tlsSpkiSha256)
         val sslContext = SSLContext.getInstance("TLS")
@@ -295,7 +304,6 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
         val NDJSON = "application/x-ndjson".toMediaType()
         val OCTET_STREAM = "application/octet-stream".toMediaType()
         val EMPTY_BODY = ByteArray(0).toRequestBody(OCTET_STREAM)
-        const val MAX_CHUNK_BYTES = 8L * 1024 * 1024
     }
 }
 

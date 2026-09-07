@@ -328,13 +328,36 @@ class FileTransferManager(
                         var completedFile = false
                         while (!completedFile) {
                             checkNotCanceled(batch.batchId)
-                            val receipt = client.uploadFile(context.contentResolver, ticket, entry, committed)
+                            var reported = 0L
+                            var pendingUiBytes = 0L
+                            var lastUiUpdate = System.nanoTime()
+                            val receipt = client.uploadFile(
+                                context.contentResolver,
+                                ticket,
+                                entry,
+                                committed,
+                            ) { bytes ->
+                                reported += bytes
+                                pendingUiBytes += bytes
+                                val now = System.nanoTime()
+                                if (pendingUiBytes >= 8L * 1024 * 1024 ||
+                                    now - lastUiUpdate >= 250L * 1_000_000
+                                ) {
+                                    val current = transferred.addAndGet(pendingUiBytes)
+                                    pendingUiBytes = 0
+                                    lastUiUpdate = now
+                                    onChanged(Snapshot(true, batch.batchId, current, batch.totalBytes))
+                                }
+                            }
+                            if (pendingUiBytes > 0) {
+                                transferred.addAndGet(pendingUiBytes)
+                            }
                             check(receipt.committedOffset > committed || receipt.completed) {
                                 "file upload made no progress"
                             }
                             val previous = committed
                             committed = receipt.committedOffset
-                            transferred.addAndGet(committed - previous)
+                            transferred.addAndGet(committed - previous - reported)
                             completedFile = receipt.completed
                             store.updateEntryProgress(
                                 batch.batchId,

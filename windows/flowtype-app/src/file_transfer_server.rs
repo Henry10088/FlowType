@@ -707,9 +707,7 @@ async fn route_request(
             .store
             .source_path(&batch_id, ordinal)
             .map_err(|_| (StatusCode::NOT_FOUND, "source_unavailable"))?;
-        let metadata =
-            fs::metadata(&source).map_err(|_| (StatusCode::NOT_FOUND, "source_unavailable"))?;
-        if !metadata.is_file() || metadata.len() != entry.size {
+        if !source_matches_entry(&source, &entry) {
             return Err((StatusCode::CONFLICT, "source_changed"));
         }
         let source_hash =
@@ -760,9 +758,7 @@ async fn route_request(
                 .store
                 .source_path(&batch_id, ordinal)
                 .map_err(|_| (StatusCode::NOT_FOUND, "source_unavailable"))?;
-            let metadata =
-                fs::metadata(&source).map_err(|_| (StatusCode::NOT_FOUND, "source_unavailable"))?;
-            if !metadata.is_file() || metadata.len() != entry.size {
+            if !source_matches_entry(&source, &entry) {
                 return Err((StatusCode::CONFLICT, "source_changed"));
             }
             let (start, end) = range;
@@ -1222,6 +1218,24 @@ fn constant_time_equal(left: &[u8; 32], right: &[u8; 32]) -> bool {
         == 0
 }
 
+fn source_matches_entry(path: &std::path::Path, entry: &ManifestEntry) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() != entry.size {
+        return false;
+    }
+    let Some(expected) = entry.modified_at_epoch_millis else {
+        return true;
+    };
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .and_then(|value| i64::try_from(value.as_millis()).ok())
+        == Some(expected)
+}
+
 fn unix_time() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1298,6 +1312,38 @@ mod tests {
                 .create_outbound_offer("phone-1", &[input])
                 .is_ok()
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn outbound_source_identity_checks_size_and_modified_time() {
+        let root = test_root("source-identity");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.txt");
+        fs::write(&source, b"abc").unwrap();
+        let metadata = fs::metadata(&source).unwrap();
+        let modified = metadata
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let mut entry = ManifestEntry {
+            ordinal: 0,
+            entry_id: "entry-1".into(),
+            relative_path: "source.txt".into(),
+            kind: EntryKind::File,
+            size: 3,
+            modified_at_epoch_millis: Some(modified),
+            mime_type: None,
+            sha256: None,
+        };
+        assert!(source_matches_entry(&source, &entry));
+        entry.size = 4;
+        assert!(!source_matches_entry(&source, &entry));
+        entry.size = 3;
+        entry.modified_at_epoch_millis = Some(0);
+        assert!(!source_matches_entry(&source, &entry));
         fs::remove_dir_all(root).unwrap();
     }
 
