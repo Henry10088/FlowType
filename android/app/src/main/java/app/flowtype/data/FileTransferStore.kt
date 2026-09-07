@@ -277,6 +277,28 @@ class FileTransferStore(private val database: AppDatabase) {
         cursor.getLong(0)
     }
 
+    fun failedEntryCount(batchId: String): Long = database.readableDatabase.rawQuery(
+        "SELECT COUNT(*) FROM file_transfer_entries WHERE batch_id = ? AND state = ?",
+        arrayOf(batchId, TransferEntryState.FAILED.wireName),
+    ).use { cursor ->
+        check(cursor.moveToFirst())
+        cursor.getLong(0)
+    }
+
+    fun failedEntries(batchId: String, limit: Int = 20): List<StoredTransferEntry> {
+        require(limit in 1..100)
+        return database.readableDatabase.query(
+            "file_transfer_entries",
+            ENTRY_COLUMNS,
+            "batch_id = ? AND state = ?",
+            arrayOf(batchId, TransferEntryState.FAILED.wireName),
+            null,
+            null,
+            "ordinal",
+            limit.toString(),
+        ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.entry()) } }
+    }
+
     private fun FileTransferBatch.validate() {
         validateIdentifier(batchId, MAX_BATCH_ID_BYTES)
         require(pcId.isNotBlank() && pcId.length <= 128) { "invalid computer" }

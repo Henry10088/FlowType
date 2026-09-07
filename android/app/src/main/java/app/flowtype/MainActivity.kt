@@ -54,6 +54,7 @@ class MainActivity : ComponentActivity() {
     private var choosingIncomingTarget = false
     private var shownIncomingBatchId: String? = null
     private var shownReselectionBatchId: String? = null
+    private var shownFailedBatchId: String? = null
     private var imeWasVisible = false
     private var ignoreImeDismissUntil = 0L
     private var keepAwakeUntil = 0L
@@ -509,6 +510,17 @@ class MainActivity : ComponentActivity() {
                 }
                 .show()
         }
+        if (!state.fileTransfer.active && state.fileTransfer.failedPaths.isNotEmpty() &&
+            shownFailedBatchId != state.fileTransfer.batchId
+        ) {
+            shownFailedBatchId = state.fileTransfer.batchId
+            val paths = state.fileTransfer.failedPaths.joinToString("\n") { "• $it" }
+            AlertDialog.Builder(this)
+                .setTitle(R.string.file_transfer_partial_failure)
+                .setMessage(getString(R.string.file_transfer_failed_files, paths))
+                .setPositiveButton(android.R.string.ok, null)
+                .show()
+        }
         computerName.text = state.binding?.pcName ?: getString(R.string.default_computer)
         status.text = state.status
         syncStatus.text = state.syncState
@@ -535,6 +547,11 @@ class MainActivity : ComponentActivity() {
                 R.string.file_transfer_progress,
                 formatBytes(state.fileTransfer.completedBytes),
                 formatBytes(state.fileTransfer.totalBytes),
+            )
+        } else if (state.fileTransfer.failedPaths.isNotEmpty()) {
+            syncStatus.text = getString(
+                R.string.file_transfer_partial_failure_count,
+                state.fileTransfer.failedPaths.size,
             )
         } else if (state.fileTransfer.batchId != null && state.fileTransfer.error == null) {
             syncStatus.setText(R.string.file_transfer_complete)

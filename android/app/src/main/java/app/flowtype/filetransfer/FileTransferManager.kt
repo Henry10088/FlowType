@@ -47,6 +47,7 @@ class FileTransferManager(
         val error: String? = null,
         val incomingOffer: FileOfferMessage? = null,
         val needsReselection: Boolean = false,
+        val failedPaths: List<String> = emptyList(),
     )
 
     private val worker = Executors.newSingleThreadScheduledExecutor { runnable ->
@@ -325,6 +326,7 @@ class FileTransferManager(
                 client.uploadManifest(ticket, manifestSequence(batch.batchId)).use { response ->
                     check(response.isSuccessful) { "manifest upload failed: ${response.code}" }
                 }
+                reportStoredFailures(client, ticket, batch.batchId)
                 store.updateBatchState(batch.batchId, TransferBatchState.TRANSFERRING, System.currentTimeMillis())
                 val transferred = AtomicLong(transferredBytes(batch.batchId))
                 var ordinal = 0L
@@ -334,68 +336,96 @@ class FileTransferManager(
                     ordinal = page.last().manifest.ordinal + 1
                     runParallel(page.filter { entry ->
                         entry.manifest.kind == TransferEntryKind.FILE &&
-                            entry.state != TransferEntryState.COMPLETED
+                            entry.state != TransferEntryState.COMPLETED &&
+                            entry.state != TransferEntryState.FAILED
                     }) { entry ->
-                        checkNotCanceled(batch.batchId)
-                        val offset = client.queryCommittedOffset(ticket, entry.manifest)
-                        check(offset in 0..entry.manifest.size) { "invalid server offset" }
-                        transferred.addAndGet(offset - entry.committedOffset)
-                        store.updateEntryProgress(
-                            batch.batchId,
-                            entry.manifest.ordinal,
-                            TransferEntryState.TRANSFERRING,
-                            offset,
-                        )
-                        var committed = offset
-                        var completedFile = false
-                        while (!completedFile) {
+                        try {
                             checkNotCanceled(batch.batchId)
-                            var reported = 0L
-                            var pendingUiBytes = 0L
-                            var lastUiUpdate = System.nanoTime()
-                            val receipt = client.uploadFile(
-                                context.contentResolver,
-                                ticket,
-                                entry,
-                                committed,
-                            ) { bytes ->
-                                reported += bytes
-                                pendingUiBytes += bytes
-                                val now = System.nanoTime()
-                                if (pendingUiBytes >= 8L * 1024 * 1024 ||
-                                    now - lastUiUpdate >= 250L * 1_000_000
-                                ) {
-                                    val current = transferred.addAndGet(pendingUiBytes)
-                                    pendingUiBytes = 0
-                                    lastUiUpdate = now
-                                    onChanged(Snapshot(true, batch.batchId, current, batch.totalBytes))
-                                }
-                            }
-                            if (pendingUiBytes > 0) {
-                                transferred.addAndGet(pendingUiBytes)
-                            }
-                            check(receipt.committedOffset > committed || receipt.completed) {
-                                "file upload made no progress"
-                            }
-                            val previous = committed
-                            committed = receipt.committedOffset
-                            transferred.addAndGet(committed - previous - reported)
-                            completedFile = receipt.completed
+                            val offset = client.queryCommittedOffset(ticket, entry.manifest)
+                            check(offset in 0..entry.manifest.size) { "invalid server offset" }
+                            transferred.addAndGet(offset - entry.committedOffset)
                             store.updateEntryProgress(
                                 batch.batchId,
                                 entry.manifest.ordinal,
-                                if (completedFile) TransferEntryState.COMPLETED else TransferEntryState.TRANSFERRING,
-                                committed,
+                                TransferEntryState.TRANSFERRING,
+                                offset,
                             )
-                            onChanged(Snapshot(true, batch.batchId, transferred.get(), batch.totalBytes))
+                            var committed = offset
+                            var completedFile = false
+                            while (!completedFile) {
+                                checkNotCanceled(batch.batchId)
+                                var reported = 0L
+                                var pendingUiBytes = 0L
+                                var lastUiUpdate = System.nanoTime()
+                                val receipt = client.uploadFile(
+                                    context.contentResolver,
+                                    ticket,
+                                    entry,
+                                    committed,
+                                ) { bytes ->
+                                    reported += bytes
+                                    pendingUiBytes += bytes
+                                    val now = System.nanoTime()
+                                    if (pendingUiBytes >= 8L * 1024 * 1024 ||
+                                        now - lastUiUpdate >= 250L * 1_000_000
+                                    ) {
+                                        val current = transferred.addAndGet(pendingUiBytes)
+                                        pendingUiBytes = 0
+                                        lastUiUpdate = now
+                                        onChanged(Snapshot(true, batch.batchId, current, batch.totalBytes))
+                                    }
+                                }
+                                if (pendingUiBytes > 0) {
+                                    transferred.addAndGet(pendingUiBytes)
+                                }
+                                check(receipt.committedOffset > committed || receipt.completed) {
+                                    "file upload made no progress"
+                                }
+                                val previous = committed
+                                committed = receipt.committedOffset
+                                transferred.addAndGet(committed - previous - reported)
+                                completedFile = receipt.completed
+                                store.updateEntryProgress(
+                                    batch.batchId,
+                                    entry.manifest.ordinal,
+                                    if (completedFile) TransferEntryState.COMPLETED else TransferEntryState.TRANSFERRING,
+                                    committed,
+                                )
+                                onChanged(Snapshot(true, batch.batchId, transferred.get(), batch.totalBytes))
+                            }
+                        } catch (error: Throwable) {
+                            val code = permanentEntryFailureCode(error, batch.direction) ?: throw error
+                            val current = store.entry(batch.batchId, entry.manifest.ordinal) ?: entry
+                            store.updateEntryProgress(
+                                batch.batchId,
+                                entry.manifest.ordinal,
+                                TransferEntryState.FAILED,
+                                current.committedOffset,
+                                errorCode = code,
+                            )
+                            client.reportFileFailure(ticket, entry.manifest, code)
                         }
                     }
                 }
                 client.completeBatch(ticket)
             }
-            store.updateBatchState(batch.batchId, TransferBatchState.COMPLETED, System.currentTimeMillis())
+            val partial = store.failedEntryCount(batch.batchId) > 0
+            store.updateBatchState(
+                batch.batchId,
+                if (partial) TransferBatchState.PARTIAL_FAILURE else TransferBatchState.COMPLETED,
+                System.currentTimeMillis(),
+            )
             activeBatchId = null
-            onChanged(Snapshot(false, batch.batchId, batch.totalBytes, batch.totalBytes))
+            onChanged(
+                Snapshot(
+                    false,
+                    batch.batchId,
+                    completedBytes(batch.batchId),
+                    batch.totalBytes,
+                    if (partial) "partial_failure" else null,
+                    failedPaths = failedPaths(batch.batchId),
+                ),
+            )
         }.onFailure { error ->
             if (error is CancellationException || batch.batchId in canceledBatches) return@onFailure
             handleTransferFailure(batch, error)
@@ -414,6 +444,7 @@ class FileTransferManager(
             withActiveClient(binding) { client ->
                 downloadManifest(client, ticket, batch)
                 AndroidTargetStore(context.contentResolver, store).prepare(batch.batchId, treeUri)
+                reportStoredFailures(client, ticket, batch.batchId)
                 store.updateBatchState(batch.batchId, TransferBatchState.TRANSFERRING, System.currentTimeMillis())
                 val transferred = AtomicLong(transferredBytes(batch.batchId))
                 var ordinal = 0L
@@ -423,20 +454,48 @@ class FileTransferManager(
                     ordinal = page.last().manifest.ordinal + 1
                     runParallel(page.filter { stored ->
                         stored.manifest.kind == TransferEntryKind.FILE &&
-                            stored.state != TransferEntryState.COMPLETED
+                            stored.state != TransferEntryState.COMPLETED &&
+                            stored.state != TransferEntryState.FAILED
                     }) { stored ->
-                        checkNotCanceled(batch.batchId)
-                        downloadEntry(client, ticket, batch.batchId, stored) { bytes ->
-                            val current = transferred.addAndGet(bytes)
-                            onChanged(Snapshot(true, batch.batchId, current, batch.totalBytes))
+                        try {
+                            checkNotCanceled(batch.batchId)
+                            downloadEntry(client, ticket, batch.batchId, stored) { bytes ->
+                                val current = transferred.addAndGet(bytes)
+                                onChanged(Snapshot(true, batch.batchId, current, batch.totalBytes))
+                            }
+                        } catch (error: Throwable) {
+                            val code = permanentEntryFailureCode(error, batch.direction) ?: throw error
+                            val current = store.entry(batch.batchId, stored.manifest.ordinal) ?: stored
+                            store.updateEntryProgress(
+                                batch.batchId,
+                                stored.manifest.ordinal,
+                                TransferEntryState.FAILED,
+                                current.committedOffset,
+                                errorCode = code,
+                            )
+                            client.reportFileFailure(ticket, stored.manifest, code)
                         }
                     }
                 }
                 client.completeBatch(ticket)
             }
-            store.updateBatchState(batch.batchId, TransferBatchState.COMPLETED, System.currentTimeMillis())
+            val partial = store.failedEntryCount(batch.batchId) > 0
+            store.updateBatchState(
+                batch.batchId,
+                if (partial) TransferBatchState.PARTIAL_FAILURE else TransferBatchState.COMPLETED,
+                System.currentTimeMillis(),
+            )
             activeBatchId = null
-            onChanged(Snapshot(false, batch.batchId, batch.totalBytes, batch.totalBytes))
+            onChanged(
+                Snapshot(
+                    false,
+                    batch.batchId,
+                    completedBytes(batch.batchId),
+                    batch.totalBytes,
+                    if (partial) "partial_failure" else null,
+                    failedPaths = failedPaths(batch.batchId),
+                ),
+            )
         }.onFailure { error ->
             if (error is CancellationException || batch.batchId in canceledBatches) return@onFailure
             handleTransferFailure(batch, error)
@@ -556,6 +615,29 @@ class FileTransferManager(
             }
         }
         return completed
+    }
+
+    private fun failedPaths(batchId: String): List<String> =
+        store.failedEntries(batchId).map { it.manifest.relativePath }
+
+    private fun reportStoredFailures(
+        client: FileTransferHttpClient,
+        ticket: FileTicketMessage,
+        batchId: String,
+    ) {
+        var ordinal = 0L
+        while (true) {
+            val page = store.entriesPage(batchId, ordinal, 256)
+            if (page.isEmpty()) break
+            page.filter { it.state == TransferEntryState.FAILED }.forEach { entry ->
+                client.reportFileFailure(
+                    ticket,
+                    entry.manifest,
+                    entry.errorCode ?: "transfer_failed",
+                )
+            }
+            ordinal = page.last().manifest.ordinal + 1
+        }
     }
 
     private fun transferredBytes(batchId: String): Long {
@@ -696,5 +778,25 @@ class FileTransferManager(
 
     override fun close() {
         worker.shutdownNow()
+    }
+}
+
+internal fun permanentEntryFailureCode(
+    error: Throwable,
+    direction: TransferDirection,
+): String? {
+    if (direction == TransferDirection.PHONE_TO_COMPUTER &&
+        (error is SecurityException || error is FileNotFoundException)
+    ) {
+        return "source_unavailable"
+    }
+    val message = error.message.orEmpty().lowercase()
+    return when {
+        "source_changed" in message || "source became" in message ||
+            "remote file size changed" in message -> "source_changed"
+        "source_unavailable" in message || "source uri" in message -> "source_unavailable"
+        "integrity_failed" in message || "integrity check failed" in message -> "integrity_failed"
+        "target_exists" in message -> "target_exists"
+        else -> null
     }
 }

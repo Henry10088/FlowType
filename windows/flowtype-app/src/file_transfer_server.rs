@@ -3,6 +3,7 @@ use std::convert::Infallible;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::AsRawHandle;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -26,6 +27,8 @@ use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
+use windows_sys::Win32::Foundation::FILETIME;
+use windows_sys::Win32::Storage::FileSystem::SetFileTime;
 
 use crate::AppState;
 use crate::file_transfer_store::EntryProgress;
@@ -57,6 +60,7 @@ pub(crate) struct FileTransferSnapshot {
     pub(crate) completed_bytes: u64,
     pub(crate) total_bytes: u64,
     pub(crate) completed_entries: u64,
+    pub(crate) failed_entries: u64,
     pub(crate) total_entries: u64,
 }
 
@@ -358,6 +362,7 @@ impl FileTransferCoordinator {
             completed_bytes: progress.completed_bytes.min(batch.total_bytes),
             total_bytes: batch.total_bytes,
             completed_entries: progress.completed_entries.min(total_entries),
+            failed_entries: progress.failed_entries.min(total_entries),
             total_entries,
         })
     }
@@ -719,16 +724,24 @@ async fn route_request(
         if request.method() != Method::POST {
             return Err((StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"));
         }
-        if !coordinator
+        let (all_terminal, has_failures) = coordinator
             .store
-            .all_entries_complete(&batch_id)
-            .map_err(|_| (StatusCode::CONFLICT, "batch_incomplete"))?
-        {
+            .all_entries_terminal(&batch_id)
+            .map_err(|_| (StatusCode::CONFLICT, "batch_incomplete"))?;
+        if !all_terminal {
             return Err((StatusCode::CONFLICT, "batch_incomplete"));
         }
         coordinator
             .store
-            .update_state(&batch_id, BatchState::Completed, unix_time())
+            .update_state(
+                &batch_id,
+                if has_failures {
+                    BatchState::PartialFailure
+                } else {
+                    BatchState::Completed
+                },
+                unix_time(),
+            )
             .map_err(|_| (StatusCode::CONFLICT, "batch_state_failed"))?;
         if let Ok(mut tickets) = coordinator.tickets.lock() {
             tickets.remove(&batch_id);
@@ -736,6 +749,66 @@ async fn route_request(
         return Ok(json_response(
             StatusCode::OK,
             r#"{"completed":true}"#.to_owned(),
+        ));
+    }
+
+    if let Some(entry_id) = action.strip_prefix("failures/") {
+        if request.method() != Method::POST {
+            return Err((StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"));
+        }
+        let ordinal = request
+            .headers()
+            .get("x-flowtype-ordinal")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or((StatusCode::BAD_REQUEST, "invalid_ordinal"))?;
+        let error_code = request
+            .headers()
+            .get("x-flowtype-error")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 64
+                    && value.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                    })
+            })
+            .ok_or((StatusCode::BAD_REQUEST, "invalid_error"))?;
+        let entry = coordinator
+            .store
+            .manifest_entry(&batch_id, ordinal)
+            .map_err(|_| (StatusCode::NOT_FOUND, "entry_not_found"))?;
+        if entry.entry_id != entry_id || entry.kind != EntryKind::File {
+            return Err((StatusCode::NOT_FOUND, "entry_not_found"));
+        }
+        let progress = coordinator
+            .store
+            .read_progress(&batch_id, ordinal)
+            .map_err(|_| (StatusCode::CONFLICT, "progress_unavailable"))?;
+        if progress.state != flowtype_core::file_transfer::EntryState::Completed {
+            coordinator
+                .store
+                .write_progress(
+                    &batch_id,
+                    ordinal,
+                    EntryProgress {
+                        state: flowtype_core::file_transfer::EntryState::Failed,
+                        committed_offset: progress.committed_offset,
+                    },
+                )
+                .map_err(|_| (StatusCode::CONFLICT, "progress_unavailable"))?;
+            if direction == TransferDirection::PhoneToComputer
+                && let Ok(target) = coordinator.store.target_path(&batch_id, ordinal)
+                && let Some(parent) = target.parent()
+            {
+                let _ = fs::remove_file(
+                    parent.join(format!(".flowtype-{batch_id}-{}.part", entry.entry_id)),
+                );
+            }
+        }
+        return Ok(json_response(
+            StatusCode::OK,
+            serde_json::json!({"failed": true, "code": error_code}).to_string(),
         ));
     }
 
@@ -1207,6 +1280,9 @@ async fn receive_file(
         return Err("target_exists");
     }
     fs::rename(&part, &target).map_err(|_| "commit_failed")?;
+    if let Some(modified) = entry.modified_at_epoch_millis {
+        preserve_modified_time(&target, modified);
+    }
     coordinator
         .store
         .write_progress(
@@ -1238,6 +1314,29 @@ fn hash_file(path: &std::path::Path) -> std::io::Result<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn preserve_modified_time(path: &std::path::Path, unix_millis: i64) {
+    let Ok(unix_millis) = u64::try_from(unix_millis) else {
+        return;
+    };
+    let ticks = unix_millis
+        .saturating_add(11_644_473_600_000)
+        .saturating_mul(10_000);
+    let modified = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    if let Ok(file) = OpenOptions::new().write(true).open(path) {
+        unsafe {
+            SetFileTime(
+                file.as_raw_handle(),
+                std::ptr::null(),
+                std::ptr::null(),
+                &modified,
+            );
+        }
+    }
 }
 
 fn consume_manifest_lines(

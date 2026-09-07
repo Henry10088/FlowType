@@ -103,6 +103,7 @@ pub(crate) struct EntryProgress {
 pub(crate) struct ProgressSummary {
     pub(crate) completed_bytes: u64,
     pub(crate) completed_entries: u64,
+    pub(crate) failed_entries: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -558,6 +559,8 @@ impl FileTransferStore {
                 .saturating_add(progress.committed_offset);
             if progress.state == EntryState::Completed {
                 summary.completed_entries = summary.completed_entries.saturating_add(1);
+            } else if progress.state == EntryState::Failed {
+                summary.failed_entries = summary.failed_entries.saturating_add(1);
             }
         }
         Ok(summary)
@@ -594,16 +597,20 @@ impl FileTransferStore {
         fs::remove_dir_all(self.batch_dir(batch_id)?)
     }
 
-    pub(crate) fn all_entries_complete(&self, batch_id: &str) -> io::Result<bool> {
-        let mut complete = true;
+    pub(crate) fn all_entries_terminal(&self, batch_id: &str) -> io::Result<(bool, bool)> {
+        let mut terminal = true;
+        let mut failed = false;
         self.for_each_manifest_entry(batch_id, |entry| {
             let progress = self.read_progress(batch_id, entry.ordinal)?;
-            if progress.state != EntryState::Completed || progress.committed_offset != entry.size {
-                complete = false;
+            match progress.state {
+                EntryState::Completed if progress.committed_offset == entry.size => {}
+                EntryState::Completed => terminal = false,
+                EntryState::Failed | EntryState::Canceled => failed = true,
+                _ => terminal = false,
             }
             Ok(())
         })?;
-        Ok(complete)
+        Ok((terminal, failed))
     }
 
     fn batch_dir(&self, batch_id: &str) -> io::Result<PathBuf> {
@@ -902,7 +909,22 @@ mod tests {
             ProgressSummary {
                 completed_bytes: 16,
                 completed_entries: 1,
+                failed_entries: 0,
             }
+        );
+        store
+            .write_progress(
+                &batch.batch_id,
+                1,
+                EntryProgress {
+                    state: EntryState::Failed,
+                    committed_offset: 16,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store.all_entries_terminal(&batch.batch_id).unwrap(),
+            (true, true)
         );
         store
             .update_state(&batch.batch_id, BatchState::Preparing, 11)

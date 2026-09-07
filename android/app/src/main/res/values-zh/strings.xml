@@ -134,6 +134,9 @@
     <string name="file_transfer_complete_message">文件传输已完成。</string>
     <string name="file_transfer_failed_title">文件传输已停止</string>
     <string name="file_transfer_failed_message">打开说写查看并重试传输。</string>
+    <string name="file_transfer_partial_failure">部分文件传输失败</string>
+    <string name="file_transfer_partial_failure_count">%1$d 个文件传输失败</string>
+    <string name="file_transfer_failed_files">已成功的文件会保留。失败文件：\n\n%1$s</string>
     <string name="cancel_file_transfer_message">当前有文件正在传输。</string>
     <string name="keep_transferring">继续传输</string>
     <string name="cancel_transfer">取消传输</string>

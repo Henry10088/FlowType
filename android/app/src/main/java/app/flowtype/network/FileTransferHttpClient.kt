@@ -157,6 +157,22 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
         }
     }
 
+    fun reportFileFailure(
+        ticket: FileTicketMessage,
+        entry: TransferManifestEntry,
+        errorCode: String,
+    ) {
+        require(errorCode.matches(Regex("[a-z0-9_]{1,64}")))
+        val request = authorizedRequest(ticket, "failures/${entry.entryId}")
+            .header("x-flowtype-ordinal", entry.ordinal.toString())
+            .header("x-flowtype-error", errorCode)
+            .post(EMPTY_BODY)
+            .build()
+        client.newCall(request).execute().use { response ->
+            checkResponse(response, "file failure report failed")
+        }
+    }
+
     fun downloadManifestPage(ticket: FileTicketMessage, startOrdinal: Long): ManifestPage {
         val request = authorizedRequest(ticket, "manifest")
             .header("x-flowtype-start", startOrdinal.toString())

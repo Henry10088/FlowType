@@ -767,12 +767,21 @@ fn file_transfer_status(transfer: &crate::file_transfer_server::FileTransferSnap
         }
     };
     format!(
-        "{} · {} / {} · {} / {}",
+        "{} · {} / {} · {} / {}{}",
         action,
         format_file_size(transfer.completed_bytes),
         format_file_size(transfer.total_bytes),
         transfer.completed_entries,
         transfer.total_entries,
+        if transfer.failed_entries > 0 {
+            if is_chinese() {
+                format!(" · {} 个失败", transfer.failed_entries)
+            } else {
+                format!(" · {} failed", transfer.failed_entries)
+            }
+        } else {
+            String::new()
+        },
     )
 }
 
