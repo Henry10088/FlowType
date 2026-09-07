@@ -328,7 +328,7 @@ dependencies = [
 
 [[package]]
 name = "flowtype-app"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "base64",
  "bytes",
@@ -359,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "flowtype-core"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "flowtype-injector"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "flowtype-core",
  "windows",
@@ -377,7 +377,7 @@ dependencies = [
 
 [[package]]
 name = "flowtype-tip"
-version = "0.2.8"
+version = "0.3.0"
 dependencies = [
  "flowtype-core",
  "rand",
