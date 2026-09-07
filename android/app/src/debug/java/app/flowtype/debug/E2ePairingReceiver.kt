@@ -18,6 +18,15 @@ class E2ePairingReceiver : BroadcastReceiver() {
             (context.applicationContext as FlowTypeApplication).controller.cancelFileTransfer()
             return
         }
+        if (intent.action == ACTION_REVOKE_TREE_PERMISSIONS) {
+            context.contentResolver.persistedUriPermissions.forEach { permission ->
+                context.contentResolver.releasePersistableUriPermission(
+                    permission.uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            }
+            return
+        }
         if (intent.action == ACTION_SEND_FILES) {
             val directory = context.cacheDir.resolve("e2e-files").apply { mkdirs() }
             directory.resolve("测试-😀.txt").writeText("FlowType 双向传输测试\nline 2")
@@ -51,7 +60,6 @@ class E2ePairingReceiver : BroadcastReceiver() {
                     index * interval,
                 )
             }
-            handler.postDelayed({ controller.finish() }, count * interval + 500L)
             return
         }
         if (intent.action != ACTION_PAIR) return
@@ -76,6 +84,7 @@ class E2ePairingReceiver : BroadcastReceiver() {
         const val EXTRA_URI_BASE64 = "uri_base64"
         const val ACTION_SEND_FILES = "app.flowtype.E2E_SEND_FILES"
         const val ACTION_CANCEL_FILES = "app.flowtype.E2E_CANCEL_FILES"
+        const val ACTION_REVOKE_TREE_PERMISSIONS = "app.flowtype.E2E_REVOKE_TREE_PERMISSIONS"
         const val ACTION_TEXT_LATENCY = "app.flowtype.E2E_TEXT_LATENCY"
         const val EXTRA_RESUME_BYTES = "resume_bytes"
         const val EXTRA_TEXT_COUNT = "count"

@@ -397,7 +397,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(debug_assertions)]
     if let Ok(path) = std::env::var("FLOWTYPE_E2E_PAIRING_URI_FILE")
-        && let Some(uri) = state.current_pairing_uri(endpoint_host)
+        && let Ok(uri) = state.begin_pairing(endpoint_host)
     {
         std::fs::write(path, uri)?;
     }
@@ -406,7 +406,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let test_state = Arc::clone(&state);
         let path = std::path::PathBuf::from(path);
         std::thread::spawn(move || {
-            for _ in 0..120 {
+            for _ in 0..2_400 {
                 if test_state.connected_phone_id().is_some() {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                     if let Err(error) = test_state.queue_files_to_connected_phone(vec![path]) {
@@ -416,7 +416,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
-            eprintln!("E2E outbound transfer timed out waiting for the phone");
+            eprintln!("E2E outbound transfer timed out after ten minutes waiting for the phone");
         });
     }
 
