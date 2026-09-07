@@ -21,6 +21,7 @@ import app.flowtype.protocol.TransferManifestEntry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.UUID
@@ -157,6 +158,58 @@ class ProductDataInstrumentedTest {
                 store.entry("batch-1", 1)?.targetParentUri,
             )
             assertEquals(TransferBatchState.PREPARING, store.recoverableBatches().single().state)
+        } finally {
+            database.close()
+            context.deleteDatabase(databaseName)
+        }
+    }
+
+    @Test
+    fun fileTransferStoreHandlesOneHundredThousandPagedEntries() {
+        assumeTrue(
+            "explicit 100k-entry release acceptance",
+            InstrumentationRegistry.getArguments().getString("flowtypeStress") == "true",
+        )
+        val databaseName = "flowtype-stress-${UUID.randomUUID()}.db"
+        val database = AppDatabase(context, databaseName)
+        val entryCount = 100_000L
+        try {
+            val store = FileTransferStore(database)
+            store.createBatch(
+                FileTransferBatch(
+                    batchId = "batch-100k",
+                    pcId = "pc-1",
+                    direction = TransferDirection.COMPUTER_TO_PHONE,
+                    state = TransferBatchState.WAITING_CONFIRMATION,
+                    createdAt = 10,
+                    updatedAt = 10,
+                    fileCount = entryCount,
+                    directoryCount = 0,
+                    totalBytes = entryCount,
+                    targetTreeUri = null,
+                ),
+            )
+            var ordinal = 0L
+            while (ordinal < entryCount) {
+                val pageEnd = minOf(ordinal + 256, entryCount)
+                store.appendManifestPage(
+                    "batch-100k",
+                    (ordinal until pageEnd).map { index ->
+                        stored(
+                            index,
+                            "directory-${index / 1_000}/file-$index.txt",
+                            TransferEntryKind.FILE,
+                            1,
+                        )
+                    },
+                )
+                ordinal = pageEnd
+            }
+            assertEquals(256, store.entriesPage("batch-100k", 0, 256).size)
+            assertEquals(
+                entryCount - 1,
+                store.entry("batch-100k", entryCount - 1)?.manifest?.ordinal,
+            )
         } finally {
             database.close()
             context.deleteDatabase(databaseName)

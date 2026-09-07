@@ -1005,6 +1005,71 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    #[ignore = "explicit 100k-entry release acceptance"]
+    fn streams_one_hundred_thousand_manifest_entries() {
+        const ENTRY_COUNT: u64 = 100_000;
+        let started = std::time::Instant::now();
+        let root = test_root("100k-manifest");
+        let store = FileTransferStore::new(root.clone()).unwrap();
+        let batch = BatchRecord::new(
+            "batch-100k".into(),
+            "phone-1".into(),
+            TransferDirection::PhoneToComputer,
+            10,
+            ENTRY_COUNT,
+            0,
+            ENTRY_COUNT,
+        )
+        .unwrap();
+        store.create_batch(&batch).unwrap();
+        let mut manifest = store.begin_manifest(&batch.batch_id).unwrap();
+        for ordinal in 0..ENTRY_COUNT {
+            manifest
+                .append(&entry(
+                    ordinal,
+                    &format!("directory-{}/file-{ordinal}.txt", ordinal / 1_000),
+                    EntryKind::File,
+                    1,
+                ))
+                .unwrap();
+        }
+        assert_eq!(manifest.finish().unwrap(), ENTRY_COUNT);
+        assert_eq!(
+            store
+                .manifest_entry(&batch.batch_id, ENTRY_COUNT - 1)
+                .unwrap()
+                .ordinal,
+            ENTRY_COUNT - 1,
+        );
+        assert_eq!(
+            store
+                .read_progress(&batch.batch_id, ENTRY_COUNT - 1)
+                .unwrap(),
+            EntryProgress {
+                state: EntryState::Pending,
+                committed_offset: 0,
+            },
+        );
+        store
+            .write_progress(
+                &batch.batch_id,
+                ENTRY_COUNT - 1,
+                EntryProgress {
+                    state: EntryState::WaitingNetwork,
+                    committed_offset: 1,
+                },
+            )
+            .unwrap();
+        let progress = root.join("batch-100k").join(PROGRESS_FILE);
+        assert_eq!(
+            fs::metadata(progress).unwrap().len(),
+            ENTRY_COUNT * PROGRESS_RECORD_BYTES
+        );
+        eprintln!("100k Windows manifest elapsed={:?}", started.elapsed());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn entry(ordinal: u64, path: &str, kind: EntryKind, size: u64) -> ManifestEntry {
         ManifestEntry {
             ordinal,
