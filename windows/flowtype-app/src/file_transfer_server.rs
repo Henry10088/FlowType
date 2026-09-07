@@ -730,13 +730,7 @@ async fn route_request(
         .split_once('/')
         .ok_or((StatusCode::NOT_FOUND, "not_found"))?;
     let batch_id = batch_id.to_owned();
-    let bearer = bearer_token(&request).ok_or((StatusCode::UNAUTHORIZED, "unauthorized"))?;
-    if !coordinator.authorize(&batch_id, bearer) {
-        return Err((StatusCode::UNAUTHORIZED, "unauthorized"));
-    }
-    let direction = coordinator
-        .authorized_direction(&batch_id, bearer)
-        .ok_or((StatusCode::UNAUTHORIZED, "unauthorized"))?;
+    let direction = authorize_request(&coordinator, &batch_id, bearer_token(&request))?;
 
     if action == "complete" {
         if request.method() != Method::POST {
@@ -1069,6 +1063,17 @@ fn parse_range(value: &str, total: u64) -> Option<(u64, u64)> {
     }
     let end = requested_end.min(start.saturating_add(8 * 1024 * 1024 - 1));
     Some((start, end))
+}
+
+fn authorize_request(
+    coordinator: &FileTransferCoordinator,
+    batch_id: &str,
+    bearer: Option<&str>,
+) -> Result<TransferDirection, (StatusCode, &'static str)> {
+    let bearer = bearer.ok_or((StatusCode::UNAUTHORIZED, "unauthorized"))?;
+    coordinator
+        .authorized_direction(batch_id, bearer)
+        .ok_or((StatusCode::UNAUTHORIZED, "unauthorized"))
 }
 
 async fn ingest_manifest(
@@ -1456,6 +1461,56 @@ mod tests {
         assert!(!coordinator.authorize("batch-1", &first_token));
         assert!(coordinator.authorize("batch-1", &second_token));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn data_request_rejects_missing_wrong_and_cross_batch_tokens() {
+        let root = test_root("request-auth");
+        let coordinator = FileTransferCoordinator::new(
+            FileTransferStore::new(root.join("state")).unwrap(),
+            root.join("receive"),
+        );
+        let token = ticket_token(
+            coordinator
+                .accept_offer(&offer("batch-a"), "phone-1")
+                .unwrap(),
+        );
+        let other = ticket_token(
+            coordinator
+                .accept_offer(&offer("batch-b"), "phone-1")
+                .unwrap(),
+        );
+
+        assert_eq!(
+            authorize_request(&coordinator, "batch-a", None),
+            Err((StatusCode::UNAUTHORIZED, "unauthorized")),
+        );
+        assert_eq!(
+            authorize_request(&coordinator, "batch-a", Some("wrong")),
+            Err((StatusCode::UNAUTHORIZED, "unauthorized")),
+        );
+        assert_eq!(
+            authorize_request(&coordinator, "batch-a", Some(&other)),
+            Err((StatusCode::UNAUTHORIZED, "unauthorized")),
+        );
+        assert_eq!(
+            authorize_request(&coordinator, "batch-a", Some(&token)),
+            Ok(TransferDirection::PhoneToComputer),
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn open_ended_download_ranges_are_bounded_to_eight_mibibytes() {
+        assert_eq!(
+            parse_range("bytes=0-", u64::MAX),
+            Some((0, 8 * 1024 * 1024 - 1))
+        );
+        assert_eq!(
+            parse_range("bytes=16777216-", u64::MAX),
+            Some((16777216, 16777216 + 8 * 1024 * 1024 - 1)),
+        );
+        assert_eq!(parse_range("bytes=9-", 10), Some((9, 9)));
     }
 
     #[test]
