@@ -15,6 +15,7 @@ local.properties
 *.apk
 *.aab
 captures/
+.e2e-*
 
 # Windows build artifacts
 *.pdb
