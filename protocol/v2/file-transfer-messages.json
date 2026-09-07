@@ -1,0 +1,32 @@
+[
+  {
+    "protocol_version": 2,
+    "transfer_version": 1,
+    "type": "file_offer",
+    "phone_id": "phone-1",
+    "batch_id": "batch-1",
+    "direction": "phone_to_computer",
+    "file_count": 1,
+    "directory_count": 1,
+    "total_bytes": 42,
+    "roots": ["资料"]
+  },
+  {
+    "protocol_version": 2,
+    "transfer_version": 1,
+    "type": "file_ticket",
+    "batch_id": "batch-1",
+    "data_port": 32188,
+    "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expires_at_epoch_seconds": 4102444800
+  },
+  {
+    "ordinal": 0,
+    "entry_id": "entry-1",
+    "relative_path": "资料/说明.txt",
+    "kind": "file",
+    "size": 42,
+    "modified_at_epoch_millis": 1700000000000,
+    "mime_type": "text/plain"
+  }
+]

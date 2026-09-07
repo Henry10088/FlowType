@@ -1,5 +1,6 @@
 pub mod diagnostics;
 pub mod diff;
+pub mod file_transfer;
 pub mod ipc;
 pub mod protocol;
 pub mod session;

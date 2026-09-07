@@ -5,11 +5,19 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.flowtype.data.AppDatabase
 import app.flowtype.data.HistoryStore
+import app.flowtype.data.FileTransferBatch
+import app.flowtype.data.FileTransferStore
+import app.flowtype.data.StoredTransferEntry
 import app.flowtype.pairing.BindingStore
 import app.flowtype.pairing.ComputerBinding
 import app.flowtype.security.SecureDraftStore
 import app.flowtype.session.ComputerSessions
 import app.flowtype.session.InputSession
+import app.flowtype.protocol.TransferBatchState
+import app.flowtype.protocol.TransferDirection
+import app.flowtype.protocol.TransferEntryKind
+import app.flowtype.protocol.TransferEntryState
+import app.flowtype.protocol.TransferManifestEntry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -97,11 +105,78 @@ class ProductDataInstrumentedTest {
         context.deleteSharedPreferences(preferencesName)
     }
 
+    @Test
+    fun fileTransferManifestIsPagedAndProgressSurvivesReload() {
+        val databaseName = "flowtype-test-${UUID.randomUUID()}.db"
+        val database = AppDatabase(context, databaseName)
+        try {
+            val store = FileTransferStore(database)
+            store.createBatch(
+                FileTransferBatch(
+                    batchId = "batch-1",
+                    pcId = "pc-1",
+                    direction = TransferDirection.COMPUTER_TO_PHONE,
+                    state = TransferBatchState.WAITING_CONFIRMATION,
+                    createdAt = 10,
+                    updatedAt = 10,
+                    fileCount = 1,
+                    directoryCount = 1,
+                    totalBytes = 42,
+                    targetTreeUri = null,
+                ),
+            )
+            store.appendManifestPage(
+                "batch-1",
+                listOf(
+                    stored(0, "资料", TransferEntryKind.DIRECTORY, 0),
+                    stored(1, "资料/说明.txt", TransferEntryKind.FILE, 42),
+                ),
+            )
+            store.setTargetTree("batch-1", "content://documents/tree/downloads", 11)
+            store.updateBatchState("batch-1", TransferBatchState.QUEUED, 12)
+            store.updateBatchState("batch-1", TransferBatchState.PREPARING, 13)
+            store.updateEntryProgress(
+                "batch-1",
+                1,
+                TransferEntryState.WAITING_NETWORK,
+                16,
+                targetUri = "content://documents/document/partial",
+            )
+
+            assertEquals(2, store.entriesPage("batch-1", 0, 10).size)
+            assertEquals(16, store.entry("batch-1", 1)?.committedOffset)
+            assertEquals(TransferBatchState.PREPARING, store.recoverableBatches().single().state)
+        } finally {
+            database.close()
+            context.deleteDatabase(databaseName)
+        }
+    }
+
     private fun binding(pcId: String) = ComputerBinding(
         pcId = pcId,
         pcName = pcId,
         endpoint = "wss://127.0.0.1:39421/v1/sync",
         tlsSpkiSha256 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         pairingToken = null,
+    )
+
+    private fun stored(
+        ordinal: Long,
+        path: String,
+        kind: TransferEntryKind,
+        size: Long,
+    ) = StoredTransferEntry(
+        manifest = TransferManifestEntry(
+            ordinal = ordinal,
+            entryId = "entry-$ordinal",
+            relativePath = path,
+            kind = kind,
+            size = size,
+            modifiedAtEpochMillis = null,
+            mimeType = null,
+            sha256 = null,
+        ),
+        sourceUri = "content://documents/document/$ordinal",
+        targetUri = null,
     )
 }

@@ -3,6 +3,7 @@
 mod atomic_file;
 mod clipboard;
 mod diagnostics;
+mod file_transfer_store;
 mod i18n;
 mod identity;
 mod injector;
