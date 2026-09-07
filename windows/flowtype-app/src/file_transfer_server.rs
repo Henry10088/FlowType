@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -57,8 +58,10 @@ impl FileTransferCoordinator {
             })?
             .join("Downloads")
             .join("FlowType");
+        let store = FileTransferStore::load_default()?;
+        cleanup_expired(&store, unix_time().saturating_sub(7 * 24 * 60 * 60));
         Ok(Arc::new(Self {
-            store: Arc::new(FileTransferStore::load_default()?),
+            store: Arc::new(store),
             receive_root,
             tickets: Mutex::new(HashMap::new()),
         }))
@@ -140,7 +143,10 @@ impl FileTransferCoordinator {
         phone_id: &str,
         roots: &[PathBuf],
     ) -> Result<FileOffer, &'static str> {
-        let prepared = prepare_outbound_entries(roots)?;
+        if self.outbound_batch(phone_id).is_some() {
+            return Err("a file transfer is already active");
+        }
+        let prepared = prepare_outbound_plan(roots)?;
         let now = unix_time();
         let batch_id = Uuid::new_v4().to_string();
         let batch = BatchRecord::new(
@@ -160,24 +166,31 @@ impl FileTransferCoordinator {
             .store
             .begin_manifest(&batch_id)
             .map_err(|_| "cannot create outbound manifest")?;
-        for (entry, _) in &prepared.entries {
-            manifest
-                .append(entry)
-                .map_err(|_| "invalid outbound file")?;
+        let mut sources = self
+            .store
+            .begin_source_paths(&batch_id)
+            .map_err(|_| "cannot create outbound source index")?;
+        let mut next_ordinal = 0u64;
+        for (path, wire_name) in &prepared.roots {
+            write_outbound(
+                path,
+                wire_name,
+                &mut next_ordinal,
+                &mut manifest,
+                &mut sources,
+            )?;
         }
         manifest
             .finish()
             .map_err(|_| "cannot finish outbound manifest")?;
-        self.store
-            .write_source_paths(
-                &batch_id,
-                prepared
-                    .entries
-                    .iter()
-                    .map(|(entry, path)| (entry.ordinal, path.clone())),
-            )
+        sources
+            .finish()
             .map_err(|_| "cannot save outbound sources")?;
-        for (entry, _) in &prepared.entries {
+        for ordinal in 0..next_ordinal {
+            let entry = self
+                .store
+                .manifest_entry(&batch_id, ordinal)
+                .map_err(|_| "cannot read outbound manifest")?;
             if entry.kind == EntryKind::Directory {
                 self.store
                     .write_progress(
@@ -200,7 +213,7 @@ impl FileTransferCoordinator {
             file_count: prepared.file_count,
             directory_count: prepared.directory_count,
             total_bytes: prepared.total_bytes,
-            roots: prepared.roots,
+            roots: prepared.summaries,
         })
     }
 
@@ -287,6 +300,24 @@ impl FileTransferCoordinator {
             .collect()
     }
 
+    pub(crate) fn outbound_batch(&self, phone_id: &str) -> Option<BatchRecord> {
+        self.store
+            .recoverable_batches()
+            .ok()?
+            .into_iter()
+            .filter(|batch| {
+                batch.phone_id == phone_id && batch.direction == TransferDirection::ComputerToPhone
+            })
+            .max_by_key(|batch| (batch.created_at_epoch_seconds, batch.batch_id.clone()))
+    }
+
+    pub(crate) fn cancel_outbound(&self, phone_id: &str) -> Result<(), &'static str> {
+        let batch = self
+            .outbound_batch(phone_id)
+            .ok_or("no active file transfer")?;
+        self.cancel(&batch.batch_id, phone_id)
+    }
+
     fn issue_ticket(
         &self,
         batch_id: &str,
@@ -354,21 +385,52 @@ impl FileTransferCoordinator {
     }
 }
 
-struct PreparedOutbound {
-    entries: Vec<(ManifestEntry, PathBuf)>,
-    roots: Vec<String>,
+fn cleanup_expired(store: &FileTransferStore, cutoff: u64) {
+    let Ok(batches) = store.batches() else { return };
+    for batch in batches {
+        if batch.updated_at_epoch_seconds >= cutoff {
+            continue;
+        }
+        if store.manifest_is_complete(&batch.batch_id) {
+            let _ = store.for_each_manifest_entry(&batch.batch_id, |entry| {
+                if batch.direction == TransferDirection::PhoneToComputer
+                    && entry.kind == EntryKind::File
+                {
+                    if let Ok(target) = store.target_path(&batch.batch_id, entry.ordinal)
+                        && let Some(parent) = target.parent()
+                    {
+                        let part = parent.join(format!(
+                            ".flowtype-{}-{}.part",
+                            batch.batch_id, entry.entry_id
+                        ));
+                        let _ = fs::remove_file(part);
+                    }
+                }
+                Ok(())
+            });
+        }
+        let _ = store.delete_batch(&batch.batch_id);
+    }
+}
+
+struct OutboundPlan {
+    roots: Vec<(PathBuf, String)>,
+    summaries: Vec<String>,
     file_count: u64,
     directory_count: u64,
     total_bytes: u64,
 }
 
-fn prepare_outbound_entries(roots: &[PathBuf]) -> Result<PreparedOutbound, &'static str> {
+fn prepare_outbound_plan(roots: &[PathBuf]) -> Result<OutboundPlan, &'static str> {
     if roots.is_empty() {
         return Err("no files selected");
     }
     let mut root_names = WindowsNameReservation::new(Vec::new());
-    let mut entries = Vec::new();
+    let mut planned_roots = Vec::new();
     let mut summaries = Vec::new();
+    let mut file_count = 0u64;
+    let mut directory_count = 0u64;
+    let mut total_bytes = 0u64;
     for root in roots {
         let metadata = fs::symlink_metadata(root).map_err(|_| "source unavailable")?;
         if metadata.file_type().is_symlink() {
@@ -380,32 +442,58 @@ fn prepare_outbound_entries(roots: &[PathBuf]) -> Result<PreparedOutbound, &'sta
             .ok_or("source name is not Unicode")?;
         let wire_name = root_names.reserve(name, metadata.is_dir());
         summaries.push(wire_name.clone());
-        append_outbound(root, &wire_name, &mut entries)?;
+        count_outbound(
+            root,
+            &mut file_count,
+            &mut directory_count,
+            &mut total_bytes,
+        )?;
+        planned_roots.push((root.clone(), wire_name));
     }
-    let file_count = entries
-        .iter()
-        .filter(|(entry, _)| entry.kind == EntryKind::File)
-        .count() as u64;
-    let directory_count = entries.len() as u64 - file_count;
-    let total_bytes = entries.iter().try_fold(0u64, |total, (entry, _)| {
-        total.checked_add(entry.size).ok_or("batch is too large")
-    })?;
     if total_bytes > flowtype_core::file_transfer::MAX_WIRE_INTEGER {
         return Err("batch is too large");
     }
-    Ok(PreparedOutbound {
-        entries,
-        roots: summaries.into_iter().take(8).collect(),
+    Ok(OutboundPlan {
+        roots: planned_roots,
+        summaries: summaries.into_iter().take(8).collect(),
         file_count,
         directory_count,
         total_bytes,
     })
 }
 
-fn append_outbound(
+fn count_outbound(
+    path: &std::path::Path,
+    file_count: &mut u64,
+    directory_count: &mut u64,
+    total_bytes: &mut u64,
+) -> Result<(), &'static str> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| "source unavailable")?;
+    if metadata.file_type().is_symlink() {
+        return Err("symbolic links are not supported");
+    }
+    if metadata.is_dir() {
+        *directory_count = directory_count.checked_add(1).ok_or("batch is too large")?;
+        for child in sorted_children(path)? {
+            count_outbound(&child.path(), file_count, directory_count, total_bytes)?;
+        }
+    } else if metadata.is_file() {
+        *file_count = file_count.checked_add(1).ok_or("batch is too large")?;
+        *total_bytes = total_bytes
+            .checked_add(metadata.len())
+            .ok_or("batch is too large")?;
+    } else {
+        return Err("source type is not supported");
+    }
+    Ok(())
+}
+
+fn write_outbound(
     path: &std::path::Path,
     relative_path: &str,
-    output: &mut Vec<(ManifestEntry, PathBuf)>,
+    next_ordinal: &mut u64,
+    manifest: &mut ManifestWriter,
+    sources: &mut crate::file_transfer_store::SourceWriter,
 ) -> Result<(), &'static str> {
     flowtype_core::file_transfer::validate_relative_path(relative_path)
         .map_err(|_| "source path is not transferable")?;
@@ -423,39 +511,53 @@ fn append_outbound(
             .ok()
             .and_then(|value| i64::try_from(value.as_millis()).ok())
     });
-    let ordinal = output.len() as u64;
-    output.push((
-        ManifestEntry {
-            ordinal,
-            entry_id: Uuid::new_v4().to_string(),
-            relative_path: relative_path.to_owned(),
-            kind,
-            size: if metadata.is_file() {
-                metadata.len()
-            } else {
-                0
-            },
-            modified_at_epoch_millis,
-            mime_type: None,
-            sha256: None,
+    let ordinal = *next_ordinal;
+    let entry = ManifestEntry {
+        ordinal: *next_ordinal,
+        entry_id: Uuid::new_v4().to_string(),
+        relative_path: relative_path.to_owned(),
+        kind,
+        size: if metadata.is_file() {
+            metadata.len()
+        } else {
+            0
         },
-        path.to_path_buf(),
-    ));
+        modified_at_epoch_millis,
+        mime_type: None,
+        sha256: None,
+    };
+    manifest
+        .append(&entry)
+        .map_err(|_| "cannot write outbound manifest")?;
+    sources
+        .append(ordinal, path)
+        .map_err(|_| "cannot write outbound source")?;
+    *next_ordinal = next_ordinal.checked_add(1).ok_or("batch is too large")?;
     if metadata.is_dir() {
-        let mut children = fs::read_dir(path)
-            .map_err(|_| "source directory cannot be read")?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| "source directory cannot be read")?;
-        children.sort_by_key(|entry| entry.file_name().to_string_lossy().to_lowercase());
-        for child in children {
+        for child in sorted_children(path)? {
             let name = child
                 .file_name()
                 .into_string()
                 .map_err(|_| "source name is not Unicode")?;
-            append_outbound(&child.path(), &format!("{relative_path}/{name}"), output)?;
+            write_outbound(
+                &child.path(),
+                &format!("{relative_path}/{name}"),
+                next_ordinal,
+                manifest,
+                sources,
+            )?;
         }
     }
     Ok(())
+}
+
+fn sorted_children(path: &std::path::Path) -> Result<Vec<fs::DirEntry>, &'static str> {
+    let mut children = fs::read_dir(path)
+        .map_err(|_| "source directory cannot be read")?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "source directory cannot be read")?;
+    children.sort_by_key(|entry| entry.file_name().to_string_lossy().to_lowercase());
+    Ok(children)
 }
 
 pub(crate) async fn run_file_transfer_server(
@@ -818,6 +920,13 @@ async fn ingest_manifest(
         return Err("incomplete_manifest_line");
     }
     writer.finish().map_err(|_| "manifest_count_mismatch")?;
+    let batch = coordinator
+        .store
+        .load_batch(batch_id)
+        .map_err(|_| "batch_unavailable")?;
+    if !has_available_space(&coordinator.receive_root, batch.total_bytes) {
+        return Err("insufficient_space");
+    }
     coordinator
         .store
         .prepare_windows_targets(batch_id, &coordinator.receive_root, unix_time())
@@ -831,6 +940,27 @@ async fn ingest_manifest(
         .update_state(batch_id, BatchState::Transferring, unix_time())
         .map_err(|_| "batch_state_failed")?;
     Ok(())
+}
+
+fn has_available_space(path: &std::path::Path, required: u64) -> bool {
+    if fs::create_dir_all(path).is_err() {
+        return false;
+    }
+    let path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let mut available = 0u64;
+    let queried = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+            path.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ) != 0
+    };
+    queried && available >= required.saturating_add(64 * 1024 * 1024)
 }
 
 struct ReceiveResult {

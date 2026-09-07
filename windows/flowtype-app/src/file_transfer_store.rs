@@ -444,49 +444,34 @@ impl FileTransferStore {
         Ok(result)
     }
 
-    pub(crate) fn write_source_paths(
-        &self,
-        batch_id: &str,
-        paths: impl IntoIterator<Item = (u64, PathBuf)>,
-    ) -> io::Result<()> {
+    pub(crate) fn begin_source_paths(&self, batch_id: &str) -> io::Result<SourceWriter> {
+        let batch = self.load_batch(batch_id)?;
+        let expected_entry_count = batch
+            .file_count
+            .checked_add(batch.directory_count)
+            .ok_or_else(|| invalid_data("source entry count overflow"))?;
         let directory = self.batch_dir(batch_id)?;
-        let mut data = BufWriter::with_capacity(
+        let data = BufWriter::with_capacity(
             256 * 1024,
             OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(directory.join(SOURCES_FILE))?,
         );
-        let mut index = BufWriter::with_capacity(
+        let index = BufWriter::with_capacity(
             64 * 1024,
             OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(directory.join(SOURCES_INDEX_FILE))?,
         );
-        let mut next_ordinal = 0u64;
-        let mut next_offset = 0u64;
-        for (ordinal, path) in paths {
-            if ordinal != next_ordinal || !path.is_absolute() {
-                return Err(invalid_data("invalid source path mapping"));
-            }
-            let record = SourceRecord {
-                ordinal,
-                path: path.to_string_lossy().into_owned(),
-            };
-            let mut line = serde_json::to_vec(&record).map_err(json_error)?;
-            line.push(b'\n');
-            index.write_all(&next_offset.to_le_bytes())?;
-            data.write_all(&line)?;
-            next_offset = next_offset
-                .checked_add(line.len() as u64)
-                .ok_or_else(|| invalid_data("source mapping offset overflow"))?;
-            next_ordinal += 1;
-        }
-        data.flush()?;
-        data.get_ref().sync_all()?;
-        index.flush()?;
-        index.get_ref().sync_all()
+        Ok(SourceWriter {
+            data,
+            index,
+            next_ordinal: 0,
+            next_offset: 0,
+            expected_entry_count,
+        })
     }
 
     pub(crate) fn source_path(&self, batch_id: &str, ordinal: u64) -> io::Result<PathBuf> {
@@ -534,6 +519,14 @@ impl FileTransferStore {
     }
 
     pub(crate) fn recoverable_batches(&self) -> io::Result<Vec<BatchRecord>> {
+        Ok(self
+            .batches()?
+            .into_iter()
+            .filter(|batch| !batch.state.is_terminal())
+            .collect())
+    }
+
+    pub(crate) fn batches(&self) -> io::Result<Vec<BatchRecord>> {
         let mut batches = Vec::new();
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
@@ -546,12 +539,14 @@ impl FileTransferStore {
             let Ok(batch) = self.load_batch(&batch_id) else {
                 continue;
             };
-            if !batch.state.is_terminal() {
-                batches.push(batch);
-            }
+            batches.push(batch);
         }
         batches.sort_by_key(|batch| (batch.created_at_epoch_seconds, batch.batch_id.clone()));
         Ok(batches)
+    }
+
+    pub(crate) fn delete_batch(&self, batch_id: &str) -> io::Result<()> {
+        fs::remove_dir_all(self.batch_dir(batch_id)?)
     }
 
     pub(crate) fn all_entries_complete(&self, batch_id: &str) -> io::Result<bool> {
@@ -569,6 +564,46 @@ impl FileTransferStore {
     fn batch_dir(&self, batch_id: &str) -> io::Result<PathBuf> {
         validate_batch_id(batch_id).map_err(|_| invalid_data("invalid batch id"))?;
         Ok(self.root.join(batch_id))
+    }
+}
+
+pub(crate) struct SourceWriter {
+    data: BufWriter<File>,
+    index: BufWriter<File>,
+    next_ordinal: u64,
+    next_offset: u64,
+    expected_entry_count: u64,
+}
+
+impl SourceWriter {
+    pub(crate) fn append(&mut self, ordinal: u64, path: &Path) -> io::Result<()> {
+        if ordinal != self.next_ordinal || !path.is_absolute() {
+            return Err(invalid_data("invalid source path mapping"));
+        }
+        let record = SourceRecord {
+            ordinal,
+            path: path.to_string_lossy().into_owned(),
+        };
+        let mut line = serde_json::to_vec(&record).map_err(json_error)?;
+        line.push(b'\n');
+        self.index.write_all(&self.next_offset.to_le_bytes())?;
+        self.data.write_all(&line)?;
+        self.next_offset = self
+            .next_offset
+            .checked_add(line.len() as u64)
+            .ok_or_else(|| invalid_data("source mapping offset overflow"))?;
+        self.next_ordinal += 1;
+        Ok(())
+    }
+
+    pub(crate) fn finish(mut self) -> io::Result<()> {
+        if self.next_ordinal != self.expected_entry_count {
+            return Err(invalid_data("source entry count does not match batch"));
+        }
+        self.data.flush()?;
+        self.data.get_ref().sync_all()?;
+        self.index.flush()?;
+        self.index.get_ref().sync_all()
     }
 }
 

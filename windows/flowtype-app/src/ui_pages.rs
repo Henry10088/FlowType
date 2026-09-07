@@ -166,6 +166,20 @@ impl UiContext {
             .as_deref()
             .unwrap_or(tr("手机未连接", "Phone is not connected"));
         self.muted_text(destination, 220, 132, 440, 26, self.body_font);
+        let transfer_status = match snapshot.file_transfer_state {
+            Some(flowtype_core::file_transfer::BatchState::WaitingConfirmation) => {
+                tr("等待手机确认接收", "Waiting for phone approval")
+            }
+            Some(_) => tr(
+                "正在传输，可在中断后继续",
+                "Transferring; interruptions can resume",
+            ),
+            None => tr(
+                "选择文件后，手机只需确认一次",
+                "The phone confirms once per transfer",
+            ),
+        };
+        self.muted_text(transfer_status, 220, 154, 440, 26, self.body_font);
         self.owner_button(
             tr("选择文件", "Choose files"),
             ID_CHOOSE_FILES,
@@ -175,6 +189,17 @@ impl UiContext {
             38,
             ButtonKind::Secondary,
         );
+        if snapshot.file_transfer_state.is_some() {
+            self.owner_button(
+                tr("取消传输", "Cancel transfer"),
+                ID_CANCEL_FILE_TRANSFER,
+                500,
+                184,
+                112,
+                38,
+                ButtonKind::Secondary,
+            );
+        }
         self.owner_button(
             tr("选择文件夹", "Choose folder"),
             ID_CHOOSE_FOLDER,

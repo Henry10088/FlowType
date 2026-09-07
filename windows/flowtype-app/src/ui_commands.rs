@@ -16,6 +16,7 @@ pub(super) const ID_UPDATE_HISTORY: usize = 127;
 pub(super) const ID_LANGUAGE_MENU: usize = 128;
 pub(super) const ID_CHOOSE_FILES: usize = 129;
 pub(super) const ID_CHOOSE_FOLDER: usize = 130;
+pub(super) const ID_CANCEL_FILE_TRANSFER: usize = 131;
 pub(super) const ID_UNPAIR_BASE: usize = 3000;
 pub(super) const ID_TRAY_OPEN: usize = 4001;
 pub(super) const ID_TRAY_PAIR: usize = 4002;
@@ -35,6 +36,7 @@ pub(super) enum UiCommand {
     OpenLanguageMenu,
     ChooseFiles,
     ChooseFolder,
+    CancelFileTransfer,
     Exit,
     Unpair(usize),
 }
@@ -56,6 +58,7 @@ pub(super) fn command_for_id(id: usize) -> Option<UiCommand> {
         ID_LANGUAGE_MENU => UiCommand::OpenLanguageMenu,
         ID_CHOOSE_FILES => UiCommand::ChooseFiles,
         ID_CHOOSE_FOLDER => UiCommand::ChooseFolder,
+        ID_CANCEL_FILE_TRANSFER => UiCommand::CancelFileTransfer,
         ID_TRAY_EXIT => UiCommand::Exit,
         value if (ID_UNPAIR_BASE..ID_UNPAIR_BASE + 1000).contains(&value) => {
             UiCommand::Unpair(value - ID_UNPAIR_BASE)

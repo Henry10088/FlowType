@@ -16,7 +16,7 @@ impl UiContext {
             if paths.is_empty() {
                 Ok(())
             } else {
-                self.state.send_files_to_connected_phone(&paths)
+                self.state.queue_files_to_connected_phone(paths)
             }
         });
         match result {
@@ -57,13 +57,21 @@ impl UiContext {
         if paths.is_empty() {
             return;
         }
-        match self.state.send_files_to_connected_phone(&paths) {
+        match self.state.queue_files_to_connected_phone(paths) {
             Ok(()) => self.show_save_notice(true, tr("已发送文件请求", "File transfer requested")),
             Err(error) => self.show_save_notice(
                 false,
                 &format!("{}: {error}", tr("无法发送文件", "Could not send files")),
             ),
         }
+    }
+
+    pub(super) fn cancel_file_transfer(&mut self) {
+        match self.state.cancel_outbound_file_transfer() {
+            Ok(()) => self.show_save_notice(true, tr("文件传输已取消", "File transfer canceled")),
+            Err(error) => self.show_save_notice(false, &error.to_string()),
+        }
+        self.rebuild_page();
     }
 
     pub(super) fn set_page(&mut self, page: Page) {

@@ -13,6 +13,7 @@ import app.flowtype.data.StorageDispatcher
 import app.flowtype.connectivity.ConnectivityDemand
 import app.flowtype.image.PreparedImage
 import app.flowtype.filetransfer.FileTransferManager
+import app.flowtype.filetransfer.FileTransferService
 import app.flowtype.network.AutoSelectionCoordinator
 import app.flowtype.network.ComputerDiscovery
 import app.flowtype.network.ControlClientPool
@@ -132,8 +133,17 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
             phoneId = bindings.phoneId,
             sendOffer = syncClient::sendFileOffer,
             sendDecision = syncClient::decideFileOffer,
+            sendCancel = syncClient::cancelFileTransfer,
             onChanged = { snapshot -> onMain {
                 fileTransfer = snapshot
+                connectivityDemand.setFileTransferActive(snapshot.active)
+                if (snapshot.active) {
+                    resumeConnectivity()
+                    FileTransferService.start(application)
+                } else {
+                    FileTransferService.stop(application)
+                    scheduleBackgroundDisconnect()
+                }
                 notifyChanged()
             } },
         )
@@ -270,6 +280,10 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
 
     fun rejectIncomingFiles() {
         fileTransfers.rejectIncoming()
+    }
+
+    fun cancelFileTransfer() {
+        fileTransfers.cancelActive()
     }
 
     fun textChanged(text: String) {

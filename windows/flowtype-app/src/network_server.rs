@@ -264,6 +264,7 @@ async fn serve_connection(
                             state
                                 .file_transfers
                                 .cancel(&cancel.batch_id, &auth.phone_id)?;
+                            state.notify_ui();
                         }
                         FileClientMessage::FileDecision(decision) => {
                             if let Some(ticket) = state
@@ -272,6 +273,7 @@ async fn serve_connection(
                             {
                                 send_json(&mut websocket, &ticket).await?;
                             }
+                            state.notify_ui();
                         }
                     }
                 } else if value.get("type").and_then(serde_json::Value::as_str) == Some("image_start") {

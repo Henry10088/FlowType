@@ -225,6 +225,26 @@ class FileTransferStore(private val database: AppDatabase) {
         ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.batch()) } }
     }
 
+    fun batchesOlderThan(updatedBefore: Long): List<FileTransferBatch> =
+        database.readableDatabase.query(
+            "file_transfer_batches",
+            BATCH_COLUMNS,
+            "updated_at < ?",
+            arrayOf(updatedBefore.toString()),
+            null,
+            null,
+            "updated_at, batch_id",
+        ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.batch()) } }
+
+    fun deleteBatch(batchId: String) {
+        validateIdentifier(batchId, MAX_BATCH_ID_BYTES)
+        database.writableDatabase.delete(
+            "file_transfer_batches",
+            "batch_id = ?",
+            arrayOf(batchId),
+        )
+    }
+
     fun entriesPage(batchId: String, startOrdinal: Long, limit: Int): List<StoredTransferEntry> {
         require(startOrdinal >= 0 && limit in 1..MAX_MANIFEST_PAGE_ENTRIES)
         return database.readableDatabase.query(

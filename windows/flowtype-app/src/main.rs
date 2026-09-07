@@ -324,6 +324,7 @@ struct UiSnapshot {
     status: RuntimeStatus,
     injector_ready: bool,
     update: update::UpdateSnapshot,
+    file_transfer_state: Option<flowtype_core::file_transfer::BatchState>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -468,6 +469,7 @@ impl AppState {
     }
 
     fn snapshot(&self) -> UiSnapshot {
+        let connected_phone_id = self.connected_phone_id();
         UiSnapshot {
             pc_name: self
                 .pc_name
@@ -489,6 +491,10 @@ impl AppState {
                 }),
             injector_ready: self.injector.is_ready(),
             update: self.update.snapshot(),
+            file_transfer_state: connected_phone_id
+                .as_deref()
+                .and_then(|phone_id| self.file_transfers.outbound_batch(phone_id))
+                .map(|batch| batch.state),
         }
     }
 
@@ -820,6 +826,44 @@ impl AppState {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let phone_id = self.connected_phone_id().ok_or("phone is not connected")?;
         self.send_files_to_phone(&phone_id, paths)
+    }
+
+    fn queue_files_to_connected_phone(
+        self: &Arc<Self>,
+        paths: Vec<std::path::PathBuf>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if paths.is_empty() {
+            return Err("no files selected".into());
+        }
+        if self.connected_phone_id().is_none() {
+            return Err("phone is not connected".into());
+        }
+        let state = Arc::clone(self);
+        std::thread::spawn(move || {
+            state.update_status(|status| {
+                status.summary = tr("正在准备文件", "Preparing files").to_owned();
+                status.last_error = None;
+            });
+            match state.send_files_to_connected_phone(&paths) {
+                Ok(()) => state.update_status(|status| {
+                    status.summary =
+                        tr("等待手机确认接收", "Waiting for phone approval").to_owned();
+                    status.last_error = None;
+                }),
+                Err(error) => state.update_status(|status| {
+                    status.summary = tr("文件发送失败", "File transfer failed").to_owned();
+                    status.last_error = Some(error.to_string());
+                }),
+            }
+        });
+        Ok(())
+    }
+
+    fn cancel_outbound_file_transfer(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let phone_id = self.connected_phone_id().ok_or("phone is not connected")?;
+        self.file_transfers.cancel_outbound(&phone_id)?;
+        self.notify_ui();
+        Ok(())
     }
 
     fn begin_pairing(&self, host: IpAddr) -> Result<String, Box<dyn std::error::Error>> {

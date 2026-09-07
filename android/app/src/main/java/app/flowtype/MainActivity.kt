@@ -53,6 +53,7 @@ class MainActivity : ComponentActivity() {
     private var waitingForUpdatePermission = false
     private var choosingIncomingTarget = false
     private var shownIncomingBatchId: String? = null
+    private var shownReselectionBatchId: String? = null
     private var imeWasVisible = false
     private var ignoreImeDismissUntil = 0L
     private var keepAwakeUntil = 0L
@@ -195,6 +196,12 @@ class MainActivity : ComponentActivity() {
             showInput(focus = intent.action != ACTION_OPEN_IMAGE)
             if (intent.action == ACTION_OPEN_IMAGE) chooseImageSource()
         }
+        handleSharedFiles(intent)
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -204,6 +211,27 @@ class MainActivity : ComponentActivity() {
             showInput(focus = false)
             chooseImageSource()
         }
+        handleSharedFiles(intent)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun handleSharedFiles(intent: Intent) {
+        val uris = when (intent.action) {
+            Intent.ACTION_SEND -> listOfNotNull(
+                if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                else intent.getParcelableExtra(Intent.EXTRA_STREAM),
+            )
+            Intent.ACTION_SEND_MULTIPLE -> if (Build.VERSION.SDK_INT >= 33) {
+                intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+            } else {
+                intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM).orEmpty()
+            }
+            else -> emptyList()
+        }
+        if (uris.isEmpty()) return
+        uris.forEach(::persistReadPermission)
+        controller.sendFiles(uris)
+        intent.action = null
     }
 
     override fun onDestroy() {
@@ -330,7 +358,18 @@ class MainActivity : ComponentActivity() {
         }
         findViewById<ImageButton>(R.id.openSettings).setOnClickListener { showSettings() }
         findViewById<ImageButton>(R.id.openImage).setOnClickListener { chooseImageSource() }
-        findViewById<ImageButton>(R.id.openFiles).setOnClickListener { chooseFileSource() }
+        findViewById<ImageButton>(R.id.openFiles).setOnClickListener {
+            if (controller.state().fileTransfer.active) {
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.file_transfer_title)
+                    .setMessage(R.string.cancel_file_transfer_message)
+                    .setNegativeButton(R.string.keep_transferring, null)
+                    .setPositiveButton(R.string.cancel_transfer) { _, _ -> controller.cancelFileTransfer() }
+                    .show()
+            } else {
+                chooseFileSource()
+            }
+        }
         renderInput(controller.state())
         applyInputWindowSettings()
         if (focus) showKeyboard()
@@ -449,6 +488,27 @@ class MainActivity : ComponentActivity() {
                     .show()
             }
         }
+        if (state.fileTransfer.needsReselection &&
+            shownReselectionBatchId != state.fileTransfer.batchId
+        ) {
+            shownReselectionBatchId = state.fileTransfer.batchId
+            AlertDialog.Builder(this)
+                .setTitle(R.string.choose_save_location)
+                .setMessage(R.string.file_reselect_message)
+                .setNegativeButton(R.string.cancel_transfer) { _, _ ->
+                    controller.cancelFileTransfer()
+                    shownReselectionBatchId = null
+                }
+                .setPositiveButton(R.string.choose_save_location) { _, _ ->
+                    choosingIncomingTarget = true
+                    directory.launch(null)
+                }
+                .setOnCancelListener {
+                    controller.cancelFileTransfer()
+                    shownReselectionBatchId = null
+                }
+                .show()
+        }
         computerName.text = state.binding?.pcName ?: getString(R.string.default_computer)
         status.text = state.status
         syncStatus.text = state.syncState
@@ -467,7 +527,7 @@ class MainActivity : ComponentActivity() {
         pair.visibility = if (paired) View.GONE else View.VISIBLE
         findViewById<ImageButton>(R.id.openImage).isEnabled =
             paired && state.imageTransfer != FlowTypeController.ImageTransferState.SENDING
-        findViewById<ImageButton>(R.id.openFiles).isEnabled = paired && !state.fileTransfer.active
+        findViewById<ImageButton>(R.id.openFiles).isEnabled = paired
         if (state.fileTransfer.active) {
             syncStatus.text = state.fileTransfer.error?.let {
                 getString(R.string.file_waiting_network)

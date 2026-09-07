@@ -78,7 +78,7 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
             .head()
             .build()
         client.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "resume query failed: ${response.code}" }
+            checkResponse(response, "resume query failed")
             check(response.header("x-flowtype-length")?.toLongOrNull() == entry.size) {
                 "remote file size changed"
             }
@@ -99,9 +99,10 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
         entry.validate()
         require(offset in 0..entry.size)
         var localHash: String? = null
+        val chunkLength = minOf(entry.size - offset, MAX_CHUNK_BYTES)
         val body = object : RequestBody() {
             override fun contentType() = OCTET_STREAM
-            override fun contentLength(): Long = entry.size - offset
+            override fun contentLength(): Long = chunkLength
 
             override fun writeTo(sink: BufferedSink) {
                 val digest = MessageDigest.getInstance("SHA-256")
@@ -115,7 +116,7 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
                         digest.update(buffer, 0, read)
                         prefix -= read
                     }
-                    var remaining = entry.size - offset
+                    var remaining = chunkLength
                     while (remaining > 0) {
                         val read = input.read(buffer, 0, minOf(remaining, buffer.size.toLong()).toInt())
                         if (read < 0) throw EOFException("source became shorter")
@@ -123,9 +124,13 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
                         digest.update(buffer, 0, read)
                         remaining -= read
                     }
-                    check(input.read() == -1) { "source became larger" }
+                    if (offset + chunkLength == entry.size) {
+                        check(input.read() == -1) { "source became larger" }
+                    }
                 }
-                localHash = digest.digest().joinToString("") { "%02x".format(it) }
+                if (offset + chunkLength == entry.size) {
+                    localHash = digest.digest().joinToString("") { "%02x".format(it) }
+                }
             }
         }
         val request = authorizedRequest(ticket, "entries/${entry.entryId}")
@@ -134,7 +139,7 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
             .post(body)
             .build()
         client.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "file upload failed: ${response.code}" }
+            checkResponse(response, "file upload failed")
             val value = JSONObject(requireNotNull(response.body).string())
             val committed = value.getLong("committed_offset")
             val completed = value.getBoolean("completed")
@@ -153,7 +158,7 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
             .post(EMPTY_BODY)
             .build()
         client.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "batch completion failed: ${response.code}" }
+            checkResponse(response, "batch completion failed")
         }
     }
 
@@ -163,7 +168,7 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
             .get()
             .build()
         client.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "manifest download failed: ${response.code}" }
+            checkResponse(response, "manifest download failed")
             val entries = requireNotNull(response.body).source().use { source ->
                 buildList {
                     while (!source.exhausted()) {
@@ -193,7 +198,7 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
             .get()
             .build()
         client.newCall(request).execute().use { response ->
-            check(response.code == 206) { "file download failed: ${response.code}" }
+            if (response.code != 206) throw responseError(response, "file download failed")
             val bytes = requireNotNull(response.body).bytes()
             check(bytes.isNotEmpty() && offset + bytes.size <= entry.size) { "invalid file chunk" }
             return bytes
@@ -212,7 +217,7 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
             .post(EMPTY_BODY)
             .build()
         client.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "file verification failed: ${response.code}" }
+            checkResponse(response, "file verification failed")
         }
     }
 
@@ -229,6 +234,19 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
             .url(url)
             .header("Authorization", "Bearer ${ticket.token}")
             .header("Cache-Control", "no-store")
+    }
+
+    private fun checkResponse(response: Response, action: String) {
+        if (!response.isSuccessful) throw responseError(response, action)
+    }
+
+    private fun responseError(response: Response, action: String): IllegalStateException {
+        val code = runCatching {
+            JSONObject(response.peekBody(8 * 1024).string()).optString("code")
+        }.getOrDefault("")
+        return IllegalStateException(
+            if (code.isBlank()) "$action: HTTP ${response.code}" else "$action: $code",
+        )
     }
 
     override fun close() {
@@ -277,6 +295,7 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
         val NDJSON = "application/x-ndjson".toMediaType()
         val OCTET_STREAM = "application/octet-stream".toMediaType()
         val EMPTY_BODY = ByteArray(0).toRequestBody(OCTET_STREAM)
+        const val MAX_CHUNK_BYTES = 8L * 1024 * 1024
     }
 }
 

@@ -126,4 +126,10 @@
     <string name="incoming_files_message">%1$s wants to send %2$d files and %3$d folders (%4$s).\n\n%5$s</string>
     <string name="reject">Reject</string>
     <string name="choose_save_location">Choose save location</string>
+    <string name="file_transfer_channel">File transfers</string>
+    <string name="file_transfer_notification">Transferring files in the background</string>
+    <string name="cancel_file_transfer_message">A file transfer is in progress.</string>
+    <string name="keep_transferring">Keep transferring</string>
+    <string name="cancel_transfer">Cancel transfer</string>
+    <string name="file_reselect_message">FlowType no longer has access to the save folder. Choose that folder again to continue.</string>
 </resources>
