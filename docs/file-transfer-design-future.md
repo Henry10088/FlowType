@@ -194,7 +194,7 @@ LocalSend 是重要实现参考，不是兼容目标。说写不承诺与 LocalS
 - 大文件上传使用单次线性流式读取；接收端按 16 MiB 或 1 秒持久化确认偏移，避免按分块反复读取文件前缀造成平方级磁盘开销。
 - Windows 安装器同时开放控制端口 32187 和加密文件数据端口 32188，范围仍限制为本地子网和 Tailscale 地址段。
 
-发布构建实测：Android 未签名 Release APK 为 1,086,913 字节；Windows 未签名安装包为 3,423,224 字节。相对设计基线，Android 增量约 101 KiB；Windows 相对最近的 0.2.7 安装包增量约 89 KiB，均在预算内。
+发布构建实测：Android 未签名 Release APK 为 1,086,913 字节；Windows 未签名安装包为 3,423,780 字节。相对设计基线，Android 增量约 101 KiB；Windows 相对最近的 0.2.7 安装包增量约 89 KiB，均在预算内。
 
 验证结果：Windows workspace 共 95 项自动测试通过（另有 5 项需要已注册 TIP 和交互式编辑器的测试按设计忽略）；Android 73 项 JVM 测试、Debug AndroidTest 构建和 API 36 模拟器上的 5 项仪器测试通过，包含数据库 4→6、5→6 升级与传输目标字段持久化。Android 全量 Lint、Release Lint Vital 和 Gradle 严格依赖校验通过，Rust workspace Clippy 以 `-D warnings` 通过。
 
@@ -214,7 +214,7 @@ LocalSend 是重要实现参考，不是兼容目标。说写不承诺与 LocalS
 
 最终产物：
 
-- `FlowType-0.2.8-x64-setup.exe`：3,423,224 字节，SHA-256 `CEA2980B0E3863508D4574EB2C6BD0DC231DEBE1F7211CD6D8FDC53D89D6A133`
+- `FlowType-0.2.8-x64-setup.exe`：3,423,780 字节，SHA-256 `9787A4F2EBFAF181232E562ABB30EDD846ABD486CF1F82399E072AFD8B5EDB8C`
 - `FlowType-0.2.4-android-release-unsigned.apk`：1,086,913 字节，SHA-256 `A3D61B932ABD9062D69D77935ADDDC62B8D71A23A4757A262B38FE62586DC7B4`
 
 Release APK 已检查，不包含 Debug 专用的 E2E Receiver、Provider 或测试入口。
