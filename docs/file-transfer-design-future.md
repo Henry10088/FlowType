@@ -1,6 +1,6 @@
 # 通用文件传输设计
 
-状态：功能已实现，已完成双向真实传输、跨进程断点续传和发布构建验证；等待合并独立功能分支，不改变 V1 文字同步的架构和验收边界
+状态：功能与验收已完成，已生成 0.3.0 双端本地发布产物；等待合并独立功能分支，不改变文字同步、Injector 或 TSF 的架构边界
 
 最后修订：2026-09-08
 
@@ -154,7 +154,7 @@ LocalSend 是重要实现参考，不是兼容目标。说写不承诺与 LocalS
 - 单文件缓冲建议 256 KiB 至 1 MiB；批次内最多两个文件并发，默认不压缩正文。
 - 目录枚举、清单传输和 UI 展示都使用分页，不把所有条目复制成多个内存列表。
 - 进度持久化最多每秒一次；UI 更新建议每 200 至 500 ms 一次，不随每个网络块重绘。
-- 开始前根据清单总大小检查目标可用空间；空间不足时不开始正文，传输途中空间耗尽则保留可恢复状态。
+- 开始前根据清单总大小检查目标可用空间；传输途中空间耗尽时立即停止自动重试、保留已完成文件、删除未完成临时文件并显示明确的空间不足结果。用户释放空间后重新发送失败项，不把磁盘错误伪装成网络错误。
 - 活跃文字输入期间文件并发降为一，并保证 WSS 事件循环、注入 IPC 和文件磁盘任务之间没有同步锁依赖。
 
 ## 10. 包体积预算
@@ -194,9 +194,9 @@ LocalSend 是重要实现参考，不是兼容目标。说写不承诺与 LocalS
 - 大文件上传使用单次线性流式读取；接收端按 16 MiB 或 1 秒持久化确认偏移，避免按分块反复读取文件前缀造成平方级磁盘开销。
 - Windows 安装器同时开放控制端口 32187 和加密文件数据端口 32188，范围仍限制为本地子网和 Tailscale 地址段。
 
-发布构建实测：Android 未签名 Release APK 为 1,086,913 字节；Windows 未签名安装包为 3,423,780 字节。相对设计基线，Android 增量约 101 KiB；Windows 相对最近的 0.2.7 安装包增量约 89 KiB，均在预算内。
+0.3.0 发布构建实测：Android 未签名 Release APK 为 1,088,121 字节；Windows 未签名安装包为 3,423,895 字节。相对设计基线，Android 增量约 102 KiB；Windows 增量约 89 KiB，均在预算内。Windows 主程序、Injector、x64 TIP、x86 TIP 分别为 2,638,336、396,288、354,816、302,592 字节。
 
-验证结果：Windows workspace 共 95 项自动测试通过（另有 5 项需要已注册 TIP 和交互式编辑器的测试按设计忽略）；Android 73 项 JVM 测试、Debug AndroidTest 构建和 API 36 模拟器上的 5 项仪器测试通过，包含数据库 4→6、5→6 升级与传输目标字段持久化。Android 全量 Lint、Release Lint Vital 和 Gradle 严格依赖校验通过，Rust workspace Clippy 以 `-D warnings` 通过。
+验证结果：Windows workspace 共 101 项自动测试通过，另有 6 项压力或需要已注册 TIP/交互式编辑器的测试按设计忽略；Android 77 项 JVM 测试在 Debug 和 Release 各通过一次，API 36 模拟器常规仪器测试 5 项通过，十万级清单压力用例单独通过。Android 全量 Lint、Release Lint Vital 和 Gradle 严格依赖校验通过，Rust workspace Clippy 以 `-D warnings` 通过，x86/x64 TIP 和完整 Windows Release workspace 均构建成功。
 
 ## 11.2 真实双向联调记录
 
@@ -209,17 +209,25 @@ LocalSend 是重要实现参考，不是兼容目标。说写不承诺与 LocalS
 - Android 主动取消 1 GiB 批次后，Android 与 Windows 批次均为 `canceled`，未完成条目同步标记取消并清理临时文件。
 - Windows 源文件在清单建立后发生变化时，该文件以 `source_changed` 失败，同批其它文件仍完成，批次结果为 `partial_failure`，失败文件不遗留 `.part`。
 - Android 保存目录经过一次系统授权后会被记住；后续批次确认页直接提供“接收”“更改位置”“拒绝”，无需重复打开目录选择器。同名文件以 `(1)` 后缀保存，不覆盖已有文件。
+- Android 接收 1 GiB 文件时在 243,269,632 字节撤销 SAF 持久权限并结束进程；恢复后同一批次进入 `needs_reselection`，重新选择目录后从原偏移继续到 1,073,741,824 字节，最终 SHA-256 一致且未重建批次。
+- 使用黑洞网络规则中断 Android 上传，Windows 已确认偏移从 16 MiB 恢复后的首个进度为 32 MiB，同一批次最终完成；数据连接按“连续 30 秒无进展”超时，正常大文件传输不会被总时长误杀。
+- 数据端口动态验证中，TLS 1.2 握手收到协议版本告警并失败；TLS 1.3 成功协商，健康接口返回 HTTP 200。缺少令牌、错误令牌和跨批次重放均返回 401，正确令牌只获得其批次和方向的权限。
+- 100,000 项 Windows 流式清单写入、末项读取和进度更新约 0.83 秒；Android 以每页 256 项写入 SQLite 并读取首末页约 7.442 秒。
+- 文字控制面空闲 51 个 ACK 的 P50/P95 为 2/4 ms；Android 上传 1 GiB 期间为 4/7 ms，P95 增量 3 ms。电脑向手机传输 1 GiB 时 Windows Working Set 峰值 91,353,088 字节、Android PSS 峰值 142,635,008 字节，内存不随文件总大小线性增长。
+- 模拟器存储真实耗尽时，Android 将 `SQLiteFullException`、ENOSPC 和“No space left”统一归类为 `insufficient_space`，停止 3 秒网络重试，批次进入 `partial_failure`，界面显示空间不足并删除未完成 `.part`；已完成文件保留。
 
 联调还发现并修复了一个阻断数据面的地址转换缺陷：Android 曾在把 WSS 控制地址改为 HTTPS 前调用 HTTP URL 解析，导致 `wss://` 被立即拒绝。现在先完成 `wss://` → `https://`、`ws://` → `http://` 的协议映射再解析，并有 JVM 回归测试覆盖。
 
 最终产物：
 
-- `FlowType-0.2.8-x64-setup.exe`：3,423,780 字节，SHA-256 `9787A4F2EBFAF181232E562ABB30EDD846ABD486CF1F82399E072AFD8B5EDB8C`
-- `FlowType-0.2.4-android-release-unsigned.apk`：1,086,913 字节，SHA-256 `A3D61B932ABD9062D69D77935ADDDC62B8D71A23A4757A262B38FE62586DC7B4`
+- `FlowType-0.3.0-x64-setup.exe`：3,423,895 字节，SHA-256 `45052ED60908468E97D505B4E4CEDAFD38AC51E8AE4B01E474EF41EB8B4EEEAC`
+- `FlowType-0.3.0-android-release-unsigned.apk`：1,088,121 字节，SHA-256 `107100489E7F7CA5573D0E0E40913A0FE051D3BCE21F2C0075F5F99912DFC97A`
 
 Release APK 已检查，不包含 Debug 专用的 E2E Receiver、Provider 或测试入口。
 
 ## 12. 验收条件
+
+验收结论：以下条件已在 2026-09-08 全部通过。
 
 - 多文件、目录、空目录和混合拖放能够正确还原相对结构。
 - 手机发送后 Windows 自动保存，不弹接收确认；电脑发送时 Android 只确认整个批次一次。
