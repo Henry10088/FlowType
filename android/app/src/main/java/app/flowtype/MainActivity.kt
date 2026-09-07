@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.DocumentsContract
 import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
@@ -168,12 +169,14 @@ class MainActivity : ComponentActivity() {
         if (uri != null) {
             if (choosingIncomingTarget) {
                 persistTreePermission(uri)
+                rememberIncomingTree(uri)
                 controller.acceptIncomingFiles(uri)
             } else {
                 persistReadPermission(uri)
                 controller.sendDirectory(uri)
             }
         }
+        if (uri == null && choosingIncomingTarget) shownIncomingBatchId = null
         choosingIncomingTarget = false
         showInput(focus = false)
     }
@@ -436,6 +439,40 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun rememberIncomingTree(uri: Uri) {
+        if (contentResolver.persistedUriPermissions.any {
+                it.uri == uri && it.isReadPermission && it.isWritePermission
+            }
+        ) {
+            getSharedPreferences(FILE_TRANSFER_PREFERENCES, MODE_PRIVATE)
+                .edit()
+                .putString(INCOMING_TREE_URI, uri.toString())
+                .apply()
+        }
+    }
+
+    private fun rememberedIncomingTree(): Uri? {
+        val value = getSharedPreferences(FILE_TRANSFER_PREFERENCES, MODE_PRIVATE)
+            .getString(INCOMING_TREE_URI, null)
+            ?: return null
+        val uri = runCatching { Uri.parse(value) }.getOrNull() ?: return null
+        if (contentResolver.persistedUriPermissions.any {
+                it.uri == uri && it.isReadPermission && it.isWritePermission
+            }
+        ) return uri
+        getSharedPreferences(FILE_TRANSFER_PREFERENCES, MODE_PRIVATE)
+            .edit()
+            .remove(INCOMING_TREE_URI)
+            .apply()
+        return null
+    }
+
+    private fun incomingTreeLabel(uri: Uri): String = runCatching {
+        DocumentsContract.getTreeDocumentId(uri).substringAfter(':').ifBlank {
+            getString(R.string.selected_save_location)
+        }
+    }.getOrDefault(getString(R.string.selected_save_location))
+
     private fun formatBytes(value: Long): String = when {
         value >= 1024L * 1024 * 1024 -> String.format("%.1f GB", value / (1024.0 * 1024 * 1024))
         value >= 1024L * 1024 -> String.format("%.1f MB", value / (1024.0 * 1024))
@@ -462,31 +499,45 @@ class MainActivity : ComponentActivity() {
         state.fileTransfer.incomingOffer?.let { offer ->
             if (shownIncomingBatchId != offer.batchId) {
                 shownIncomingBatchId = offer.batchId
-                AlertDialog.Builder(this)
+                val target = rememberedIncomingTree()
+                val message = getString(
+                    R.string.incoming_files_message,
+                    state.binding?.pcName ?: getString(R.string.default_computer),
+                    offer.fileCount,
+                    offer.directoryCount,
+                    formatBytes(offer.totalBytes),
+                    offer.roots.joinToString("、"),
+                ) + if (target == null) "" else getString(
+                    R.string.incoming_files_location,
+                    incomingTreeLabel(target),
+                )
+                val dialog = AlertDialog.Builder(this)
                     .setTitle(R.string.incoming_files_title)
-                    .setMessage(
-                        getString(
-                            R.string.incoming_files_message,
-                            state.binding?.pcName ?: getString(R.string.default_computer),
-                            offer.fileCount,
-                            offer.directoryCount,
-                            formatBytes(offer.totalBytes),
-                            offer.roots.joinToString("、"),
-                        ),
-                    )
+                    .setMessage(message)
                     .setNegativeButton(R.string.reject) { _, _ ->
                         shownIncomingBatchId = null
                         controller.rejectIncomingFiles()
-                    }
-                    .setPositiveButton(R.string.choose_save_location) { _, _ ->
-                        choosingIncomingTarget = true
-                        directory.launch(null)
                     }
                     .setOnCancelListener {
                         shownIncomingBatchId = null
                         controller.rejectIncomingFiles()
                     }
-                    .show()
+                if (target == null) {
+                    dialog.setPositiveButton(R.string.choose_save_location) { _, _ ->
+                        choosingIncomingTarget = true
+                        directory.launch(null)
+                    }
+                } else {
+                    dialog
+                        .setNeutralButton(R.string.change_save_location) { _, _ ->
+                            choosingIncomingTarget = true
+                            directory.launch(target)
+                        }
+                        .setPositiveButton(R.string.receive_files) { _, _ ->
+                            controller.acceptIncomingFiles(target)
+                        }
+                }
+                dialog.show()
             }
         }
         if (state.fileTransfer.needsReselection &&
@@ -747,6 +798,8 @@ class MainActivity : ComponentActivity() {
         private const val STATE_REOPEN_SETTINGS = "reopen_settings"
         private const val INPUT_RESUME_GRACE_MS = 1_000L
         private const val KEEP_AWAKE_WINDOW_MS = 10L * 60L * 1_000L
+        private const val FILE_TRANSFER_PREFERENCES = "flowtype-file-transfer"
+        private const val INCOMING_TREE_URI = "incoming-tree-uri"
         const val ACTION_OPEN_IMAGE = "app.flowtype.OPEN_IMAGE"
         private const val NOTIFICATION_PERMISSION = 10
     }

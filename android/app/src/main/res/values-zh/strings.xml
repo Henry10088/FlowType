@@ -124,6 +124,10 @@
     <string name="file_waiting_network">文件传输正在等待网络</string>
     <string name="incoming_files_title">电脑发来文件</string>
     <string name="incoming_files_message">%1$s 要发送 %2$d 个文件和 %3$d 个文件夹（%4$s）。\n\n%5$s</string>
+    <string name="incoming_files_location">\n\n保存到：%1$s</string>
+    <string name="selected_save_location">已选文件夹</string>
+    <string name="receive_files">接收</string>
+    <string name="change_save_location">更改位置</string>
     <string name="reject">拒绝</string>
     <string name="choose_save_location">选择保存位置</string>
     <string name="file_transfer_channel">文件传输</string>
