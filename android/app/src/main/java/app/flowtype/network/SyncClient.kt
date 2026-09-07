@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Base64
+import android.util.Log
 import app.flowtype.pairing.ComputerBinding
 import app.flowtype.image.ImageTransferReply
 import app.flowtype.image.PreparedImage
@@ -301,6 +302,8 @@ class SyncClient(
         }
         if (socket?.send(payload) != true) {
             restartSocketLocked()
+        } else {
+            SyncE2eMetrics.sent(action.snapshot)
         }
     }
 
@@ -459,6 +462,7 @@ class SyncClient(
                         is ServerMessage.HealthAck -> Unit
                         is ServerMessage.Ack -> {
                             if (!queue.acceptsSession(message.value.sessionId)) return
+                            SyncE2eMetrics.acknowledged(message.value)
                             queue.acknowledge(message.value)?.let(::sendActionLocked)
                             listener.onAck(message.value)
                         }
@@ -581,5 +585,27 @@ class SyncClient(
         }
 
         override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+    }
+}
+
+internal object SyncE2eMetrics {
+    @Volatile var enabled = false
+
+    fun sent(snapshot: SnapshotMessage) {
+        if (!enabled) return
+        Log.i(
+            "FlowTypeE2E",
+            "snapshot_sent session=${snapshot.sessionId} sequence=${snapshot.sequence} " +
+                "elapsed_ms=${SystemClock.elapsedRealtime()}",
+        )
+    }
+
+    fun acknowledged(ack: AckMessage) {
+        if (!enabled) return
+        Log.i(
+            "FlowTypeE2E",
+            "snapshot_ack session=${ack.sessionId} sequence=${ack.appliedSequence} " +
+                "elapsed_ms=${SystemClock.elapsedRealtime()}",
+        )
     }
 }

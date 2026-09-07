@@ -297,14 +297,18 @@ async fn serve_connection(
                     if let Some(session_id) = session_transition.session_id() {
                         input_session.track(session_id);
                     }
-                    monitored_session = match &message {
-                        ClientMessage::Start(snapshot) | ClientMessage::Update(snapshot)
-                            if !snapshot.session_id.is_empty() => Some(snapshot.session_id.clone()),
-                        ClientMessage::Resume(resume)
-                            if resume.session_state == ClientSessionState::Active
-                                && !resume.session_id.is_empty() => Some(resume.session_id.clone()),
-                        ClientMessage::Finish(_) | ClientMessage::Resume(_) => None,
-                        _ => monitored_session,
+                    monitored_session = if e2e_ack_without_injection() {
+                        None
+                    } else {
+                        match &message {
+                            ClientMessage::Start(snapshot) | ClientMessage::Update(snapshot)
+                                if !snapshot.session_id.is_empty() => Some(snapshot.session_id.clone()),
+                            ClientMessage::Resume(resume)
+                                if resume.session_state == ClientSessionState::Active
+                                    && !resume.session_id.is_empty() => Some(resume.session_id.clone()),
+                            ClientMessage::Finish(_) | ClientMessage::Resume(_) => None,
+                            _ => monitored_session,
+                        }
                     };
                     handle_client_message(&mut websocket, &state, &auth.phone_id, message).await?;
                     if session_transition.completes_session()
@@ -892,6 +896,28 @@ where
         .await;
     }
 
+    if e2e_ack_without_injection() {
+        if kind == "start" {
+            send_json(
+                websocket,
+                &ServerMessage::Target(Target {
+                    protocol_version: flowtype_core::PROTOCOL_VERSION,
+                    session_id: snapshot.session_id.clone(),
+                    target_state: TargetState::Active,
+                    target_name: Some("FlowType E2E editor".to_owned()),
+                }),
+            )
+            .await?;
+        }
+        return send_ack(
+            websocket,
+            &snapshot.session_id,
+            snapshot.sequence,
+            kind == "finish",
+        )
+        .await;
+    }
+
     if kind == "start" {
         let response = match injector_request_async(
             state,
@@ -987,6 +1013,10 @@ where
         }
         other => send_injector_state(websocket, state, &snapshot.session_id, other).await,
     }
+}
+
+fn e2e_ack_without_injection() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("FLOWTYPE_E2E_ACK_WITHOUT_INJECTION").is_some()
 }
 
 async fn handle_cancel(
