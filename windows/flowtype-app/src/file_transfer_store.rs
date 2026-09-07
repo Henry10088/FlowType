@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 const STORE_VERSION: u16 = 1;
 const BATCH_FILE: &str = "batch.json";
 const MANIFEST_FILE: &str = "manifest.ndjson";
+const MANIFEST_INDEX_FILE: &str = "manifest-index-v1.bin";
 const MANIFEST_COMPLETE_FILE: &str = "manifest-complete.json";
 const PROGRESS_FILE: &str = "progress-v1.bin";
 const PROGRESS_RECORD_BYTES: u64 = 16;
@@ -164,12 +165,19 @@ impl FileTransferStore {
         let directory = self.batch_dir(batch_id)?;
         let path = directory.join(MANIFEST_FILE);
         let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+        let index = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(directory.join(MANIFEST_INDEX_FILE))?;
         Ok(ManifestWriter {
             directory,
             file: BufWriter::with_capacity(512 * 1024, file),
+            index: BufWriter::with_capacity(64 * 1024, index),
             next_ordinal: 0,
             expected_entry_count,
+            next_offset: 0,
             hasher: Sha256::new(),
+            committed: false,
         })
     }
 
@@ -237,6 +245,37 @@ impl FileTransferStore {
         file.sync_data()
     }
 
+    pub(crate) fn manifest_entry(&self, batch_id: &str, ordinal: u64) -> io::Result<ManifestEntry> {
+        let directory = self.batch_dir(batch_id)?;
+        let completed = read_manifest_complete(&directory)?;
+        if ordinal >= completed.entry_count {
+            return Err(invalid_data("manifest ordinal is outside the batch"));
+        }
+        let mut index = File::open(directory.join(MANIFEST_INDEX_FILE))?;
+        index.seek(SeekFrom::Start(
+            ordinal
+                .checked_mul(8)
+                .ok_or_else(|| invalid_data("manifest index offset overflow"))?,
+        ))?;
+        let mut encoded_offset = [0u8; 8];
+        index.read_exact(&mut encoded_offset)?;
+        let mut manifest = BufReader::new(File::open(directory.join(MANIFEST_FILE))?);
+        manifest.seek(SeekFrom::Start(u64::from_le_bytes(encoded_offset)))?;
+        let mut line = Vec::new();
+        manifest.read_until(b'\n', &mut line)?;
+        if line.pop() != Some(b'\n') {
+            return Err(invalid_data("incomplete manifest line"));
+        }
+        let entry: ManifestEntry = serde_json::from_slice(&line).map_err(json_error)?;
+        entry
+            .validate()
+            .map_err(|_| invalid_data("invalid manifest entry"))?;
+        if entry.ordinal != ordinal {
+            return Err(invalid_data("manifest index does not match entry"));
+        }
+        Ok(entry)
+    }
+
     pub(crate) fn read_progress(&self, batch_id: &str, ordinal: u64) -> io::Result<EntryProgress> {
         let directory = self.batch_dir(batch_id)?;
         let completed = read_manifest_complete(&directory)?;
@@ -294,9 +333,12 @@ impl FileTransferStore {
 pub(crate) struct ManifestWriter {
     directory: PathBuf,
     file: BufWriter<File>,
+    index: BufWriter<File>,
     next_ordinal: u64,
     expected_entry_count: u64,
+    next_offset: u64,
     hasher: Sha256,
+    committed: bool,
 }
 
 impl ManifestWriter {
@@ -309,8 +351,13 @@ impl ManifestWriter {
         }
         let mut line = serde_json::to_vec(entry).map_err(json_error)?;
         line.push(b'\n');
+        self.index.write_all(&self.next_offset.to_le_bytes())?;
         self.file.write_all(&line)?;
         self.hasher.update(&line);
+        self.next_offset = self
+            .next_offset
+            .checked_add(line.len() as u64)
+            .ok_or_else(|| invalid_data("manifest offset overflow"))?;
         self.next_ordinal += 1;
         Ok(())
     }
@@ -321,17 +368,31 @@ impl ManifestWriter {
         }
         self.file.flush()?;
         self.file.get_ref().sync_all()?;
+        self.index.flush()?;
+        self.index.get_ref().sync_all()?;
         let completed = ManifestComplete {
             store_version: STORE_VERSION,
             entry_count: self.next_ordinal,
-            sha256: format!("{:x}", self.hasher.finalize()),
+            sha256: format!("{:x}", self.hasher.clone().finalize()),
         };
         initialize_progress(&self.directory, self.next_ordinal)?;
         crate::atomic_file::write(
             &self.directory.join(MANIFEST_COMPLETE_FILE),
             &serde_json::to_vec(&completed).map_err(json_error)?,
         )?;
+        self.committed = true;
         Ok(self.next_ordinal)
+    }
+}
+
+impl Drop for ManifestWriter {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(self.directory.join(MANIFEST_FILE));
+            let _ = fs::remove_file(self.directory.join(MANIFEST_INDEX_FILE));
+            let _ = fs::remove_file(self.directory.join(PROGRESS_FILE));
+            let _ = fs::remove_file(self.directory.join(MANIFEST_COMPLETE_FILE));
+        }
     }
 }
 
@@ -435,6 +496,13 @@ mod tests {
             2
         );
         assert_eq!(paths, ["资料", "资料/说明.txt"]);
+        assert_eq!(
+            store
+                .manifest_entry(&batch.batch_id, 1)
+                .unwrap()
+                .relative_path,
+            "资料/说明.txt"
+        );
         assert_eq!(
             store.read_progress(&batch.batch_id, 1).unwrap(),
             EntryProgress {

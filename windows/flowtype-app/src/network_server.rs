@@ -136,7 +136,7 @@ async fn serve_connection(
             pc_id: &state.identity.pc_id,
             pc_name: &pc_name,
             candidate_endpoints: endpoint_urls(None),
-            capabilities: &["health_check", "switch_ack"],
+            capabilities: &["health_check", "switch_ack", "file_transfer_v1"],
         },
     )
     .await?;
@@ -206,7 +206,14 @@ async fn serve_connection(
                 let is_probe = message_type == Some("probe");
                 let is_control_message = matches!(
                     message_type,
-                    Some("probe" | "health_check" | "switch_ack")
+                    Some(
+                        "probe"
+                            | "health_check"
+                            | "switch_ack"
+                            | "file_offer"
+                            | "file_decision"
+                            | "file_cancel"
+                    )
                 );
                 if is_probe {
                     state.mark_probe_connection(connection_id);
@@ -224,7 +231,28 @@ async fn serve_connection(
                 {
                     return Err("connection superseded".into());
                 }
-                if value.get("type").and_then(serde_json::Value::as_str) == Some("image_start") {
+                if matches!(
+                    message_type,
+                    Some("file_offer" | "file_decision" | "file_cancel")
+                ) {
+                    match serde_json::from_value::<FileClientMessage>(value)? {
+                        FileClientMessage::FileOffer(offer) => {
+                            let ticket = state
+                                .file_transfers
+                                .accept_offer(&offer, &auth.phone_id)?;
+                            send_json(&mut websocket, &ticket).await?;
+                        }
+                        FileClientMessage::FileCancel(cancel) => {
+                            cancel.validate().map_err(|_| "invalid file cancellation")?;
+                            state
+                                .file_transfers
+                                .cancel(&cancel.batch_id, &auth.phone_id)?;
+                        }
+                        FileClientMessage::FileDecision(decision) => {
+                            decision.validate().map_err(|_| "invalid file decision")?;
+                        }
+                    }
+                } else if value.get("type").and_then(serde_json::Value::as_str) == Some("image_start") {
                     let image: ImageStart = serde_json::from_value(value)?;
                     image.validate(&auth.phone_id)?;
                     if pending_image.is_some() {
@@ -1267,7 +1295,9 @@ where
     }
 }
 
-fn tls_acceptor(identity: &PcIdentity) -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
+pub(super) fn tls_acceptor(
+    identity: &PcIdentity,
+) -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
     let provider = rustls::crypto::ring::default_provider();
     let config = ServerConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS13])?

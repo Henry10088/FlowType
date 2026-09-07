@@ -16,6 +16,20 @@ pub const MIN_TICKET_BYTES: usize = 32;
 pub const MAX_TICKET_TEXT_BYTES: usize = 128;
 pub const MAX_WIRE_INTEGER: u64 = i64::MAX as u64;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FileClientMessage {
+    FileOffer(FileOffer),
+    FileDecision(FileDecision),
+    FileCancel(FileCancel),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FileServerMessage {
+    FileTicket(FileTicket),
+}
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -495,8 +509,23 @@ mod tests {
             roots: vec!["资料".into()],
         };
         offer.validate("phone-1").unwrap();
-        let value = serde_json::to_value(offer).unwrap();
+        let value = serde_json::to_value(FileClientMessage::FileOffer(offer)).unwrap();
+        assert_eq!(value["type"], "file_offer");
         assert!(value.get("entries").is_none());
+    }
+
+    #[test]
+    fn file_ticket_uses_the_tagged_control_message_contract() {
+        let message = FileServerMessage::FileTicket(FileTicket {
+            protocol_version: PROTOCOL_VERSION,
+            transfer_version: FILE_TRANSFER_VERSION,
+            batch_id: "batch-1".into(),
+            data_port: 32188,
+            token: "a".repeat(43),
+            expires_at_epoch_seconds: 200,
+        });
+        let value = serde_json::to_value(message).unwrap();
+        assert_eq!(value["type"], "file_ticket");
     }
 
     #[test]

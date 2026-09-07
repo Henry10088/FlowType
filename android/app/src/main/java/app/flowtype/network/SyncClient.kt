@@ -16,6 +16,10 @@ import app.flowtype.protocol.ClientSessionState
 import app.flowtype.protocol.ErrorCode
 import app.flowtype.protocol.ErrorMessage
 import app.flowtype.protocol.HealthCheckMessage
+import app.flowtype.protocol.FileCancelMessage
+import app.flowtype.protocol.FileOfferMessage
+import app.flowtype.protocol.FileTicketMessage
+import app.flowtype.protocol.FileTransferCodec
 import app.flowtype.protocol.ProtocolCodec
 import app.flowtype.protocol.PROTOCOL_VERSION
 import app.flowtype.protocol.ResumeMessage
@@ -60,6 +64,7 @@ class SyncClient(
         fun onPairingInvalid(binding: ComputerBinding)
         fun onImageTransferred(transferId: String)
         fun onImageTransferFailed(transferId: String)
+        fun onFileTicket(ticket: FileTicketMessage) = Unit
     }
 
     private val lock = Any()
@@ -81,6 +86,7 @@ class SyncClient(
     private var healthCheckPending = false
     private var healthCheckSupported = false
     private var pendingImageId: String? = null
+    private val pendingFileOffers = mutableSetOf<String>()
 
     fun connect(binding: ComputerBinding) {
         synchronized(lock) {
@@ -132,6 +138,20 @@ class SyncClient(
             restartSocketLocked()
         }
         sent
+    }
+
+    fun sendFileOffer(offer: FileOfferMessage): Boolean = synchronized(lock) {
+        if (!ready || offer.phoneId != phoneId) return@synchronized false
+        runCatching { offer.validate(phoneId) }.getOrElse { return@synchronized false }
+        val sent = socket?.send(FileTransferCodec.encodeOffer(offer)) == true
+        if (sent) pendingFileOffers += offer.batchId
+        sent
+    }
+
+    fun cancelFileTransfer(batchId: String): Boolean = synchronized(lock) {
+        if (!ready) return@synchronized false
+        pendingFileOffers -= batchId
+        socket?.send(FileTransferCodec.encodeCancel(FileCancelMessage(batchId))) == true
     }
 
     fun abandonSession(sessionId: String) {
@@ -407,6 +427,13 @@ class SyncClient(
                                 listener.onImageTransferFailed(reply.transferId)
                             }
                         }
+                    }
+                    "file_ticket" -> {
+                        val ticket = FileTransferCodec.decodeTicket(text).also {
+                            it.validate(System.currentTimeMillis() / 1_000)
+                        }
+                        if (!pendingFileOffers.remove(ticket.batchId)) return
+                        listener.onFileTicket(ticket)
                     }
                     else -> when (val message = ProtocolCodec.decodeServer(text)) {
                         is ServerMessage.ProbeResult -> {

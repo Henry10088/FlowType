@@ -3,6 +3,7 @@
 mod atomic_file;
 mod clipboard;
 mod diagnostics;
+mod file_transfer_server;
 mod file_transfer_store;
 mod i18n;
 mod identity;
@@ -23,6 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use flowtype_core::file_transfer::FileClientMessage;
 use flowtype_core::ipc::{InjectorRequest, InjectorResponse};
 use flowtype_core::protocol::{
     Ack, Cancel, ClientMessage, ClientSessionState, ErrorCode, HealthAck, ProbeResult, ProbeState,
@@ -49,6 +51,7 @@ use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastE
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 
+use crate::file_transfer_server::{FileTransferCoordinator, run_file_transfer_server};
 use crate::i18n::tr;
 use crate::identity::PcIdentity;
 use crate::injector_dispatcher::{InjectorDispatcher, InjectorRequestFailure};
@@ -289,6 +292,7 @@ struct AppState {
     ui_update_pending: AtomicBool,
     update: update::UpdateManager,
     next_connection_id: AtomicU64,
+    file_transfers: Arc<FileTransferCoordinator>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -361,6 +365,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(network_address::preferred_ipv4);
     let ui_hwnd = Arc::new(AtomicIsize::new(0));
     let update = update::UpdateManager::start(Arc::clone(&ui_hwnd))?;
+    let file_transfers = FileTransferCoordinator::load_default()?;
     let state = Arc::new(AppState {
         identity: identity.clone(),
         pc_name: Mutex::new(identity.pc_name.clone()),
@@ -382,6 +387,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui_update_pending: AtomicBool::new(false),
         update,
         next_connection_id: AtomicU64::new(1),
+        file_transfers,
     });
 
     if !ui_preview {
@@ -392,7 +398,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .spawn(move || {
                 let runtime =
                     tokio::runtime::Runtime::new().expect("cannot create network runtime");
-                if let Err(error) = runtime.block_on(run_network(network_state, endpoint_host)) {
+                if let Err(error) = runtime.block_on(async {
+                    tokio::try_join!(
+                        run_network(Arc::clone(&network_state), endpoint_host),
+                        run_file_transfer_server(network_state),
+                    )
+                    .map(|_| ())
+                }) {
                     eprintln!("network stopped: {error}");
                     network_error_state.update_status(|status| {
                         status.summary = tr("连接服务不可用", "Connection unavailable").to_owned();
