@@ -13,7 +13,7 @@ import app.flowtype.data.StorageDispatcher
 import app.flowtype.connectivity.ConnectivityDemand
 import app.flowtype.image.PreparedImage
 import app.flowtype.filetransfer.FileTransferManager
-import app.flowtype.filetransfer.FileTransferService
+import app.flowtype.filetransfer.FileTransferExecution
 import app.flowtype.network.AutoSelectionCoordinator
 import app.flowtype.network.ComputerDiscovery
 import app.flowtype.network.ControlClientPool
@@ -134,14 +134,15 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
             sendOffer = syncClient::sendFileOffer,
             sendDecision = syncClient::decideFileOffer,
             sendCancel = syncClient::cancelFileTransfer,
+            parallelism = { if (session.sessionId == null) 2 else 1 },
             onChanged = { snapshot -> onMain {
                 fileTransfer = snapshot
                 connectivityDemand.setFileTransferActive(snapshot.active)
                 if (snapshot.active) {
                     resumeConnectivity()
-                    FileTransferService.start(application)
+                    FileTransferExecution.start(application)
                 } else {
-                    FileTransferService.stop(application)
+                    FileTransferExecution.stop(application)
                     scheduleBackgroundDisconnect()
                 }
                 notifyChanged()

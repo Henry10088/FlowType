@@ -25,7 +25,9 @@ import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.CancellationException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 class FileTransferManager(
     private val context: Context,
@@ -34,6 +36,7 @@ class FileTransferManager(
     private val sendOffer: (FileOfferMessage) -> Boolean,
     private val sendDecision: (String, Boolean) -> Boolean,
     private val sendCancel: (String) -> Boolean,
+    private val parallelism: () -> Int,
     private val onChanged: (Snapshot) -> Unit,
 ) : Closeable {
     data class Snapshot(
@@ -229,6 +232,7 @@ class FileTransferManager(
         }
         onChanged(Snapshot(true, totalBytes = 0))
         worker.execute {
+            var createdBatchId: String? = null
             runCatching {
                 val prepared = prepare()
                 val now = System.currentTimeMillis()
@@ -245,11 +249,30 @@ class FileTransferManager(
                     targetTreeUri = null,
                 )
                 store.createBatch(batch)
+                createdBatchId = batch.batchId
                 activeBatchId = batch.batchId
-                prepared.entries.chunked(256).forEach { store.appendManifestPage(batch.batchId, it) }
+                var actualFiles = 0L
+                var actualDirectories = 0L
+                var actualBytes = 0L
+                prepared.entries.chunked(256).forEach { page ->
+                    page.forEach { entry ->
+                        if (entry.manifest.kind == TransferEntryKind.FILE) actualFiles++ else actualDirectories++
+                        actualBytes = Math.addExact(actualBytes, entry.manifest.size)
+                    }
+                    store.appendManifestPage(batch.batchId, page)
+                }
+                check(
+                    actualFiles == batch.fileCount &&
+                        actualDirectories == batch.directoryCount &&
+                        actualBytes == batch.totalBytes,
+                ) { "source changed while preparing transfer" }
                 onChanged(Snapshot(true, batch.batchId, totalBytes = batch.totalBytes))
                 offer(batch, prepared.roots)
             }.onFailure { error ->
+                createdBatchId?.let { batchId ->
+                    runCatching { store.deleteBatch(batchId) }
+                    if (activeBatchId == batchId) activeBatchId = null
+                }
                 onChanged(Snapshot(false, error = error.message ?: "prepare_failed"))
             }
         }
@@ -281,20 +304,20 @@ class FileTransferManager(
                     check(response.isSuccessful) { "manifest upload failed: ${response.code}" }
                 }
                 store.updateBatchState(batch.batchId, TransferBatchState.TRANSFERRING, System.currentTimeMillis())
-                var completed = 0L
+                val transferred = AtomicLong(transferredBytes(batch.batchId))
                 var ordinal = 0L
                 while (true) {
                     val page = store.entriesPage(batch.batchId, ordinal, 256)
                     if (page.isEmpty()) break
-                    page.forEach { entry ->
+                    ordinal = page.last().manifest.ordinal + 1
+                    runParallel(page.filter { entry ->
+                        entry.manifest.kind == TransferEntryKind.FILE &&
+                            entry.state != TransferEntryState.COMPLETED
+                    }) { entry ->
                         checkNotCanceled(batch.batchId)
-                        ordinal = entry.manifest.ordinal + 1
-                        if (entry.manifest.kind == TransferEntryKind.DIRECTORY) return@forEach
-                        if (entry.state == TransferEntryState.COMPLETED) {
-                            completed += entry.manifest.size
-                            return@forEach
-                        }
                         val offset = client.queryCommittedOffset(ticket, entry.manifest)
+                        check(offset in 0..entry.manifest.size) { "invalid server offset" }
+                        transferred.addAndGet(offset - entry.committedOffset)
                         store.updateEntryProgress(
                             batch.batchId,
                             entry.manifest.ordinal,
@@ -309,7 +332,9 @@ class FileTransferManager(
                             check(receipt.committedOffset > committed || receipt.completed) {
                                 "file upload made no progress"
                             }
+                            val previous = committed
                             committed = receipt.committedOffset
+                            transferred.addAndGet(committed - previous)
                             completedFile = receipt.completed
                             store.updateEntryProgress(
                                 batch.batchId,
@@ -317,10 +342,8 @@ class FileTransferManager(
                                 if (completedFile) TransferEntryState.COMPLETED else TransferEntryState.TRANSFERRING,
                                 committed,
                             )
-                            onChanged(Snapshot(true, batch.batchId, completed + committed, batch.totalBytes))
+                            onChanged(Snapshot(true, batch.batchId, transferred.get(), batch.totalBytes))
                         }
-                        completed += entry.manifest.size
-                        onChanged(Snapshot(true, batch.batchId, completed, batch.totalBytes))
                     }
                 }
                 client.completeBatch(ticket)
@@ -347,20 +370,21 @@ class FileTransferManager(
                 downloadManifest(client, ticket, batch)
                 AndroidTargetStore(context.contentResolver, store).prepare(batch.batchId, treeUri)
                 store.updateBatchState(batch.batchId, TransferBatchState.TRANSFERRING, System.currentTimeMillis())
-                var completed = completedBytes(batch.batchId)
+                val transferred = AtomicLong(transferredBytes(batch.batchId))
                 var ordinal = 0L
                 while (true) {
                     val page = store.entriesPage(batch.batchId, ordinal, 256)
                     if (page.isEmpty()) break
-                    page.forEach { stored ->
+                    ordinal = page.last().manifest.ordinal + 1
+                    runParallel(page.filter { stored ->
+                        stored.manifest.kind == TransferEntryKind.FILE &&
+                            stored.state != TransferEntryState.COMPLETED
+                    }) { stored ->
                         checkNotCanceled(batch.batchId)
-                        ordinal = stored.manifest.ordinal + 1
-                        if (stored.manifest.kind == TransferEntryKind.DIRECTORY ||
-                            stored.state == TransferEntryState.COMPLETED
-                        ) return@forEach
-                        downloadEntry(client, ticket, batch.batchId, stored)
-                        completed += stored.manifest.size
-                        onChanged(Snapshot(true, batch.batchId, completed, batch.totalBytes))
+                        downloadEntry(client, ticket, batch.batchId, stored) { bytes ->
+                            val current = transferred.addAndGet(bytes)
+                            onChanged(Snapshot(true, batch.batchId, current, batch.totalBytes))
+                        }
                     }
                 }
                 client.completeBatch(ticket)
@@ -415,6 +439,7 @@ class FileTransferManager(
         ticket: FileTicketMessage,
         batchId: String,
         original: StoredTransferEntry,
+        onProgress: (Long) -> Unit,
     ) {
         val resolver = context.contentResolver
         val targetStore = AndroidTargetStore(resolver, store)
@@ -451,6 +476,7 @@ class FileTransferManager(
                     while (buffer.hasRemaining()) channel.write(buffer)
                     digest.update(bytes)
                     offset += bytes.size
+                    onProgress(bytes.size.toLong())
                     channel.force(false)
                     store.updateEntryProgress(batchId, stored.manifest.ordinal, TransferEntryState.TRANSFERRING, offset)
                 }
@@ -485,6 +511,38 @@ class FileTransferManager(
             }
         }
         return completed
+    }
+
+    private fun transferredBytes(batchId: String): Long {
+        var transferred = 0L
+        var ordinal = 0L
+        while (true) {
+            val page = store.entriesPage(batchId, ordinal, 256)
+            if (page.isEmpty()) break
+            page.forEach {
+                ordinal = it.manifest.ordinal + 1
+                transferred += it.committedOffset
+            }
+        }
+        return transferred
+    }
+
+    private fun <T> runParallel(items: List<T>, action: (T) -> Unit) {
+        if (items.isEmpty()) return
+        val executor = Executors.newFixedThreadPool(parallelism().coerceIn(1, 2)) { runnable ->
+            Thread(runnable, "flowtype-file-worker").apply { isDaemon = true }
+        }
+        try {
+            items.map { item -> executor.submit { action(item) } }.forEach { future ->
+                try {
+                    future.get()
+                } catch (error: ExecutionException) {
+                    throw error.cause ?: error
+                }
+            }
+        } finally {
+            executor.shutdownNow()
+        }
     }
 
     private fun checkNotCanceled(batchId: String) {

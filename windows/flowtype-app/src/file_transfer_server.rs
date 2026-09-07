@@ -162,59 +162,77 @@ impl FileTransferCoordinator {
         self.store
             .create_batch(&batch)
             .map_err(|_| "cannot create outbound batch")?;
-        let mut manifest = self
-            .store
-            .begin_manifest(&batch_id)
-            .map_err(|_| "cannot create outbound manifest")?;
-        let mut sources = self
-            .store
-            .begin_source_paths(&batch_id)
-            .map_err(|_| "cannot create outbound source index")?;
-        let mut next_ordinal = 0u64;
-        for (path, wire_name) in &prepared.roots {
-            write_outbound(
-                path,
-                wire_name,
-                &mut next_ordinal,
-                &mut manifest,
-                &mut sources,
-            )?;
-        }
-        manifest
-            .finish()
-            .map_err(|_| "cannot finish outbound manifest")?;
-        sources
-            .finish()
-            .map_err(|_| "cannot save outbound sources")?;
-        for ordinal in 0..next_ordinal {
-            let entry = self
+        let result = (|| {
+            let mut manifest = self
                 .store
-                .manifest_entry(&batch_id, ordinal)
-                .map_err(|_| "cannot read outbound manifest")?;
-            if entry.kind == EntryKind::Directory {
-                self.store
-                    .write_progress(
-                        &batch_id,
-                        entry.ordinal,
-                        EntryProgress {
-                            state: flowtype_core::file_transfer::EntryState::Completed,
-                            committed_offset: 0,
-                        },
-                    )
-                    .map_err(|_| "cannot initialize outbound directory")?;
+                .begin_manifest(&batch_id)
+                .map_err(|_| "cannot create outbound manifest")?;
+            let mut sources = self
+                .store
+                .begin_source_paths(&batch_id)
+                .map_err(|_| "cannot create outbound source index")?;
+            let mut next_ordinal = 0u64;
+            let mut actual_file_count = 0u64;
+            let mut actual_directory_count = 0u64;
+            let mut actual_total_bytes = 0u64;
+            for (path, wire_name) in &prepared.roots {
+                write_outbound(
+                    path,
+                    wire_name,
+                    &mut next_ordinal,
+                    &mut actual_file_count,
+                    &mut actual_directory_count,
+                    &mut actual_total_bytes,
+                    &mut manifest,
+                    &mut sources,
+                )?;
             }
+            if actual_file_count != prepared.file_count
+                || actual_directory_count != prepared.directory_count
+                || actual_total_bytes != prepared.total_bytes
+            {
+                return Err("source changed while preparing transfer");
+            }
+            manifest
+                .finish()
+                .map_err(|_| "cannot finish outbound manifest")?;
+            sources
+                .finish()
+                .map_err(|_| "cannot save outbound sources")?;
+            for ordinal in 0..next_ordinal {
+                let entry = self
+                    .store
+                    .manifest_entry(&batch_id, ordinal)
+                    .map_err(|_| "cannot read outbound manifest")?;
+                if entry.kind == EntryKind::Directory {
+                    self.store
+                        .write_progress(
+                            &batch_id,
+                            entry.ordinal,
+                            EntryProgress {
+                                state: flowtype_core::file_transfer::EntryState::Completed,
+                                committed_offset: 0,
+                            },
+                        )
+                        .map_err(|_| "cannot initialize outbound directory")?;
+                }
+            }
+            Ok(FileOffer {
+                protocol_version: flowtype_core::PROTOCOL_VERSION,
+                transfer_version: FILE_TRANSFER_VERSION,
+                phone_id: phone_id.to_owned(),
+                batch_id: batch_id.clone(),
+                direction: TransferDirection::ComputerToPhone,
+                file_count: prepared.file_count,
+                directory_count: prepared.directory_count,
+                total_bytes: prepared.total_bytes,
+                roots: prepared.summaries,
+            })
+        })();
+        if result.is_err() {
+            let _ = self.store.delete_batch(&batch_id);
         }
-        Ok(FileOffer {
-            protocol_version: flowtype_core::PROTOCOL_VERSION,
-            transfer_version: FILE_TRANSFER_VERSION,
-            phone_id: phone_id.to_owned(),
-            batch_id,
-            direction: TransferDirection::ComputerToPhone,
-            file_count: prepared.file_count,
-            directory_count: prepared.directory_count,
-            total_bytes: prepared.total_bytes,
-            roots: prepared.summaries,
-        })
+        result
     }
 
     pub(crate) fn accept_decision(
@@ -492,6 +510,9 @@ fn write_outbound(
     path: &std::path::Path,
     relative_path: &str,
     next_ordinal: &mut u64,
+    file_count: &mut u64,
+    directory_count: &mut u64,
+    total_bytes: &mut u64,
     manifest: &mut ManifestWriter,
     sources: &mut crate::file_transfer_store::SourceWriter,
 ) -> Result<(), &'static str> {
@@ -502,8 +523,13 @@ fn write_outbound(
         return Err("symbolic links are not supported");
     }
     let kind = if metadata.is_dir() {
+        *directory_count = directory_count.checked_add(1).ok_or("batch is too large")?;
         EntryKind::Directory
     } else {
+        *file_count = file_count.checked_add(1).ok_or("batch is too large")?;
+        *total_bytes = total_bytes
+            .checked_add(metadata.len())
+            .ok_or("batch is too large")?;
         EntryKind::File
     };
     let modified_at_epoch_millis = metadata.modified().ok().and_then(|time| {
@@ -543,6 +569,9 @@ fn write_outbound(
                 &child.path(),
                 &format!("{relative_path}/{name}"),
                 next_ordinal,
+                file_count,
+                directory_count,
+                total_bytes,
                 manifest,
                 sources,
             )?;
@@ -1234,6 +1263,42 @@ mod tests {
             serde_json::to_string(&FileClientMessage::FileOffer(offer("batch-2"))).unwrap();
         let decoded: FileClientMessage = serde_json::from_str(&encoded).unwrap();
         assert!(matches!(decoded, FileClientMessage::FileOffer(_)));
+    }
+
+    #[test]
+    fn outbound_directory_is_indexed_and_only_one_batch_is_active() {
+        let root = test_root("outbound");
+        let input = root.join("input");
+        fs::create_dir_all(input.join("子目录")).unwrap();
+        fs::write(input.join("a.txt"), b"abc").unwrap();
+        fs::write(input.join("子目录").join("b.bin"), [1u8, 2, 3, 4]).unwrap();
+        let coordinator = FileTransferCoordinator::new(
+            FileTransferStore::new(root.join("state")).unwrap(),
+            root.join("receive"),
+        );
+
+        let offer = coordinator
+            .create_outbound_offer("phone-1", std::slice::from_ref(&input))
+            .unwrap();
+        assert_eq!(offer.file_count, 2);
+        assert_eq!(offer.directory_count, 2);
+        assert_eq!(offer.total_bytes, 7);
+        assert_eq!(
+            coordinator.store.source_path(&offer.batch_id, 2).unwrap(),
+            input.join("子目录")
+        );
+        assert!(
+            coordinator
+                .create_outbound_offer("phone-1", std::slice::from_ref(&input))
+                .is_err()
+        );
+        coordinator.cancel_outbound("phone-1").unwrap();
+        assert!(
+            coordinator
+                .create_outbound_offer("phone-1", &[input])
+                .is_ok()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn offer(batch_id: &str) -> FileOffer {

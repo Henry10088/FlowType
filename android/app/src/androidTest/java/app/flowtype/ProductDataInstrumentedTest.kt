@@ -135,20 +135,77 @@ class ProductDataInstrumentedTest {
             store.setTargetTree("batch-1", "content://documents/tree/downloads", 11)
             store.updateBatchState("batch-1", TransferBatchState.QUEUED, 12)
             store.updateBatchState("batch-1", TransferBatchState.PREPARING, 13)
+            store.setEntryTarget(
+                "batch-1",
+                1,
+                "content://documents/document/partial",
+                "说明 (1).txt",
+                "content://documents/document/资料",
+            )
             store.updateEntryProgress(
                 "batch-1",
                 1,
                 TransferEntryState.WAITING_NETWORK,
                 16,
-                targetUri = "content://documents/document/partial",
             )
 
             assertEquals(2, store.entriesPage("batch-1", 0, 10).size)
-            assertEquals(16, store.entry("batch-1", 1)?.committedOffset)
+            assertEquals(16L, store.entry("batch-1", 1)?.committedOffset)
+            assertEquals("说明 (1).txt", store.entry("batch-1", 1)?.targetName)
+            assertEquals(
+                "content://documents/document/资料",
+                store.entry("batch-1", 1)?.targetParentUri,
+            )
             assertEquals(TransferBatchState.PREPARING, store.recoverableBatches().single().state)
         } finally {
             database.close()
             context.deleteDatabase(databaseName)
+        }
+    }
+
+    @Test
+    fun fileTransferSchemaUpgradesFromVersionsFourAndFive() {
+        listOf(4, 5).forEach { oldVersion ->
+            val databaseName = "flowtype-migration-$oldVersion-${UUID.randomUUID()}.db"
+            context.openOrCreateDatabase(databaseName, Context.MODE_PRIVATE, null).use { db ->
+                db.execSQL(
+                    """CREATE TABLE file_transfer_entries (
+                        batch_id TEXT NOT NULL,
+                        ordinal INTEGER NOT NULL,
+                        entry_id TEXT NOT NULL,
+                        source_uri TEXT,
+                        relative_path TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        size INTEGER NOT NULL,
+                        modified_at INTEGER,
+                        mime_type TEXT,
+                        sha256 TEXT,
+                        target_uri TEXT,
+                        ${if (oldVersion >= 5) "target_name TEXT," else ""}
+                        state TEXT NOT NULL,
+                        committed_offset INTEGER NOT NULL DEFAULT 0,
+                        error_code TEXT,
+                        PRIMARY KEY (batch_id, ordinal)
+                    )""",
+                )
+                db.version = oldVersion
+            }
+            val database = AppDatabase(context, databaseName)
+            try {
+                val columns = database.readableDatabase.rawQuery(
+                    "PRAGMA table_info(file_transfer_entries)",
+                    null,
+                ).use { cursor ->
+                    buildSet {
+                        while (cursor.moveToNext()) add(cursor.getString(1))
+                    }
+                }
+                assertTrue(columns.contains("target_name"))
+                assertTrue(columns.contains("target_parent_uri"))
+            } finally {
+                database.close()
+                context.deleteDatabase(databaseName)
+            }
         }
     }
 
