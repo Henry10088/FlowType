@@ -1,8 +1,8 @@
 # 通用文件传输设计
 
-状态：功能已实现并完成发布构建验证；等待合并独立功能分支，不改变 V1 文字同步的架构和验收边界
+状态：功能已实现，已完成双向真实传输、跨进程断点续传和发布构建验证；等待合并独立功能分支，不改变 V1 文字同步的架构和验收边界
 
-最后修订：2026-09-07
+最后修订：2026-09-08
 
 ## 1. 目标与原则
 
@@ -194,9 +194,30 @@ LocalSend 是重要实现参考，不是兼容目标。说写不承诺与 LocalS
 - 大文件上传使用单次线性流式读取；接收端按 16 MiB 或 1 秒持久化确认偏移，避免按分块反复读取文件前缀造成平方级磁盘开销。
 - Windows 安装器同时开放控制端口 32187 和加密文件数据端口 32188，范围仍限制为本地子网和 Tailscale 地址段。
 
-发布构建实测：Android 未签名 Release APK 为 1,075,877 字节；Windows 未签名安装包为 3,418,592 字节。相对设计基线，Android 增量约 90 KiB；Windows 相对最近的 0.2.7 安装包增量约 84 KiB，均在预算内。
+发布构建实测：Android 未签名 Release APK 为 1,086,913 字节；Windows 未签名安装包为 3,423,224 字节。相对设计基线，Android 增量约 101 KiB；Windows 相对最近的 0.2.7 安装包增量约 89 KiB，均在预算内。
 
-验证结果：Windows workspace 共 94 项自动测试通过（其中 5 项需要已注册 TIP 和交互式编辑器的测试按设计忽略）；Android JVM 测试、Debug AndroidTest 构建和 API 36 模拟器上的 5 项仪器测试通过，包含数据库 4→6、5→6 升级与传输目标字段持久化。
+验证结果：Windows workspace 共 95 项自动测试通过（另有 5 项需要已注册 TIP 和交互式编辑器的测试按设计忽略）；Android 73 项 JVM 测试、Debug AndroidTest 构建和 API 36 模拟器上的 5 项仪器测试通过，包含数据库 4→6、5→6 升级与传输目标字段持久化。Android 全量 Lint、Release Lint Vital 和 Gradle 严格依赖校验通过，Rust workspace Clippy 以 `-D warnings` 通过。
+
+## 11.2 真实双向联调记录
+
+2026-09-08 使用隔离的 Windows 用户数据目录和 API 36 Android 模拟器完成端到端联调，控制面通过 `wss://10.0.2.2:32187`，数据面通过独立 TLS 端口 32188：
+
+- Android → Windows：0 字节文件、12 MiB 文件和中文/emoji 文件名均完成，接收文件 SHA-256 与手机源文件一致。
+- Windows → Android：包含两层目录、空目录、12 MiB 文件和中文/emoji 文件名的目录批次完成，目录结构和 SHA-256 一致。
+- Android 接收 512 MiB 文件时在 8 MiB 已确认偏移强制结束 Android 进程；重启后首个恢复偏移仍为 8 MiB，完成后 SHA-256 一致。
+- Windows 接收 1 GiB 文件时在 80 MiB 已确认偏移强制结束 Windows 进程；使用同一持久化目录重启后从 80 MiB 继续，完成后 SHA-256 一致。
+- Android 主动取消 1 GiB 批次后，Android 与 Windows 批次均为 `canceled`，未完成条目同步标记取消并清理临时文件。
+- Windows 源文件在清单建立后发生变化时，该文件以 `source_changed` 失败，同批其它文件仍完成，批次结果为 `partial_failure`，失败文件不遗留 `.part`。
+- Android 保存目录经过一次系统授权后会被记住；后续批次确认页直接提供“接收”“更改位置”“拒绝”，无需重复打开目录选择器。同名文件以 `(1)` 后缀保存，不覆盖已有文件。
+
+联调还发现并修复了一个阻断数据面的地址转换缺陷：Android 曾在把 WSS 控制地址改为 HTTPS 前调用 HTTP URL 解析，导致 `wss://` 被立即拒绝。现在先完成 `wss://` → `https://`、`ws://` → `http://` 的协议映射再解析，并有 JVM 回归测试覆盖。
+
+最终产物：
+
+- `FlowType-0.2.8-x64-setup.exe`：3,423,224 字节，SHA-256 `CEA2980B0E3863508D4574EB2C6BD0DC231DEBE1F7211CD6D8FDC53D89D6A133`
+- `FlowType-0.2.4-android-release-unsigned.apk`：1,086,913 字节，SHA-256 `A3D61B932ABD9062D69D77935ADDDC62B8D71A23A4757A262B38FE62586DC7B4`
+
+Release APK 已检查，不包含 Debug 专用的 E2E Receiver、Provider 或测试入口。
 
 ## 12. 验收条件
 
