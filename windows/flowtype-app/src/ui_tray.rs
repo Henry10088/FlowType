@@ -1,6 +1,47 @@
 use super::*;
 
 impl UiContext {
+    pub(super) fn notify_transfer_transition(
+        &mut self,
+        transfer: Option<&crate::file_transfer_server::FileTransferSnapshot>,
+    ) {
+        let next = transfer.map(|value| (value.batch_id.clone(), value.state));
+        if next != self.last_transfer_status
+            && let Some(value) = transfer
+        {
+            match value.state {
+                flowtype_core::file_transfer::BatchState::Completed => self.show_tray_notification(
+                    tr("文件传输完成", "File transfer complete"),
+                    tr(
+                        "文件已安全传输完成。",
+                        "The files were transferred securely.",
+                    ),
+                    false,
+                ),
+                flowtype_core::file_transfer::BatchState::PartialFailure => self
+                    .show_tray_notification(
+                        tr("部分文件传输失败", "Some files were not transferred"),
+                        tr(
+                            "打开说写查看传输状态。",
+                            "Open FlowType to review the transfer.",
+                        ),
+                        true,
+                    ),
+                _ => {}
+            }
+        }
+        self.last_transfer_status = next;
+    }
+
+    fn show_tray_notification(&self, title: &str, message: &str, warning: bool) {
+        let mut data = self.tray_data();
+        data.uFlags = NIF_INFO;
+        copy_wide(&mut data.szInfoTitle, title);
+        copy_wide(&mut data.szInfo, message);
+        data.dwInfoFlags = if warning { NIIF_WARNING } else { NIIF_INFO };
+        unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
+    }
+
     pub(super) fn update_tray(&self) {
         let mut data = self.tray_data();
         data.uFlags = NIF_TIP;

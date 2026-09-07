@@ -51,7 +51,9 @@ use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastE
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 
-use crate::file_transfer_server::{FileTransferCoordinator, run_file_transfer_server};
+use crate::file_transfer_server::{
+    FileTransferCoordinator, FileTransferSnapshot, run_file_transfer_server,
+};
 use crate::i18n::tr;
 use crate::identity::PcIdentity;
 use crate::injector_dispatcher::{InjectorDispatcher, InjectorRequestFailure};
@@ -324,7 +326,7 @@ struct UiSnapshot {
     status: RuntimeStatus,
     injector_ready: bool,
     update: update::UpdateSnapshot,
-    file_transfer_state: Option<flowtype_core::file_transfer::BatchState>,
+    file_transfer: Option<FileTransferSnapshot>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -491,10 +493,9 @@ impl AppState {
                 }),
             injector_ready: self.injector.is_ready(),
             update: self.update.snapshot(),
-            file_transfer_state: connected_phone_id
+            file_transfer: connected_phone_id
                 .as_deref()
-                .and_then(|phone_id| self.file_transfers.outbound_batch(phone_id))
-                .map(|batch| batch.state),
+                .and_then(|phone_id| self.file_transfers.transfer_snapshot(phone_id)),
         }
     }
 
@@ -861,7 +862,7 @@ impl AppState {
 
     fn cancel_outbound_file_transfer(&self) -> Result<(), Box<dyn std::error::Error>> {
         let phone_id = self.connected_phone_id().ok_or("phone is not connected")?;
-        self.file_transfers.cancel_outbound(&phone_id)?;
+        self.file_transfers.cancel_active(&phone_id)?;
         self.notify_ui();
         Ok(())
     }

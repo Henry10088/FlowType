@@ -300,6 +300,7 @@ impl UiContext {
             return;
         }
         let snapshot = self.state.snapshot();
+        self.notify_transfer_transition(snapshot.file_transfer.as_ref());
         if self.page == Page::Phones && self.phone_statuses.len() != snapshot.phones.len() {
             self.rebuild_page();
             return;

@@ -49,6 +49,23 @@ pub(crate) struct FileTransferCoordinator {
     tickets: Mutex<HashMap<String, TicketGrant>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileTransferSnapshot {
+    pub(crate) batch_id: String,
+    pub(crate) direction: TransferDirection,
+    pub(crate) state: BatchState,
+    pub(crate) completed_bytes: u64,
+    pub(crate) total_bytes: u64,
+    pub(crate) completed_entries: u64,
+    pub(crate) total_entries: u64,
+}
+
+impl FileTransferSnapshot {
+    pub(crate) fn active(&self) -> bool {
+        !self.state.is_terminal()
+    }
+}
+
 impl FileTransferCoordinator {
     pub(crate) fn load_default() -> std::io::Result<Arc<Self>> {
         let receive_root = std::env::var_os("USERPROFILE")
@@ -317,9 +334,42 @@ impl FileTransferCoordinator {
             .max_by_key(|batch| (batch.created_at_epoch_seconds, batch.batch_id.clone()))
     }
 
-    pub(crate) fn cancel_outbound(&self, phone_id: &str) -> Result<(), &'static str> {
+    pub(crate) fn transfer_snapshot(&self, phone_id: &str) -> Option<FileTransferSnapshot> {
+        let batches = self.store.batches().ok()?;
+        let batch = batches
+            .into_iter()
+            .filter(|batch| batch.phone_id == phone_id)
+            .max_by_key(|batch| {
+                (
+                    !batch.state.is_terminal(),
+                    batch.updated_at_epoch_seconds,
+                    batch.batch_id.clone(),
+                )
+            })?;
+        let total_entries = batch.file_count.saturating_add(batch.directory_count);
+        let progress = self
+            .store
+            .progress_summary(&batch.batch_id, total_entries)
+            .unwrap_or_default();
+        Some(FileTransferSnapshot {
+            batch_id: batch.batch_id,
+            direction: batch.direction,
+            state: batch.state,
+            completed_bytes: progress.completed_bytes.min(batch.total_bytes),
+            total_bytes: batch.total_bytes,
+            completed_entries: progress.completed_entries.min(total_entries),
+            total_entries,
+        })
+    }
+
+    pub(crate) fn cancel_active(&self, phone_id: &str) -> Result<(), &'static str> {
         let batch = self
-            .outbound_batch(phone_id)
+            .store
+            .recoverable_batches()
+            .map_err(|_| "file transfer state unavailable")?
+            .into_iter()
+            .filter(|batch| batch.phone_id == phone_id)
+            .max_by_key(|batch| (batch.updated_at_epoch_seconds, batch.batch_id.clone()))
             .ok_or("no active file transfer")?;
         self.cancel(&batch.batch_id, phone_id)
     }
@@ -608,7 +658,7 @@ pub(crate) async fn run_file_transfer_server(
             continue;
         };
         let tls = tls.clone();
-        let coordinator = Arc::clone(&state.file_transfers);
+        let request_state = Arc::clone(&state);
         tokio::spawn(async move {
             let _slot = slot;
             let Ok(Ok(stream)) =
@@ -617,7 +667,7 @@ pub(crate) async fn run_file_transfer_server(
                 return;
             };
             let service =
-                service_fn(move |request| serve_request(request, Arc::clone(&coordinator)));
+                service_fn(move |request| serve_request(request, Arc::clone(&request_state)));
             let _ = http1::Builder::new()
                 .keep_alive(true)
                 .serve_connection(TokioIo::new(stream), service)
@@ -628,19 +678,21 @@ pub(crate) async fn run_file_transfer_server(
 
 async fn serve_request(
     request: Request<Incoming>,
-    coordinator: Arc<FileTransferCoordinator>,
+    state: Arc<AppState>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
-    let response = match route_request(request, coordinator).await {
+    let response = match route_request(request, Arc::clone(&state)).await {
         Ok(response) => response,
         Err((status, code)) => json_response(status, format!(r#"{{"code":"{code}"}}"#)),
     };
+    state.notify_ui();
     Ok(response)
 }
 
 async fn route_request(
     request: Request<Incoming>,
-    coordinator: Arc<FileTransferCoordinator>,
+    state: Arc<AppState>,
 ) -> Result<Response<Full<Bytes>>, (StatusCode, &'static str)> {
+    let coordinator = Arc::clone(&state.file_transfers);
     let path = request.uri().path();
     if request.method() == Method::GET && path == "/flowtype/files/v1/health" {
         return Ok(json_response(
@@ -821,6 +873,7 @@ async fn route_request(
             offset,
             request.into_body(),
             &coordinator,
+            &state,
         )
         .await
         .map_err(|code| (StatusCode::CONFLICT, code))?;
@@ -1008,6 +1061,7 @@ async fn receive_file(
     offset: u64,
     mut body: Incoming,
     coordinator: &FileTransferCoordinator,
+    state: &AppState,
 ) -> Result<ReceiveResult, &'static str> {
     if offset > entry.size {
         return Err("invalid_offset");
@@ -1115,6 +1169,7 @@ async fn receive_file(
                     },
                 )
                 .map_err(|_| "progress_unavailable")?;
+            state.notify_ui();
             persisted = received;
             last_persist = std::time::Instant::now();
         }
@@ -1163,6 +1218,7 @@ async fn receive_file(
             },
         )
         .map_err(|_| "progress_unavailable")?;
+    state.notify_ui();
     Ok(ReceiveResult {
         committed_offset: received,
         completed: true,
@@ -1293,6 +1349,30 @@ mod tests {
     }
 
     #[test]
+    fn incoming_batch_is_visible_and_can_be_canceled_from_the_windows_ui() {
+        let root = test_root("incoming-snapshot");
+        let coordinator = FileTransferCoordinator::new(
+            FileTransferStore::new(root.join("state")).unwrap(),
+            root.join("receive"),
+        );
+        coordinator
+            .accept_offer(&offer("batch-incoming"), "phone-1")
+            .unwrap();
+
+        let snapshot = coordinator.transfer_snapshot("phone-1").unwrap();
+        assert_eq!(snapshot.direction, TransferDirection::PhoneToComputer);
+        assert_eq!(snapshot.state, BatchState::Queued);
+        assert!(snapshot.active());
+        assert_eq!(snapshot.completed_bytes, 0);
+
+        coordinator.cancel_active("phone-1").unwrap();
+        let snapshot = coordinator.transfer_snapshot("phone-1").unwrap();
+        assert_eq!(snapshot.state, BatchState::Canceled);
+        assert!(!snapshot.active());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn outbound_directory_is_indexed_and_only_one_batch_is_active() {
         let root = test_root("outbound");
         let input = root.join("input");
@@ -1319,7 +1399,7 @@ mod tests {
                 .create_outbound_offer("phone-1", std::slice::from_ref(&input))
                 .is_err()
         );
-        coordinator.cancel_outbound("phone-1").unwrap();
+        coordinator.cancel_active("phone-1").unwrap();
         assert!(
             coordinator
                 .create_outbound_offer("phone-1", &[input])

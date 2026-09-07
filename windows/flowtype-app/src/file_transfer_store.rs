@@ -99,6 +99,12 @@ pub(crate) struct EntryProgress {
     pub(crate) committed_offset: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ProgressSummary {
+    pub(crate) completed_bytes: u64,
+    pub(crate) completed_entries: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ManifestComplete {
     store_version: u16,
@@ -518,6 +524,45 @@ impl FileTransferStore {
         decode_progress(record)
     }
 
+    pub(crate) fn progress_summary(
+        &self,
+        batch_id: &str,
+        entry_count: u64,
+    ) -> io::Result<ProgressSummary> {
+        let directory = self.batch_dir(batch_id)?;
+        if read_manifest_complete(&directory).is_err() {
+            return Ok(ProgressSummary::default());
+        }
+        let mut file = File::open(directory.join(PROGRESS_FILE))?;
+        let mut summary = ProgressSummary::default();
+        let mut record = [0u8; PROGRESS_RECORD_BYTES as usize];
+        for _ in 0..entry_count {
+            record.fill(0);
+            let mut filled = 0usize;
+            while filled < record.len() {
+                let read = file.read(&mut record[filled..])?;
+                if read == 0 {
+                    break;
+                }
+                filled += read;
+            }
+            if filled == 0 {
+                break;
+            }
+            if filled != record.len() {
+                return Err(invalid_data("incomplete progress record"));
+            }
+            let progress = decode_progress(record)?;
+            summary.completed_bytes = summary
+                .completed_bytes
+                .saturating_add(progress.committed_offset);
+            if progress.state == EntryState::Completed {
+                summary.completed_entries = summary.completed_entries.saturating_add(1);
+            }
+        }
+        Ok(summary)
+    }
+
     pub(crate) fn recoverable_batches(&self) -> io::Result<Vec<BatchRecord>> {
         Ok(self
             .batches()?
@@ -851,6 +896,13 @@ mod tests {
                 .unwrap()
                 .committed_offset,
             16
+        );
+        assert_eq!(
+            store.progress_summary(&batch.batch_id, 2).unwrap(),
+            ProgressSummary {
+                completed_bytes: 16,
+                completed_entries: 1,
+            }
         );
         store
             .update_state(&batch.batch_id, BatchState::Preparing, 11)

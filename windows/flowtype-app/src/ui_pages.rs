@@ -166,26 +166,27 @@ impl UiContext {
             .as_deref()
             .unwrap_or(tr("手机未连接", "Phone is not connected"));
         self.muted_text(destination, 220, 132, 440, 26, self.body_font);
-        let transfer_status = match snapshot.file_transfer_state {
-            Some(flowtype_core::file_transfer::BatchState::WaitingConfirmation) => {
-                tr("等待手机确认接收", "Waiting for phone approval")
-            }
-            Some(_) => tr(
-                "正在传输，可在中断后继续",
-                "Transferring; interruptions can resume",
-            ),
-            None => tr(
-                "选择文件后，手机只需确认一次",
-                "The phone confirms once per transfer",
-            ),
-        };
-        self.muted_text(transfer_status, 220, 154, 440, 26, self.body_font);
-        if snapshot.file_transfer_state.is_some() {
+        let transfer_status = snapshot.file_transfer.as_ref().map_or_else(
+            || {
+                tr(
+                    "选择文件后，手机只需确认一次",
+                    "The phone confirms once per transfer",
+                )
+                .to_owned()
+            },
+            file_transfer_status,
+        );
+        self.muted_text(&transfer_status, 220, 154, 470, 42, self.body_font);
+        if snapshot
+            .file_transfer
+            .as_ref()
+            .is_some_and(|transfer| transfer.active())
+        {
             self.owner_button(
                 tr("取消传输", "Cancel transfer"),
                 ID_CANCEL_FILE_TRANSFER,
                 220,
-                184,
+                205,
                 112,
                 38,
                 ButtonKind::Secondary,
@@ -195,7 +196,7 @@ impl UiContext {
                 tr("选择文件", "Choose files"),
                 ID_CHOOSE_FILES,
                 220,
-                184,
+                205,
                 128,
                 38,
                 ButtonKind::Secondary,
@@ -204,7 +205,7 @@ impl UiContext {
                 tr("选择文件夹", "Choose folder"),
                 ID_CHOOSE_FOLDER,
                 360,
-                184,
+                205,
                 128,
                 38,
                 ButtonKind::Secondary,
@@ -740,5 +741,52 @@ impl UiContext {
             self.controls.push(control);
         }
         control
+    }
+}
+
+fn file_transfer_status(transfer: &crate::file_transfer_server::FileTransferSnapshot) -> String {
+    use flowtype_core::file_transfer::{BatchState, TransferDirection};
+    let action = match (transfer.direction, transfer.state) {
+        (TransferDirection::ComputerToPhone, BatchState::WaitingConfirmation) => {
+            tr("等待手机确认接收", "Waiting for phone approval")
+        }
+        (TransferDirection::ComputerToPhone, BatchState::Completed) => {
+            tr("已发送到手机", "Sent to phone")
+        }
+        (TransferDirection::PhoneToComputer, BatchState::Completed) => {
+            tr(r"已保存到“下载\FlowType”", r"Saved to Downloads\FlowType")
+        }
+        (_, BatchState::PartialFailure) => tr("部分文件传输失败", "Some files failed"),
+        (_, BatchState::Canceled) => tr("传输已取消", "Transfer canceled"),
+        (TransferDirection::PhoneToComputer, _) => tr(
+            "正在接收手机文件，可断点继续",
+            "Receiving from phone; resumable",
+        ),
+        (TransferDirection::ComputerToPhone, _) => {
+            tr("正在发送到手机，可断点继续", "Sending to phone; resumable")
+        }
+    };
+    format!(
+        "{} · {} / {} · {} / {}",
+        action,
+        format_file_size(transfer.completed_bytes),
+        format_file_size(transfer.total_bytes),
+        transfer.completed_entries,
+        transfer.total_entries,
+    )
+}
+
+fn format_file_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }

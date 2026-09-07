@@ -24,8 +24,8 @@ use windows_sys::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext,
 };
 use windows_sys::Win32::UI::Shell::{
-    DragAcceptFiles, DragFinish, DragQueryFileW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD,
-    NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
+    DragAcceptFiles, DragFinish, DragQueryFileW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP,
+    NIIF_INFO, NIIF_WARNING, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -131,10 +131,15 @@ struct UiContext {
     ball_hwnd: HWND,
     save_notice: Option<SaveNotice>,
     direct2d: Option<Direct2dPainter>,
+    last_transfer_status: Option<(String, flowtype_core::file_transfer::BatchState)>,
 }
 
 impl UiContext {
     fn new(state: Arc<AppState>, host: IpAddr, page: Page) -> Self {
+        let last_transfer_status = state
+            .snapshot()
+            .file_transfer
+            .map(|transfer| (transfer.batch_id, transfer.state));
         Self {
             state,
             host,
@@ -172,6 +177,7 @@ impl UiContext {
             ball_hwnd: null_mut(),
             save_notice: None,
             direct2d: None,
+            last_transfer_status,
         }
     }
 
