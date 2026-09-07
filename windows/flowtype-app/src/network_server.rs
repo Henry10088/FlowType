@@ -98,7 +98,10 @@ async fn serve_connection(
     }
     let auth: AuthMessage = serde_json::from_str(&auth)?;
     if let Err(error) = authenticate_phone_async(&state, auth.clone(), nonce.clone()).await {
-        eprintln!("authentication rejected for phone {}: {error}", auth.phone_id);
+        eprintln!(
+            "authentication rejected for phone {}: {error}",
+            auth.phone_id
+        );
         send_json(
             &mut websocket,
             &ServerMessage::Error(ProtocolError {

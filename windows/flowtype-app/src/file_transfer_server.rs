@@ -357,7 +357,9 @@ impl FileTransferCoordinator {
             .progress_summary(&batch.batch_id, total_entries)
             .unwrap_or_default();
         let failed_paths = if progress.failed_entries > 0 {
-            self.store.failed_paths(&batch.batch_id, 5).unwrap_or_default()
+            self.store
+                .failed_paths(&batch.batch_id, 5)
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
