@@ -390,6 +390,15 @@ impl FileTransferCoordinator {
                 .is_ok_and(|batch| batch.phone_id == grant.phone_id && !batch.state.is_terminal())
     }
 
+    fn ticket_is_active(&self, batch_id: &str) -> bool {
+        let now = unix_time();
+        self.tickets.lock().is_ok_and(|tickets| {
+            tickets
+                .get(batch_id)
+                .is_some_and(|grant| grant.expires_at_epoch_seconds > now)
+        })
+    }
+
     fn authorized_direction(&self, batch_id: &str, bearer: &str) -> Option<TransferDirection> {
         self.authorize(batch_id, bearer)
             .then(|| {
@@ -1075,6 +1084,11 @@ async fn receive_file(
         )
         .map_err(|_| "progress_unavailable")?;
     while let Some(frame) = body.frame().await {
+        if !coordinator.ticket_is_active(batch_id) {
+            drop(file);
+            let _ = fs::remove_file(&part);
+            return Err("transfer_canceled");
+        }
         let frame = frame.map_err(|_| "body_read_failed")?;
         let Ok(data) = frame.into_data() else {
             continue;

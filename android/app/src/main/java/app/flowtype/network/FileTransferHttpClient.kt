@@ -245,8 +245,13 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
     }
 
     override fun close() {
+        cancel()
         client.dispatcher.executorService.shutdown()
         client.connectionPool.evictAll()
+    }
+
+    fun cancel() {
+        client.dispatcher.cancelAll()
     }
 
     private fun hashSource(resolver: ContentResolver, source: Uri): String {

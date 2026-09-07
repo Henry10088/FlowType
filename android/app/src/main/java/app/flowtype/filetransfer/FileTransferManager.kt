@@ -55,6 +55,7 @@ class FileTransferManager(
     @Volatile private var binding: ComputerBinding? = null
     @Volatile private var pendingIncomingOffer: FileOfferMessage? = null
     @Volatile private var activeBatchId: String? = null
+    @Volatile private var activeHttpClient: FileTransferHttpClient? = null
     @Volatile private var pendingReselectionBatchId: String? = null
     private val canceledBatches = ConcurrentHashMap.newKeySet<String>()
 
@@ -69,6 +70,7 @@ class FileTransferManager(
     fun cancelActive() {
         val batchId = activeBatchId ?: pendingIncomingOffer?.batchId ?: return
         canceledBatches += batchId
+        activeHttpClient?.cancel()
         pendingIncomingOffer = null
         sendCancel(batchId)
         worker.execute {
@@ -77,6 +79,7 @@ class FileTransferManager(
                 if (!batch.state.terminal) {
                     store.updateBatchState(batchId, TransferBatchState.CANCELED, System.currentTimeMillis())
                 }
+                cleanupPartialTargets(batchId)
             }
             activeBatchId = null
             onChanged(Snapshot(false))
@@ -225,6 +228,24 @@ class FileTransferManager(
         }
     }
 
+    private fun cleanupPartialTargets(batchId: String) {
+        var ordinal = 0L
+        while (true) {
+            val page = store.entriesPage(batchId, ordinal, 256)
+            if (page.isEmpty()) break
+            page.forEach { entry ->
+                ordinal = entry.manifest.ordinal + 1
+                if (entry.state != TransferEntryState.COMPLETED) {
+                    entry.targetUri?.let { value ->
+                        runCatching {
+                            DocumentsContract.deleteDocument(context.contentResolver, Uri.parse(value))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private fun create(prepare: () -> PreparedTransfer) {
         val current = binding ?: run {
             onChanged(Snapshot(false, error = "computer_not_connected"))
@@ -299,7 +320,7 @@ class FileTransferManager(
         activeBatchId = batch.batchId
         runCatching {
             store.updateBatchState(batch.batchId, TransferBatchState.PREPARING, System.currentTimeMillis())
-            FileTransferHttpClient(binding).use { client ->
+            withActiveClient(binding) { client ->
                 client.uploadManifest(ticket, manifestSequence(batch.batchId)).use { response ->
                     check(response.isSuccessful) { "manifest upload failed: ${response.code}" }
                 }
@@ -375,7 +396,7 @@ class FileTransferManager(
             activeBatchId = null
             onChanged(Snapshot(false, batch.batchId, batch.totalBytes, batch.totalBytes))
         }.onFailure { error ->
-            if (error is CancellationException) return@onFailure
+            if (error is CancellationException || batch.batchId in canceledBatches) return@onFailure
             handleTransferFailure(batch, error)
         }
     }
@@ -389,7 +410,7 @@ class FileTransferManager(
             if (batch.state == TransferBatchState.QUEUED || batch.state == TransferBatchState.WAITING_NETWORK) {
                 store.updateBatchState(batch.batchId, TransferBatchState.PREPARING, System.currentTimeMillis())
             }
-            FileTransferHttpClient(binding).use { client ->
+            withActiveClient(binding) { client ->
                 downloadManifest(client, ticket, batch)
                 AndroidTargetStore(context.contentResolver, store).prepare(batch.batchId, treeUri)
                 store.updateBatchState(batch.batchId, TransferBatchState.TRANSFERRING, System.currentTimeMillis())
@@ -416,7 +437,7 @@ class FileTransferManager(
             activeBatchId = null
             onChanged(Snapshot(false, batch.batchId, batch.totalBytes, batch.totalBytes))
         }.onFailure { error ->
-            if (error is CancellationException) return@onFailure
+            if (error is CancellationException || batch.batchId in canceledBatches) return@onFailure
             handleTransferFailure(batch, error)
         }
     }
@@ -565,6 +586,19 @@ class FileTransferManager(
             }
         } finally {
             executor.shutdownNow()
+        }
+    }
+
+    private fun <T> withActiveClient(
+        binding: ComputerBinding,
+        action: (FileTransferHttpClient) -> T,
+    ): T {
+        val client = FileTransferHttpClient(binding)
+        activeHttpClient = client
+        try {
+            return client.use(action)
+        } finally {
+            if (activeHttpClient === client) activeHttpClient = null
         }
     }
 
