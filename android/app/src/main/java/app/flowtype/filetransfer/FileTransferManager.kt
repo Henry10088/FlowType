@@ -247,6 +247,7 @@ class FileTransferManager(
     }
 
     private fun create(prepare: () -> PreparedTransfer) {
+        if (activeBatchId != null || pendingIncomingOffer != null) return
         val current = binding ?: run {
             onChanged(Snapshot(false, error = "computer_not_connected"))
             return

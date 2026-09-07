@@ -180,35 +180,36 @@ impl UiContext {
             ),
         };
         self.muted_text(transfer_status, 220, 154, 440, 26, self.body_font);
-        self.owner_button(
-            tr("选择文件", "Choose files"),
-            ID_CHOOSE_FILES,
-            220,
-            184,
-            128,
-            38,
-            ButtonKind::Secondary,
-        );
         if snapshot.file_transfer_state.is_some() {
             self.owner_button(
                 tr("取消传输", "Cancel transfer"),
                 ID_CANCEL_FILE_TRANSFER,
-                500,
+                220,
                 184,
                 112,
                 38,
                 ButtonKind::Secondary,
             );
+        } else {
+            self.owner_button(
+                tr("选择文件", "Choose files"),
+                ID_CHOOSE_FILES,
+                220,
+                184,
+                128,
+                38,
+                ButtonKind::Secondary,
+            );
+            self.owner_button(
+                tr("选择文件夹", "Choose folder"),
+                ID_CHOOSE_FOLDER,
+                360,
+                184,
+                128,
+                38,
+                ButtonKind::Secondary,
+            );
         }
-        self.owner_button(
-            tr("选择文件夹", "Choose folder"),
-            ID_CHOOSE_FOLDER,
-            360,
-            184,
-            128,
-            38,
-            ButtonKind::Secondary,
-        );
         self.text(
             tr(
                 "也可以把文件或文件夹拖到此窗口",

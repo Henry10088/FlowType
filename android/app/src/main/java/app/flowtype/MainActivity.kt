@@ -527,7 +527,7 @@ class MainActivity : ComponentActivity() {
         pair.visibility = if (paired) View.GONE else View.VISIBLE
         findViewById<ImageButton>(R.id.openImage).isEnabled =
             paired && state.imageTransfer != FlowTypeController.ImageTransferState.SENDING
-        findViewById<ImageButton>(R.id.openFiles).isEnabled = paired
+        findViewById<ImageButton>(R.id.openFiles).isEnabled = paired && !state.fileTransfer.active
         if (state.fileTransfer.active) {
             syncStatus.text = state.fileTransfer.error?.let {
                 getString(R.string.file_waiting_network)
