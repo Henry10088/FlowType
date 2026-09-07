@@ -323,7 +323,9 @@ class FileTransferManager(
         if (batch.pcId != binding.pcId || batch.direction != TransferDirection.PHONE_TO_COMPUTER) return
         activeBatchId = batch.batchId
         runCatching {
-            store.updateBatchState(batch.batchId, TransferBatchState.PREPARING, System.currentTimeMillis())
+            if (shouldEnterPreparing(batch.state)) {
+                store.updateBatchState(batch.batchId, TransferBatchState.PREPARING, System.currentTimeMillis())
+            }
             withActiveClient(binding) { client ->
                 client.uploadManifest(ticket, manifestSequence(batch.batchId)).use { response ->
                     check(response.isSuccessful) { "manifest upload failed: ${response.code}" }
@@ -440,7 +442,7 @@ class FileTransferManager(
         activeBatchId = batch.batchId
         runCatching {
             val treeUri = Uri.parse(requireNotNull(batch.targetTreeUri) { "save location is unavailable" })
-            if (batch.state == TransferBatchState.QUEUED || batch.state == TransferBatchState.WAITING_NETWORK) {
+            if (shouldEnterPreparing(batch.state)) {
                 store.updateBatchState(batch.batchId, TransferBatchState.PREPARING, System.currentTimeMillis())
             }
             withActiveClient(binding) { client ->
@@ -811,3 +813,6 @@ internal fun permanentEntryFailureCode(
         else -> null
     }
 }
+
+internal fun shouldEnterPreparing(state: TransferBatchState): Boolean =
+    state == TransferBatchState.QUEUED || state == TransferBatchState.WAITING_NETWORK

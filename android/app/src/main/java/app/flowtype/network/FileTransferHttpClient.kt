@@ -296,8 +296,11 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
             .hostnameVerifier { _, _ -> true }
             .connectionSpecs(listOf(tls13))
             .connectTimeout(5, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.MILLISECONDS)
-            .writeTimeout(0, TimeUnit.MILLISECONDS)
+            // These are per-I/O inactivity limits, not a whole-transfer deadline.
+            // Keeping them finite lets a black-holed Wi-Fi connection enter the
+            // resumable waiting-network state instead of hanging forever.
+            .readTimeout(FILE_IO_IDLE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .writeTimeout(FILE_IO_IDLE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .retryOnConnectionFailure(false)
             .build()
     }
@@ -327,6 +330,8 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
         val EMPTY_BODY = ByteArray(0).toRequestBody(OCTET_STREAM)
     }
 }
+
+internal const val FILE_IO_IDLE_TIMEOUT_SECONDS = 30L
 
 data class FileUploadReceipt(
     val committedOffset: Long,
