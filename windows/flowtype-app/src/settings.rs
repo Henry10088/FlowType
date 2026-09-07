@@ -1,6 +1,7 @@
 use std::fs;
 use std::io;
 use std::mem::size_of;
+use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use windows_sys::Win32::System::Registry::{
@@ -12,6 +13,39 @@ const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const VALUE_NAME: &str = "FlowType";
 const FLOATING_POSITION_FILE: &str = "floating-position-v1.txt";
 const FLOATING_ENABLED_FILE: &str = "floating-enabled-v1.txt";
+const RECEIVE_FOLDER_FILE: &str = "file-receive-folder-v1.txt";
+
+pub fn default_receive_folder() -> io::Result<PathBuf> {
+    Ok(std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "USERPROFILE is unavailable"))?
+        .join("Downloads")
+        .join("FlowType"))
+}
+
+pub fn receive_folder() -> io::Result<PathBuf> {
+    let path = crate::identity::data_dir()?.join(RECEIVE_FOLDER_FILE);
+    let saved = fs::read_to_string(path)
+        .ok()
+        .map(|value| PathBuf::from(value.trim()));
+    Ok(saved
+        .filter(|value| value.is_absolute())
+        .unwrap_or(default_receive_folder()?))
+}
+
+pub fn set_receive_folder(path: &Path) -> io::Result<()> {
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "receive folder must be absolute",
+        ));
+    }
+    fs::create_dir_all(path)?;
+    crate::atomic_file::write(
+        &crate::identity::data_dir()?.join(RECEIVE_FOLDER_FILE),
+        path.as_os_str().to_string_lossy().as_bytes(),
+    )
+}
 
 pub fn auto_start_enabled() -> bool {
     open_key(KEY_QUERY_VALUE)

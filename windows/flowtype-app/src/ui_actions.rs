@@ -74,6 +74,27 @@ impl UiContext {
         self.rebuild_page();
     }
 
+    pub(super) fn change_receive_folder(&mut self) {
+        let result = choose_paths(self.hwnd, true).and_then(|paths| {
+            let path = paths.into_iter().next().ok_or("canceled")?;
+            self.state.set_file_receive_root(path)
+        });
+        match result {
+            Ok(()) => {
+                self.rebuild_page();
+                self.show_save_notice(true, tr("接收位置已更新", "Receive folder updated"));
+            }
+            Err(error) if error.to_string() == "canceled" => {}
+            Err(error) => self.show_save_notice(
+                false,
+                &format!(
+                    "{}: {error}",
+                    tr("无法更改接收位置", "Could not change receive folder")
+                ),
+            ),
+        }
+    }
+
     pub(super) fn set_page(&mut self, page: Page) {
         if self.page == Page::Pairing && page != Page::Pairing {
             self.state.cancel_pairing();

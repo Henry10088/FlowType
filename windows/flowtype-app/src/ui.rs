@@ -346,6 +346,7 @@ unsafe extern "system" fn window_proc(
                 Some(UiCommand::ChooseFiles) => ui.choose_and_send_files(false),
                 Some(UiCommand::ChooseFolder) => ui.choose_and_send_files(true),
                 Some(UiCommand::CancelFileTransfer) => ui.cancel_file_transfer(),
+                Some(UiCommand::ChangeReceiveFolder) => ui.change_receive_folder(),
                 Some(UiCommand::Exit) => {
                     crate::diagnostics::log(format!("window command exit id={id}"));
                     unsafe { DestroyWindow(hwnd) };

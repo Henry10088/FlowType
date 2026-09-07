@@ -48,7 +48,7 @@ struct TicketGrant {
 
 pub(crate) struct FileTransferCoordinator {
     store: Arc<FileTransferStore>,
-    receive_root: PathBuf,
+    receive_root: Mutex<PathBuf>,
     tickets: Mutex<HashMap<String, TicketGrant>>,
 }
 
@@ -73,18 +73,12 @@ impl FileTransferSnapshot {
 
 impl FileTransferCoordinator {
     pub(crate) fn load_default() -> std::io::Result<Arc<Self>> {
-        let receive_root = std::env::var_os("USERPROFILE")
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::NotFound, "USERPROFILE is unavailable")
-            })?
-            .join("Downloads")
-            .join("FlowType");
+        let receive_root = crate::settings::receive_folder()?;
         let store = FileTransferStore::load_default()?;
         cleanup_expired(&store, unix_time().saturating_sub(7 * 24 * 60 * 60));
         Ok(Arc::new(Self {
             store: Arc::new(store),
-            receive_root,
+            receive_root: Mutex::new(receive_root),
             tickets: Mutex::new(HashMap::new()),
         }))
     }
@@ -93,9 +87,24 @@ impl FileTransferCoordinator {
     fn new(store: FileTransferStore, receive_root: PathBuf) -> Arc<Self> {
         Arc::new(Self {
             store: Arc::new(store),
-            receive_root,
+            receive_root: Mutex::new(receive_root),
             tickets: Mutex::new(HashMap::new()),
         })
+    }
+
+    pub(crate) fn receive_root(&self) -> Result<PathBuf, &'static str> {
+        self.receive_root
+            .lock()
+            .map(|path| path.clone())
+            .map_err(|_| "receive folder unavailable")
+    }
+
+    pub(crate) fn set_receive_root(&self, path: PathBuf) -> Result<(), &'static str> {
+        *self
+            .receive_root
+            .lock()
+            .map_err(|_| "receive folder unavailable")? = path;
+        Ok(())
     }
 
     pub(crate) fn accept_offer(
@@ -1091,12 +1100,13 @@ async fn ingest_manifest(
         .store
         .load_batch(batch_id)
         .map_err(|_| "batch_unavailable")?;
-    if !has_available_space(&coordinator.receive_root, batch.total_bytes) {
+    let receive_root = coordinator.receive_root()?;
+    if !has_available_space(&receive_root, batch.total_bytes) {
         return Err("insufficient_space");
     }
     coordinator
         .store
-        .prepare_windows_targets(batch_id, &coordinator.receive_root, unix_time())
+        .prepare_windows_targets(batch_id, &receive_root, unix_time())
         .map_err(|_| "target_preparation_failed")?;
     coordinator
         .store

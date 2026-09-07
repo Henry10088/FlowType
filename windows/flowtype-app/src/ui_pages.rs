@@ -249,6 +249,29 @@ impl UiContext {
             48,
             self.body_font,
         );
+        self.text(
+            tr("手机文件保存到", "Files from phone are saved to"),
+            220,
+            420,
+            260,
+            26,
+            self.heading_font,
+        );
+        let receive_root = self
+            .state
+            .file_receive_root()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| tr("接收位置不可用", "Receive folder unavailable").to_owned());
+        self.muted_text(&receive_root, 220, 456, 350, 44, self.body_font);
+        self.owner_button(
+            tr("更改位置", "Change"),
+            ID_CHANGE_RECEIVE_FOLDER,
+            590,
+            452,
+            100,
+            36,
+            ButtonKind::Secondary,
+        );
     }
 
     pub(super) fn build_status(&mut self) {

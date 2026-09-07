@@ -892,6 +892,19 @@ impl AppState {
         Ok(())
     }
 
+    fn file_receive_root(&self) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+        self.file_transfers.receive_root().map_err(Into::into)
+    }
+
+    fn set_file_receive_root(
+        &self,
+        path: std::path::PathBuf,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        settings::set_receive_folder(&path)?;
+        self.file_transfers.set_receive_root(path)?;
+        Ok(())
+    }
+
     fn begin_pairing(&self, host: IpAddr) -> Result<String, Box<dyn std::error::Error>> {
         #[cfg(debug_assertions)]
         if std::env::var_os("FLOWTYPE_E2E_PAIRING_URI_FILE").is_some()
