@@ -81,6 +81,7 @@ class FileTransferManager(
                 if (!batch.state.terminal) {
                     store.updateBatchState(batchId, TransferBatchState.CANCELED, System.currentTimeMillis())
                 }
+                store.cancelIncompleteEntries(batchId)
                 cleanupPartialTargets(batchId)
             }
             activeBatchId = null
@@ -474,6 +475,14 @@ class FileTransferManager(
                                 current.committedOffset,
                                 errorCode = code,
                             )
+                            current.targetUri?.let { value ->
+                                runCatching {
+                                    DocumentsContract.deleteDocument(
+                                        context.contentResolver,
+                                        Uri.parse(value),
+                                    )
+                                }
+                            }
                             client.reportFileFailure(ticket, stored.manifest, code)
                         }
                     }

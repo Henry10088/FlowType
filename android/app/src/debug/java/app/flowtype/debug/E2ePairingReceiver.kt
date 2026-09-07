@@ -11,6 +11,10 @@ import app.flowtype.pairing.BindingStore
 /** Debug-build-only bridge used by the cross-device integration test. */
 class E2ePairingReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action == ACTION_CANCEL_FILES) {
+            (context.applicationContext as FlowTypeApplication).controller.cancelFileTransfer()
+            return
+        }
         if (intent.action == ACTION_SEND_FILES) {
             val directory = context.cacheDir.resolve("e2e-files").apply { mkdirs() }
             directory.resolve("测试-😀.txt").writeText("FlowType 双向传输测试\nline 2")
@@ -46,5 +50,6 @@ class E2ePairingReceiver : BroadcastReceiver() {
         const val EXTRA_URI = "uri"
         const val EXTRA_URI_BASE64 = "uri_base64"
         const val ACTION_SEND_FILES = "app.flowtype.E2E_SEND_FILES"
+        const val ACTION_CANCEL_FILES = "app.flowtype.E2E_CANCEL_FILES"
     }
 }

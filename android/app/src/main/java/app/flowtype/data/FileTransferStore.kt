@@ -127,6 +127,21 @@ class FileTransferStore(private val database: AppDatabase) {
         ).also { check(it == 1) }
     }
 
+    fun cancelIncompleteEntries(batchId: String) {
+        val terminal = listOf(
+            TransferEntryState.COMPLETED,
+            TransferEntryState.FAILED,
+            TransferEntryState.CANCELED,
+        )
+        val placeholders = terminal.joinToString(",") { "?" }
+        database.writableDatabase.update(
+            "file_transfer_entries",
+            ContentValues().apply { put("state", TransferEntryState.CANCELED.wireName) },
+            "batch_id = ? AND state NOT IN ($placeholders)",
+            arrayOf(batchId, *terminal.map { it.wireName }.toTypedArray()),
+        )
+    }
+
     fun setTargetTree(batchId: String, targetTreeUri: String, now: Long) {
         require(targetTreeUri.isNotBlank() && targetTreeUri.length <= 32 * 1024) {
             "invalid target tree URI"
