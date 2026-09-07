@@ -115,4 +115,11 @@
     <string name="error_timeout">连接超时</string>
     <string name="error_network_unavailable">网络不可用</string>
     <string name="error_unknown">未知错误</string>
+    <string name="send_files">传输文件</string>
+    <string name="file_transfer_title">发送到电脑</string>
+    <string name="choose_files">选择文件</string>
+    <string name="choose_folder">选择文件夹</string>
+    <string name="file_transfer_progress">正在发送 %1$s / %2$s</string>
+    <string name="file_transfer_complete">文件已发送</string>
+    <string name="file_waiting_network">文件传输正在等待网络</string>
 </resources>

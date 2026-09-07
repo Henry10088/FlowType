@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,6 +26,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
 use crate::AppState;
+use crate::file_transfer_store::EntryProgress;
 use crate::file_transfer_store::{BatchRecord, FileTransferStore, ManifestWriter};
 
 pub(crate) const DATA_PORT: u16 = 32188;
@@ -38,21 +42,31 @@ struct TicketGrant {
 
 pub(crate) struct FileTransferCoordinator {
     store: Arc<FileTransferStore>,
+    receive_root: PathBuf,
     tickets: Mutex<HashMap<String, TicketGrant>>,
 }
 
 impl FileTransferCoordinator {
     pub(crate) fn load_default() -> std::io::Result<Arc<Self>> {
+        let receive_root = std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "USERPROFILE is unavailable")
+            })?
+            .join("Downloads")
+            .join("FlowType");
         Ok(Arc::new(Self {
             store: Arc::new(FileTransferStore::load_default()?),
+            receive_root,
             tickets: Mutex::new(HashMap::new()),
         }))
     }
 
     #[cfg(test)]
-    fn new(store: FileTransferStore) -> Arc<Self> {
+    fn new(store: FileTransferStore, receive_root: PathBuf) -> Arc<Self> {
         Arc::new(Self {
             store: Arc::new(store),
+            receive_root,
             tickets: Mutex::new(HashMap::new()),
         })
     }
@@ -220,15 +234,111 @@ async fn route_request(
             r#"{"status":"ok"}"#.to_owned(),
         ));
     }
-    let Some(batch_id) = path
-        .strip_prefix("/flowtype/files/v1/batches/")
-        .and_then(|value| value.strip_suffix("/manifest"))
-        .map(str::to_owned)
-    else {
+    let Some(remainder) = path.strip_prefix("/flowtype/files/v1/batches/") else {
         return Err((StatusCode::NOT_FOUND, "not_found"));
     };
+    let (batch_id, action) = remainder
+        .split_once('/')
+        .ok_or((StatusCode::NOT_FOUND, "not_found"))?;
+    let batch_id = batch_id.to_owned();
+    let bearer = bearer_token(&request).ok_or((StatusCode::UNAUTHORIZED, "unauthorized"))?;
+    if !coordinator.authorize(&batch_id, bearer) {
+        return Err((StatusCode::UNAUTHORIZED, "unauthorized"));
+    }
+
+    if action == "complete" {
+        if request.method() != Method::POST {
+            return Err((StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"));
+        }
+        if !coordinator
+            .store
+            .all_entries_complete(&batch_id)
+            .map_err(|_| (StatusCode::CONFLICT, "batch_incomplete"))?
+        {
+            return Err((StatusCode::CONFLICT, "batch_incomplete"));
+        }
+        coordinator
+            .store
+            .update_state(&batch_id, BatchState::Completed, unix_time())
+            .map_err(|_| (StatusCode::CONFLICT, "batch_state_failed"))?;
+        if let Ok(mut tickets) = coordinator.tickets.lock() {
+            tickets.remove(&batch_id);
+        }
+        return Ok(json_response(
+            StatusCode::OK,
+            r#"{"completed":true}"#.to_owned(),
+        ));
+    }
+
+    if let Some(entry_id) = action.strip_prefix("entries/") {
+        let ordinal = request
+            .headers()
+            .get("x-flowtype-ordinal")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or((StatusCode::BAD_REQUEST, "invalid_ordinal"))?;
+        let entry = coordinator
+            .store
+            .manifest_entry(&batch_id, ordinal)
+            .map_err(|_| (StatusCode::NOT_FOUND, "entry_not_found"))?;
+        if entry.entry_id != entry_id || entry.kind != flowtype_core::file_transfer::EntryKind::File
+        {
+            return Err((StatusCode::NOT_FOUND, "entry_not_found"));
+        }
+        if request.method() == Method::HEAD {
+            let progress = coordinator
+                .store
+                .read_progress(&batch_id, ordinal)
+                .map_err(|_| (StatusCode::CONFLICT, "progress_unavailable"))?;
+            return Ok(Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .header("x-flowtype-offset", progress.committed_offset)
+                .header("x-flowtype-length", entry.size)
+                .header("cache-control", "no-store")
+                .body(Full::new(Bytes::new()))
+                .expect("valid HTTP response"));
+        }
+        if request.method() != Method::POST {
+            return Err((StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"));
+        }
+        let offset = request
+            .headers()
+            .get("x-flowtype-offset")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or((StatusCode::BAD_REQUEST, "invalid_offset"))?;
+        let result = receive_file(
+            &batch_id,
+            ordinal,
+            &entry,
+            offset,
+            request.into_body(),
+            &coordinator,
+        )
+        .await
+        .map_err(|code| (StatusCode::CONFLICT, code))?;
+        return Ok(json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "committed_offset": result.committed_offset,
+                "completed": result.completed,
+                "sha256": result.sha256,
+            })
+            .to_string(),
+        ));
+    }
+
+    if action != "manifest" {
+        return Err((StatusCode::NOT_FOUND, "not_found"));
+    }
     if request.method() != Method::POST {
         return Err((StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"));
+    }
+    if coordinator.store.manifest_is_complete(&batch_id) {
+        return Ok(json_response(
+            StatusCode::OK,
+            r#"{"accepted":true,"resumed":true}"#.to_owned(),
+        ));
     }
     let content_type = request
         .headers()
@@ -241,10 +351,6 @@ async fn route_request(
         .is_some_and(|value| value.trim() == "application/x-ndjson")
     {
         return Err((StatusCode::UNSUPPORTED_MEDIA_TYPE, "invalid_content_type"));
-    }
-    let bearer = bearer_token(&request).ok_or((StatusCode::UNAUTHORIZED, "unauthorized"))?;
-    if !coordinator.authorize(&batch_id, bearer) {
-        return Err((StatusCode::UNAUTHORIZED, "unauthorized"));
     }
     ingest_manifest(&batch_id, request.into_body(), &coordinator)
         .await
@@ -282,9 +388,200 @@ async fn ingest_manifest(
     writer.finish().map_err(|_| "manifest_count_mismatch")?;
     coordinator
         .store
+        .prepare_windows_targets(batch_id, &coordinator.receive_root, unix_time())
+        .map_err(|_| "target_preparation_failed")?;
+    coordinator
+        .store
         .update_state(batch_id, BatchState::Preparing, unix_time())
         .map_err(|_| "batch_state_failed")?;
+    coordinator
+        .store
+        .update_state(batch_id, BatchState::Transferring, unix_time())
+        .map_err(|_| "batch_state_failed")?;
     Ok(())
+}
+
+struct ReceiveResult {
+    committed_offset: u64,
+    completed: bool,
+    sha256: Option<String>,
+}
+
+async fn receive_file(
+    batch_id: &str,
+    ordinal: u64,
+    entry: &ManifestEntry,
+    offset: u64,
+    mut body: Incoming,
+    coordinator: &FileTransferCoordinator,
+) -> Result<ReceiveResult, &'static str> {
+    if offset > entry.size {
+        return Err("invalid_offset");
+    }
+    let progress = coordinator
+        .store
+        .read_progress(batch_id, ordinal)
+        .map_err(|_| "progress_unavailable")?;
+    if offset != progress.committed_offset {
+        return Err("offset_mismatch");
+    }
+    let target = coordinator
+        .store
+        .target_path(batch_id, ordinal)
+        .map_err(|_| "target_unavailable")?;
+    if progress.state == flowtype_core::file_transfer::EntryState::Completed {
+        let hash = hash_file(&target).map_err(|_| "target_unavailable")?;
+        return Ok(ReceiveResult {
+            committed_offset: entry.size,
+            completed: true,
+            sha256: Some(hash),
+        });
+    }
+    let parent = target.parent().ok_or("target_unavailable")?;
+    fs::create_dir_all(parent).map_err(|_| "target_unavailable")?;
+    let part = parent.join(format!(".flowtype-{batch_id}-{}.part", entry.entry_id));
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&part)
+        .map_err(|_| "target_unavailable")?;
+    let staged_len = file.metadata().map_err(|_| "target_unavailable")?.len();
+    if staged_len < offset {
+        return Err("offset_mismatch");
+    }
+    if staged_len > offset {
+        file.set_len(offset).map_err(|_| "target_unavailable")?;
+    }
+    let mut hasher = Sha256::new();
+    if offset > 0 {
+        file.seek(SeekFrom::Start(0))
+            .map_err(|_| "target_unavailable")?;
+        let mut remaining = offset;
+        let mut buffer = vec![0u8; 512 * 1024];
+        while remaining > 0 {
+            let read_size = remaining.min(buffer.len() as u64) as usize;
+            let count = file
+                .read(&mut buffer[..read_size])
+                .map_err(|_| "target_unavailable")?;
+            if count == 0 {
+                return Err("offset_mismatch");
+            }
+            hasher.update(&buffer[..count]);
+            remaining -= count as u64;
+        }
+    }
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|_| "target_unavailable")?;
+    let mut received = offset;
+    let mut persisted = offset;
+    let mut last_persist = std::time::Instant::now();
+    coordinator
+        .store
+        .write_progress(
+            batch_id,
+            ordinal,
+            EntryProgress {
+                state: flowtype_core::file_transfer::EntryState::Transferring,
+                committed_offset: offset,
+            },
+        )
+        .map_err(|_| "progress_unavailable")?;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| "body_read_failed")?;
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        received = received
+            .checked_add(data.len() as u64)
+            .ok_or("size_mismatch")?;
+        if received > entry.size {
+            return Err("size_mismatch");
+        }
+        file.write_all(&data).map_err(|_| "write_failed")?;
+        hasher.update(&data);
+        if received.saturating_sub(persisted) >= 16 * 1024 * 1024
+            || last_persist.elapsed() >= Duration::from_secs(1)
+        {
+            file.flush().map_err(|_| "write_failed")?;
+            coordinator
+                .store
+                .write_progress(
+                    batch_id,
+                    ordinal,
+                    EntryProgress {
+                        state: flowtype_core::file_transfer::EntryState::Transferring,
+                        committed_offset: received,
+                    },
+                )
+                .map_err(|_| "progress_unavailable")?;
+            persisted = received;
+            last_persist = std::time::Instant::now();
+        }
+    }
+    file.flush().map_err(|_| "write_failed")?;
+    file.sync_all().map_err(|_| "write_failed")?;
+    if received != entry.size {
+        coordinator
+            .store
+            .write_progress(
+                batch_id,
+                ordinal,
+                EntryProgress {
+                    state: flowtype_core::file_transfer::EntryState::WaitingNetwork,
+                    committed_offset: received,
+                },
+            )
+            .map_err(|_| "progress_unavailable")?;
+        return Ok(ReceiveResult {
+            committed_offset: received,
+            completed: false,
+            sha256: None,
+        });
+    }
+    let hash = format!("{:x}", hasher.finalize());
+    if entry
+        .sha256
+        .as_ref()
+        .is_some_and(|expected| !expected.eq_ignore_ascii_case(&hash))
+    {
+        return Err("integrity_failed");
+    }
+    drop(file);
+    if target.exists() {
+        return Err("target_exists");
+    }
+    fs::rename(&part, &target).map_err(|_| "commit_failed")?;
+    coordinator
+        .store
+        .write_progress(
+            batch_id,
+            ordinal,
+            EntryProgress {
+                state: flowtype_core::file_transfer::EntryState::Completed,
+                committed_offset: received,
+            },
+        )
+        .map_err(|_| "progress_unavailable")?;
+    Ok(ReceiveResult {
+        committed_offset: received,
+        completed: true,
+        sha256: Some(hash),
+    })
+}
+
+fn hash_file(path: &std::path::Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 512 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn consume_manifest_lines(
@@ -353,8 +650,9 @@ mod tests {
     #[test]
     fn ticket_is_scoped_to_the_batch_and_rotated_on_reoffer() {
         let root = test_root("tickets");
+        let receive = root.join("receive");
         let coordinator =
-            FileTransferCoordinator::new(FileTransferStore::new(root.clone()).unwrap());
+            FileTransferCoordinator::new(FileTransferStore::new(root.clone()).unwrap(), receive);
         let offer = offer("batch-1");
         let first = coordinator.accept_offer(&offer, "phone-1").unwrap();
         let first_token = ticket_token(first);

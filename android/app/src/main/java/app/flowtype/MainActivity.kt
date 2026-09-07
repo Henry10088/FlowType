@@ -153,6 +153,20 @@ class MainActivity : ComponentActivity() {
         cameraImage = null
         if (saved && uri != null) showImagePreview(uri) else showKeyboard()
     }
+    private val files = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) {
+            uris.forEach(::persistReadPermission)
+            controller.sendFiles(uris)
+        }
+        showInput(focus = false)
+    }
+    private val directory = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            persistReadPermission(uri)
+            controller.sendDirectory(uri)
+        }
+        showInput(focus = false)
+    }
 
     override fun attachBaseContext(base: Context) {
         super.attachBaseContext(LanguageManager.wrap(base))
@@ -308,6 +322,7 @@ class MainActivity : ComponentActivity() {
         }
         findViewById<ImageButton>(R.id.openSettings).setOnClickListener { showSettings() }
         findViewById<ImageButton>(R.id.openImage).setOnClickListener { chooseImageSource() }
+        findViewById<ImageButton>(R.id.openFiles).setOnClickListener { chooseFileSource() }
         renderInput(controller.state())
         applyInputWindowSettings()
         if (focus) showKeyboard()
@@ -347,6 +362,30 @@ class MainActivity : ComponentActivity() {
             .show()
     }
 
+    private fun chooseFileSource() {
+        hideKeyboard()
+        AlertDialog.Builder(this)
+            .setTitle(R.string.file_transfer_title)
+            .setItems(arrayOf(getString(R.string.choose_files), getString(R.string.choose_folder))) { _, which ->
+                if (which == 0) files.launch(arrayOf("*/*")) else directory.launch(null)
+            }
+            .setNegativeButton(R.string.cancel) { _, _ -> showKeyboard() }
+            .show()
+    }
+
+    private fun persistReadPermission(uri: Uri) {
+        runCatching {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+    }
+
+    private fun formatBytes(value: Long): String = when {
+        value >= 1024L * 1024 * 1024 -> String.format("%.1f GB", value / (1024.0 * 1024 * 1024))
+        value >= 1024L * 1024 -> String.format("%.1f MB", value / (1024.0 * 1024))
+        value >= 1024L -> String.format("%.1f KB", value / 1024.0)
+        else -> "$value B"
+    }
+
     private fun launchCamera() {
         val directory = File(cacheDir, "camera").apply { mkdirs() }
         val file = File.createTempFile("flowtype-", ".jpg", directory)
@@ -381,6 +420,18 @@ class MainActivity : ComponentActivity() {
         pair.visibility = if (paired) View.GONE else View.VISIBLE
         findViewById<ImageButton>(R.id.openImage).isEnabled =
             paired && state.imageTransfer != FlowTypeController.ImageTransferState.SENDING
+        findViewById<ImageButton>(R.id.openFiles).isEnabled = paired && !state.fileTransfer.active
+        if (state.fileTransfer.active) {
+            syncStatus.text = state.fileTransfer.error?.let {
+                getString(R.string.file_waiting_network)
+            } ?: getString(
+                R.string.file_transfer_progress,
+                formatBytes(state.fileTransfer.completedBytes),
+                formatBytes(state.fileTransfer.totalBytes),
+            )
+        } else if (state.fileTransfer.batchId != null && state.fileTransfer.error == null) {
+            syncStatus.setText(R.string.file_transfer_complete)
+        }
         status.setTextColor(getColor(
             when {
                 state.binding == null -> R.color.status_neutral

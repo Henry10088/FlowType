@@ -1,10 +1,11 @@
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use flowtype_core::file_transfer::{
-    BatchState, EntryState, MAX_PHONE_ID_BYTES, MAX_WIRE_INTEGER, ManifestEntry, TransferDirection,
-    validate_batch_id,
+    BatchState, EntryKind, EntryState, MAX_PHONE_ID_BYTES, MAX_WIRE_INTEGER, ManifestEntry,
+    TransferDirection, WindowsNameReservation, sanitize_windows_segment, validate_batch_id,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -14,6 +15,8 @@ const BATCH_FILE: &str = "batch.json";
 const MANIFEST_FILE: &str = "manifest.ndjson";
 const MANIFEST_INDEX_FILE: &str = "manifest-index-v1.bin";
 const MANIFEST_COMPLETE_FILE: &str = "manifest-complete.json";
+const TARGETS_FILE: &str = "targets.ndjson";
+const TARGETS_INDEX_FILE: &str = "targets-index-v1.bin";
 const PROGRESS_FILE: &str = "progress-v1.bin";
 const PROGRESS_RECORD_BYTES: u64 = 16;
 const PROGRESS_RECORD_VERSION: u8 = 1;
@@ -101,6 +104,12 @@ struct ManifestComplete {
     sha256: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TargetRecord {
+    ordinal: u64,
+    relative_path: String,
+}
+
 pub(crate) struct FileTransferStore {
     root: PathBuf,
 }
@@ -156,6 +165,123 @@ impl FileTransferStore {
         Ok(batch)
     }
 
+    pub(crate) fn prepare_windows_targets(
+        &self,
+        batch_id: &str,
+        target_root: &Path,
+        now_epoch_seconds: u64,
+    ) -> io::Result<()> {
+        fs::create_dir_all(target_root)?;
+        let directory = self.batch_dir(batch_id)?;
+        let targets_path = directory.join(TARGETS_FILE);
+        let index_path = directory.join(TARGETS_INDEX_FILE);
+        let mut targets = BufWriter::with_capacity(
+            256 * 1024,
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&targets_path)?,
+        );
+        let mut index = BufWriter::with_capacity(
+            64 * 1024,
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&index_path)?,
+        );
+        let mut mapped_directories = HashMap::<String, PathBuf>::new();
+        mapped_directories.insert(String::new(), PathBuf::new());
+        let mut reservations = HashMap::<PathBuf, WindowsNameReservation>::new();
+        let mut source_paths = HashSet::new();
+        let mut next_offset = 0u64;
+        let result = self.for_each_manifest_entry(batch_id, |entry| {
+            if !source_paths.insert(entry.relative_path.to_lowercase()) {
+                return Err(invalid_data(
+                    "manifest contains a case-insensitive path collision",
+                ));
+            }
+            let (source_parent, source_name) = entry
+                .relative_path
+                .rsplit_once('/')
+                .map_or(("", entry.relative_path.as_str()), |(parent, name)| {
+                    (parent, name)
+                });
+            let target_parent = mapped_directories
+                .get(source_parent)
+                .ok_or_else(|| invalid_data("manifest child precedes its directory"))?
+                .clone();
+            let reservation = reservations
+                .entry(target_parent.clone())
+                .or_insert_with(|| {
+                    let absolute = target_root.join(&target_parent);
+                    let existing = fs::read_dir(absolute)
+                        .ok()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Result::ok)
+                        .filter_map(|entry| entry.file_name().into_string().ok())
+                        .collect::<Vec<_>>();
+                    WindowsNameReservation::new(existing)
+                });
+            let target_name = reservation.reserve(
+                &sanitize_windows_segment(source_name),
+                entry.kind == EntryKind::Directory,
+            );
+            let target_relative = target_parent.join(target_name);
+            if entry.kind == EntryKind::Directory {
+                mapped_directories.insert(entry.relative_path.clone(), target_relative.clone());
+            }
+            let record = TargetRecord {
+                ordinal: entry.ordinal,
+                relative_path: path_to_wire(&target_relative)?,
+            };
+            let mut line = serde_json::to_vec(&record).map_err(json_error)?;
+            line.push(b'\n');
+            index.write_all(&next_offset.to_le_bytes())?;
+            targets.write_all(&line)?;
+            next_offset = next_offset
+                .checked_add(line.len() as u64)
+                .ok_or_else(|| invalid_data("target mapping offset overflow"))?;
+            Ok(())
+        });
+        if let Err(error) = result {
+            drop(targets);
+            drop(index);
+            let _ = fs::remove_file(targets_path);
+            let _ = fs::remove_file(index_path);
+            return Err(error);
+        }
+        targets.flush()?;
+        targets.get_ref().sync_all()?;
+        index.flush()?;
+        index.get_ref().sync_all()?;
+        drop(targets);
+        drop(index);
+        let mut batch = self.load_batch(batch_id)?;
+        batch.target_root = Some(target_root.to_string_lossy().into_owned());
+        batch.updated_at_epoch_seconds = now_epoch_seconds.max(batch.updated_at_epoch_seconds);
+        batch.validate()?;
+        crate::atomic_file::write(
+            &directory.join(BATCH_FILE),
+            &serde_json::to_vec(&batch).map_err(json_error)?,
+        )?;
+        self.for_each_manifest_entry(batch_id, |entry| {
+            if entry.kind == EntryKind::Directory {
+                fs::create_dir_all(self.target_path(batch_id, entry.ordinal)?)?;
+                self.write_progress(
+                    batch_id,
+                    entry.ordinal,
+                    EntryProgress {
+                        state: EntryState::Completed,
+                        committed_offset: 0,
+                    },
+                )?;
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     pub(crate) fn begin_manifest(&self, batch_id: &str) -> io::Result<ManifestWriter> {
         let batch = self.load_batch(batch_id)?;
         let expected_entry_count = batch
@@ -179,6 +305,13 @@ impl FileTransferStore {
             hasher: Sha256::new(),
             committed: false,
         })
+    }
+
+    pub(crate) fn manifest_is_complete(&self, batch_id: &str) -> bool {
+        self.batch_dir(batch_id)
+            .ok()
+            .and_then(|directory| read_manifest_complete(&directory).ok())
+            .is_some()
     }
 
     pub(crate) fn for_each_manifest_entry(
@@ -276,6 +409,33 @@ impl FileTransferStore {
         Ok(entry)
     }
 
+    pub(crate) fn target_path(&self, batch_id: &str, ordinal: u64) -> io::Result<PathBuf> {
+        let directory = self.batch_dir(batch_id)?;
+        let batch = self.load_batch(batch_id)?;
+        let root = PathBuf::from(
+            batch
+                .target_root
+                .ok_or_else(|| invalid_data("batch target root is not prepared"))?,
+        );
+        let record: TargetRecord = read_indexed_json_line(
+            &directory.join(TARGETS_FILE),
+            &directory.join(TARGETS_INDEX_FILE),
+            ordinal,
+        )?;
+        if record.ordinal != ordinal {
+            return Err(invalid_data("target index does not match entry"));
+        }
+        let relative = record
+            .relative_path
+            .split('/')
+            .fold(PathBuf::new(), |path, segment| path.join(segment));
+        let result = root.join(relative);
+        if !result.starts_with(&root) {
+            return Err(invalid_data("target path escaped its root"));
+        }
+        Ok(result)
+    }
+
     pub(crate) fn read_progress(&self, batch_id: &str, ordinal: u64) -> io::Result<EntryProgress> {
         let directory = self.batch_dir(batch_id)?;
         let completed = read_manifest_complete(&directory)?;
@@ -322,6 +482,18 @@ impl FileTransferStore {
         }
         batches.sort_by_key(|batch| (batch.created_at_epoch_seconds, batch.batch_id.clone()));
         Ok(batches)
+    }
+
+    pub(crate) fn all_entries_complete(&self, batch_id: &str) -> io::Result<bool> {
+        let mut complete = true;
+        self.for_each_manifest_entry(batch_id, |entry| {
+            let progress = self.read_progress(batch_id, entry.ordinal)?;
+            if progress.state != EntryState::Completed || progress.committed_offset != entry.size {
+                complete = false;
+            }
+            Ok(())
+        })?;
+        Ok(complete)
     }
 
     fn batch_dir(&self, batch_id: &str) -> io::Result<PathBuf> {
@@ -421,6 +593,40 @@ fn read_manifest_complete(directory: &Path) -> io::Result<ManifestComplete> {
     Ok(value)
 }
 
+fn read_indexed_json_line<T: for<'de> Deserialize<'de>>(
+    data_path: &Path,
+    index_path: &Path,
+    ordinal: u64,
+) -> io::Result<T> {
+    let mut index = File::open(index_path)?;
+    index.seek(SeekFrom::Start(
+        ordinal
+            .checked_mul(8)
+            .ok_or_else(|| invalid_data("index offset overflow"))?,
+    ))?;
+    let mut encoded_offset = [0u8; 8];
+    index.read_exact(&mut encoded_offset)?;
+    let mut data = BufReader::new(File::open(data_path)?);
+    data.seek(SeekFrom::Start(u64::from_le_bytes(encoded_offset)))?;
+    let mut line = Vec::new();
+    data.read_until(b'\n', &mut line)?;
+    if line.pop() != Some(b'\n') {
+        return Err(invalid_data("incomplete indexed record"));
+    }
+    serde_json::from_slice(&line).map_err(json_error)
+}
+
+fn path_to_wire(path: &Path) -> io::Result<String> {
+    path.iter()
+        .map(|segment| {
+            segment
+                .to_str()
+                .ok_or_else(|| invalid_data("target path is not Unicode"))
+        })
+        .collect::<io::Result<Vec<_>>>()
+        .map(|segments| segments.join("/"))
+}
+
 fn encode_progress(progress: EntryProgress) -> [u8; PROGRESS_RECORD_BYTES as usize] {
     let mut record = [0u8; PROGRESS_RECORD_BYTES as usize];
     record[0] = PROGRESS_RECORD_VERSION;
@@ -503,6 +709,20 @@ mod tests {
                 .relative_path,
             "资料/说明.txt"
         );
+        let receive = root.join("receive");
+        fs::create_dir_all(receive.join("资料")).unwrap();
+        store
+            .prepare_windows_targets(&batch.batch_id, &receive, 11)
+            .unwrap();
+        assert_eq!(
+            store
+                .target_path(&batch.batch_id, 0)
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            "资料 (1)"
+        );
+        assert!(store.target_path(&batch.batch_id, 0).unwrap().is_dir());
         assert_eq!(
             store.read_progress(&batch.batch_id, 1).unwrap(),
             EntryProgress {

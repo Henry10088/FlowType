@@ -115,4 +115,11 @@
     <string name="error_timeout">Connection timed out</string>
     <string name="error_network_unavailable">Network unavailable</string>
     <string name="error_unknown">Unknown error</string>
+    <string name="send_files">Send files</string>
+    <string name="file_transfer_title">Send to computer</string>
+    <string name="choose_files">Choose files</string>
+    <string name="choose_folder">Choose folder</string>
+    <string name="file_transfer_progress">Sending %1$s / %2$s</string>
+    <string name="file_transfer_complete">Files sent</string>
+    <string name="file_waiting_network">File transfer is waiting for the network</string>
 </resources>

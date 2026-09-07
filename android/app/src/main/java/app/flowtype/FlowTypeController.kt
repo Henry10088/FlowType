@@ -1,15 +1,18 @@
 package app.flowtype
 
 import android.content.Context
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import app.flowtype.data.AppDatabase
 import app.flowtype.data.HistoryEntry
 import app.flowtype.data.HistoryStore
+import app.flowtype.data.FileTransferStore
 import app.flowtype.data.SettingsStore
 import app.flowtype.data.StorageDispatcher
 import app.flowtype.connectivity.ConnectivityDemand
 import app.flowtype.image.PreparedImage
+import app.flowtype.filetransfer.FileTransferManager
 import app.flowtype.network.AutoSelectionCoordinator
 import app.flowtype.network.ComputerDiscovery
 import app.flowtype.network.ControlClientPool
@@ -19,6 +22,7 @@ import app.flowtype.pairing.ComputerBinding
 import app.flowtype.protocol.AckMessage
 import app.flowtype.protocol.ErrorCode
 import app.flowtype.protocol.ErrorMessage
+import app.flowtype.protocol.FileTicketMessage
 import app.flowtype.protocol.SnapshotMessage
 import app.flowtype.protocol.SnapshotType
 import app.flowtype.protocol.TargetMessage
@@ -55,12 +59,15 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         val onlinePcIds: Set<String>,
         val recentActivityPcId: String?,
         val imageTransfer: ImageTransferState,
+        val fileTransfer: FileTransferManager.Snapshot,
         val autoSelecting: Boolean,
     )
 
     private lateinit var database: AppDatabase
     private lateinit var bindings: BindingStore
     private lateinit var history: HistoryStore
+    private lateinit var fileTransferStore: FileTransferStore
+    private lateinit var fileTransfers: FileTransferManager
     private lateinit var settings: SettingsStore
     lateinit var updates: UpdateManager
         private set
@@ -88,6 +95,7 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
     private var recentActivityPcId: String? = null
     private val saveDraft = Runnable { saveDraftNow() }
     private var imageTransfer = ImageTransferState.IDLE
+    private var fileTransfer = FileTransferManager.Snapshot(active = false)
     private var autoSelecting = false
     private var autoSelectionTargetPcId: String? = null
     private var pendingAutoStart: SnapshotMessage? = null
@@ -103,6 +111,7 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         database = AppDatabase(application)
         bindings = BindingStore(application, database)
         history = HistoryStore(database)
+        fileTransferStore = FileTransferStore(database)
         settings = SettingsStore(database)
         drafts = DraftRepository(SecureDraftStore(application), storage)
         sessions = ComputerSessions(
@@ -116,6 +125,16 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
             session.sessionId != null || imageTransfer == ImageTransferState.SENDING
         }
         syncClient = SyncClient(bindings.phoneId, PhoneIdentity(), this)
+        fileTransfers = FileTransferManager(
+            context = application,
+            store = fileTransferStore,
+            phoneId = bindings.phoneId,
+            sendOffer = syncClient::sendFileOffer,
+            onChanged = { snapshot -> onMain {
+                fileTransfer = snapshot
+                notifyChanged()
+            } },
+        )
         controlClients = ControlClientPool(
             phoneId = bindings.phoneId,
             onSwitchComputer = { pcId, completion ->
@@ -202,6 +221,7 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         onlinePcIds = onlinePcIds.toSet(),
         recentActivityPcId = recentActivityPcId,
         imageTransfer = imageTransfer,
+        fileTransfer = fileTransfer,
         autoSelecting = autoSelecting,
     )
 
@@ -232,6 +252,14 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         imageTransfer = ImageTransferState.SENDING
         notifyChanged()
         return true
+    }
+
+    fun sendFiles(uris: List<Uri>) {
+        fileTransfers.createFiles(uris)
+    }
+
+    fun sendDirectory(uri: Uri) {
+        fileTransfers.createDirectory(uri)
     }
 
     fun textChanged(text: String) {
@@ -511,6 +539,8 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
 
     override fun onReady(binding: ComputerBinding) = onMain {
         currentBinding = bindings.markPaired(binding)
+        fileTransfers.setBinding(currentBinding)
+        fileTransfers.resumeRecoverable()
         refreshBindings()
         refreshControlClients()
         connected = true
@@ -664,8 +694,13 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         notifyChanged()
     }
 
+    override fun onFileTicket(ticket: FileTicketMessage) {
+        fileTransfers.onTicket(ticket)
+    }
+
     private fun connect(binding: ComputerBinding) {
         currentBinding = binding
+        fileTransfers.setBinding(binding)
         refreshControlClients()
         connected = false
         showSyncFullText = false
