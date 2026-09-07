@@ -21,7 +21,13 @@ class E2ePairingReceiver : BroadcastReceiver() {
             directory.resolve("empty.bin").writeBytes(byteArrayOf())
             directory.resolve("resume.bin").outputStream().use { output ->
                 val block = ByteArray(1024 * 1024) { index -> (index % 251).toByte() }
-                repeat(12) { output.write(block) }
+                var remaining = intent.getLongExtra(EXTRA_RESUME_BYTES, 12L * block.size)
+                    .coerceIn(0, 1024L * 1024 * 1024)
+                while (remaining > 0) {
+                    val count = minOf(remaining, block.size.toLong()).toInt()
+                    output.write(block, 0, count)
+                    remaining -= count
+                }
             }
             val uris = directory.listFiles().orEmpty().sortedBy { it.name }.map { file ->
                 Uri.parse("content://app.flowtype.e2e/files/${Uri.encode(file.name)}")
@@ -51,5 +57,6 @@ class E2ePairingReceiver : BroadcastReceiver() {
         const val EXTRA_URI_BASE64 = "uri_base64"
         const val ACTION_SEND_FILES = "app.flowtype.E2E_SEND_FILES"
         const val ACTION_CANCEL_FILES = "app.flowtype.E2E_CANCEL_FILES"
+        const val EXTRA_RESUME_BYTES = "resume_bytes"
     }
 }
