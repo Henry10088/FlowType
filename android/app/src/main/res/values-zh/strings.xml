@@ -128,6 +128,12 @@
     <string name="choose_save_location">选择保存位置</string>
     <string name="file_transfer_channel">文件传输</string>
     <string name="file_transfer_notification">正在后台传输文件</string>
+    <string name="file_transfer_events_channel">文件传输动态</string>
+    <string name="file_incoming_title">有文件等待接收</string>
+    <string name="file_incoming_message">%1$s 想发送文件，点击查看。</string>
+    <string name="file_transfer_complete_message">文件传输已完成。</string>
+    <string name="file_transfer_failed_title">文件传输已停止</string>
+    <string name="file_transfer_failed_message">打开说写查看并重试传输。</string>
     <string name="cancel_file_transfer_message">当前有文件正在传输。</string>
     <string name="keep_transferring">继续传输</string>
     <string name="cancel_transfer">取消传输</string>

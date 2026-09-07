@@ -14,6 +14,7 @@ import app.flowtype.connectivity.ConnectivityDemand
 import app.flowtype.image.PreparedImage
 import app.flowtype.filetransfer.FileTransferManager
 import app.flowtype.filetransfer.FileTransferExecution
+import app.flowtype.filetransfer.FileTransferNotifications
 import app.flowtype.network.AutoSelectionCoordinator
 import app.flowtype.network.ComputerDiscovery
 import app.flowtype.network.ControlClientPool
@@ -105,6 +106,7 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
     private var autoSelectionError: LocalizedText? = null
     private var manualStartPending = false
     private var connectivityRunning = false
+    private var uiVisible = false
     private val disconnectInBackground = Runnable {
         if (!connectivityDemand.required) suspendConnectivity()
     }
@@ -136,7 +138,26 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
             sendCancel = syncClient::cancelFileTransfer,
             parallelism = { if (session.sessionId == null) 2 else 1 },
             onChanged = { snapshot -> onMain {
+                val previous = fileTransfer
                 fileTransfer = snapshot
+                if (!uiVisible && snapshot.incomingOffer != null &&
+                    snapshot.incomingOffer.batchId != previous.incomingOffer?.batchId
+                ) {
+                    FileTransferNotifications.showIncoming(
+                        application,
+                        currentBinding?.pcName ?: application.getString(R.string.default_computer),
+                    )
+                }
+                if (snapshot.incomingOffer == null && previous.incomingOffer != null) {
+                    FileTransferNotifications.clearIncoming(application)
+                }
+                if (!uiVisible && previous.active && !snapshot.active && snapshot.batchId != null) {
+                    if (snapshot.error == null) {
+                        FileTransferNotifications.showCompleted(application)
+                    } else {
+                        FileTransferNotifications.showFailed(application)
+                    }
+                }
                 connectivityDemand.setFileTransferActive(snapshot.active)
                 if (snapshot.active) {
                     resumeConnectivity()
@@ -160,14 +181,27 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         discovery = ComputerDiscovery(application, bindings, ::onComputerDiscovered)
 
         refreshBindings()
-        currentBinding = computers.firstOrNull()
+        val recoverableBatch = fileTransferStore.recoverableBatches().firstOrNull()
+        currentBinding = recoveryBinding(computers, recoverableBatch?.pcId)
+        if (recoverableBatch != null && currentBinding?.pcId == recoverableBatch.pcId) {
+            fileTransfer = FileTransferManager.Snapshot(
+                active = true,
+                batchId = recoverableBatch.batchId,
+                totalBytes = recoverableBatch.totalBytes,
+                error = "waiting_network",
+            )
+            connectivityDemand.setFileTransferActive(true)
+        }
         currentBinding?.let {
             statusText = text(R.string.status_connecting, it.pcName)
         }
         drafts.preload(computers.map(ComputerBinding::pcId)) {
             storageReady = true
             currentBinding?.let(::restoreSessionFor)
-            if (connectivityRunning) {
+            if (fileTransfer.active) {
+                FileTransferExecution.start(application)
+                resumeConnectivity()
+            } else if (connectivityRunning) {
                 activateCurrentConnectivity()
             } else {
                 notifyChanged()
@@ -491,11 +525,14 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
     }
 
     fun onUiStarted() {
+        uiVisible = true
+        FileTransferNotifications.clearIncoming(application)
         connectivityDemand.activityStarted()
         resumeConnectivity()
     }
 
     fun onUiStopped() {
+        uiVisible = false
         connectivityDemand.activityStopped()
         scheduleBackgroundDisconnect()
     }
@@ -908,3 +945,8 @@ internal fun restoredDraftRequiresExplicitStart(
     hasActiveSession: Boolean,
     hasText: Boolean,
 ): Boolean = !hasActiveSession && hasText
+
+internal fun recoveryBinding(
+    computers: List<ComputerBinding>,
+    recoverablePcId: String?,
+): ComputerBinding? = computers.firstOrNull { it.pcId == recoverablePcId } ?: computers.firstOrNull()

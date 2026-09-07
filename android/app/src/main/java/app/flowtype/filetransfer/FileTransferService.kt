@@ -50,7 +50,7 @@ class FileTransferService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_CANCEL) controller.cancelFileTransfer()
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     override fun onDestroy() {

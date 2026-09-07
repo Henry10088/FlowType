@@ -128,6 +128,12 @@
     <string name="choose_save_location">Choose save location</string>
     <string name="file_transfer_channel">File transfers</string>
     <string name="file_transfer_notification">Transferring files in the background</string>
+    <string name="file_transfer_events_channel">File transfer updates</string>
+    <string name="file_incoming_title">Files ready to receive</string>
+    <string name="file_incoming_message">%1$s wants to send files. Tap to review.</string>
+    <string name="file_transfer_complete_message">The file transfer completed.</string>
+    <string name="file_transfer_failed_title">File transfer stopped</string>
+    <string name="file_transfer_failed_message">Open FlowType to review and retry the transfer.</string>
     <string name="cancel_file_transfer_message">A file transfer is in progress.</string>
     <string name="keep_transferring">Keep transferring</string>
     <string name="cancel_transfer">Cancel transfer</string>
