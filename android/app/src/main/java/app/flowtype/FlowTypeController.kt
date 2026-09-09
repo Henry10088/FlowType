@@ -11,7 +11,6 @@ import app.flowtype.data.StorageDispatcher
 import app.flowtype.connectivity.ConnectivityDemand
 import app.flowtype.image.PreparedImage
 import app.flowtype.network.AutoSelectionCoordinator
-import app.flowtype.network.ComputerDiscovery
 import app.flowtype.network.ControlClientPool
 import app.flowtype.network.SyncClient
 import app.flowtype.pairing.BindingStore
@@ -72,7 +71,6 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         get() = sessions.current
     private lateinit var syncClient: SyncClient
     private lateinit var autoSelection: AutoSelectionCoordinator
-    private lateinit var discovery: ComputerDiscovery
     private lateinit var controlClients: ControlClientPool
     private val mainHandler = Handler(Looper.getMainLooper())
     private val connectivityDemand = ConnectivityDemand()
@@ -121,12 +119,13 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
             onSwitchComputer = { pcId, completion ->
                 onMain { switchFromWindows(pcId, completion) }
             },
+            onConnectionChanged = { pcId, isConnected ->
+                onMain { onControlConnectionChanged(pcId, isConnected) }
+            },
         )
         autoSelection = AutoSelectionCoordinator(
             app.flowtype.network.TargetProbeClient(bindings.phoneId, PhoneIdentity()),
         )
-        discovery = ComputerDiscovery(application, bindings, ::onComputerDiscovered)
-
         refreshBindings()
         currentBinding = computers.firstOrNull()
         currentBinding?.let {
@@ -469,7 +468,6 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         mainHandler.removeCallbacks(disconnectInBackground)
         if (connectivityRunning) return
         connectivityRunning = true
-        discovery.start()
         refreshControlClients()
         if (storageReady) activateCurrentConnectivity()
     }
@@ -501,7 +499,6 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         clearAutoSelection()
         syncClient.shutdown()
         controlClients.shutdown()
-        discovery.stop()
         onlinePcIds.clear()
         connected = false
         targetState = null
@@ -766,11 +763,11 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         autoSelectionError = null
     }
 
-    private fun onComputerDiscovered(pcId: String, endpoint: String?) = onMain {
-        if (endpoint == null) {
-            onlinePcIds -= pcId
-        } else {
+    private fun onControlConnectionChanged(pcId: String, connected: Boolean) {
+        if (connected) {
             onlinePcIds += pcId
+        } else {
+            onlinePcIds -= pcId
         }
         notifyChanged()
     }

@@ -83,10 +83,21 @@ fn main() -> io::Result<()> {
     ));
     let mut session = None;
     let mut completed = None;
+    let mut accept_failure_logged = false;
     loop {
         let mut pipe = match accept_pipe(&pipe_sddl) {
-            Ok(pipe) => pipe,
-            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => continue,
+            Ok(pipe) => {
+                accept_failure_logged = false;
+                pipe
+            }
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                if !accept_failure_logged {
+                    diagnostics::log(format!("injector pipe accept denied: {error}"));
+                    accept_failure_logged = true;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+                continue;
+            }
             Err(error) => return Err(error),
         };
         while let Ok(request) = read_message(&mut pipe) {

@@ -58,7 +58,7 @@ impl Direct2dPainter {
             let write: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let icon = text_format(
                 &write,
-                w!("Segoe Fluent Icons"),
+                w!("Segoe MDL2 Assets"),
                 DWRITE_FONT_WEIGHT_NORMAL,
                 20.0,
             )?;

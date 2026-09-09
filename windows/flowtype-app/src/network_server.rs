@@ -2,12 +2,8 @@ use super::*;
 
 const INPUT_SESSION_DISCONNECT_GRACE: Duration = Duration::from_millis(1_500);
 
-pub(super) async fn run_network(
-    state: Arc<AppState>,
-    endpoint_host: IpAddr,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) async fn run_network(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
     let tls = tls_acceptor(&state.identity)?;
-    let _mdns = advertise(&state.identity, endpoint_host)?;
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, PORT)).await?;
     let connection_slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let connection_limiter = ConnectionLimiter::new();
@@ -31,29 +27,6 @@ pub(super) async fn run_network(
             }
         });
     }
-}
-
-fn advertise(
-    identity: &PcIdentity,
-    address: IpAddr,
-) -> Result<ServiceDaemon, Box<dyn std::error::Error>> {
-    let daemon = ServiceDaemon::new()?;
-    let short_id = identity.pc_id.chars().take(8).collect::<String>();
-    let host = format!("flowtype-{short_id}.local.");
-    let properties = [
-        ("pc_id", identity.pc_id.as_str()),
-        ("protocol_version", "2"),
-    ];
-    let service = ServiceInfo::new(
-        "_flowtype._tcp.local.",
-        &identity.pc_id,
-        &host,
-        address,
-        PORT,
-        &properties[..],
-    )?;
-    daemon.register(service)?;
-    Ok(daemon)
 }
 
 async fn serve_connection(

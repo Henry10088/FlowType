@@ -28,6 +28,7 @@ use crate::diagnostics;
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 const TIP_RESPONSE_TIMEOUT: Duration = Duration::from_millis(1_500);
 const TIP_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const PIPE_ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TipKey {
@@ -183,9 +184,21 @@ impl TipRegistry {
     }
 
     fn listen(self: Arc<Self>, pipe_sddl: Vec<u16>) {
+        let mut accept_failure_logged = false;
         loop {
-            let Ok(pipe) = accept_tip_pipe(&pipe_sddl) else {
-                continue;
+            let pipe = match accept_tip_pipe(&pipe_sddl) {
+                Ok(pipe) => {
+                    accept_failure_logged = false;
+                    pipe
+                }
+                Err(error) => {
+                    if !accept_failure_logged {
+                        diagnostics::log(format!("tip_pipe accept failed: {error}"));
+                        accept_failure_logged = true;
+                    }
+                    thread::sleep(PIPE_ACCEPT_RETRY_DELAY);
+                    continue;
+                }
             };
             let registry = self.clone();
             thread::spawn(move || registry.serve_client(pipe));

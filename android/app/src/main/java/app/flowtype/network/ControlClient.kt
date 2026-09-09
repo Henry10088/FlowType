@@ -39,6 +39,7 @@ class ControlClient(
 ) {
     interface Listener {
         fun onSwitchComputer(pcId: String, completion: (Boolean) -> Unit)
+        fun onConnectionChanged(pcId: String, connected: Boolean)
     }
 
     private val lock = Any()
@@ -51,6 +52,7 @@ class ControlClient(
     private var reconnectRunnable: Runnable? = null
     private var connectTimeoutRunnable: Runnable? = null
     private var stopped = true
+    private var ready = false
 
     fun update(next: ComputerBinding) {
         synchronized(lock) {
@@ -81,6 +83,7 @@ class ControlClient(
     }
 
     private fun stopLocked() {
+        setReadyLocked(false)
         stopped = true
         generation += 1
         reconnectRunnable?.let(handler::removeCallbacks)
@@ -185,6 +188,7 @@ class ControlClient(
                             connectTimeoutRunnable?.let(handler::removeCallbacks)
                             connectTimeoutRunnable = null
                             reconnectAttempt = 0
+                            setReadyLocked(true)
                         }
                         "switch_computer" -> {
                             if (value.optInt("protocol_version", PROTOCOL_VERSION) != PROTOCOL_VERSION) return@runCatching
@@ -229,6 +233,7 @@ class ControlClient(
         cancelSocket: Boolean,
     ) {
         if (currentGeneration != generation || stopped) return
+        setReadyLocked(false)
         generation += 1
         connectTimeoutRunnable?.let(handler::removeCallbacks)
         connectTimeoutRunnable = null
@@ -236,6 +241,12 @@ class ControlClient(
         socket = null
         binding = current
         scheduleReconnectLocked()
+    }
+
+    private fun setReadyLocked(value: Boolean) {
+        if (ready == value) return
+        ready = value
+        binding?.let { listener.onConnectionChanged(it.pcId, value) }
     }
 
     private companion object {

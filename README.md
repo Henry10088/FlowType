@@ -54,13 +54,13 @@ Pairings persist until explicitly removed. A single phone can pair with multiple
 | --- | --- |
 | Is my text protected on an untrusted LAN or Wi-Fi network? | **Yes.** Provided that the QR code was scanned from the intended PC and neither endpoint is compromised, TLS 1.3 keeps the content encrypted and detects tampering. |
 | After correct pairing, can a router, gateway, or another device on the network impersonate my PC or phone? | **No, while the device keys remain protected.** Android accepts only the Windows public key pinned during QR pairing, and Windows requires a fresh signature from the paired phone on every connection. An intermediary can block the connection, but cannot silently read or alter accepted text. |
-| What can the local network observe? | IP addresses, ports, connection timing, approximate traffic volume, and the mDNS online advertisement. It cannot see the input content. |
+| What can the local network observe? | IP addresses, ports, connection timing, and approximate traffic volume. FlowType does not broadcast a discovery advertisement, and the network cannot see the input content. |
 | Does input content pass through a FlowType public server? | **No.** Input travels directly between the phone and the selected PC over LAN or Tailscale. GitHub is contacted separately for update checks and downloads. |
 | Where is completed text history kept? | Android stores it locally in encrypted form. FlowType does not create a completed-text history on Windows. |
 
 ### How the protection works
 
-FlowType establishes trust out-of-band via QR code pairing. Local mDNS discovery is used strictly to detect whether already-paired PCs are online; it cannot initiate unauthorized pairings or override saved addresses and pinned public keys.
+FlowType establishes trust out-of-band via QR code pairing and keeps the first endpoint that completes authentication. A PC is shown as online only after its encrypted sync or control connection is authenticated; online state never replaces the saved address or pinned public key.
 
 - **Encrypted Transport**: All communication is secured via TLS 1.3 with certificate public-key pinning established during pairing. Local network observers (such as routers or gateways) cannot inspect or tamper with your text.
 - **Device Authentication**: The pairing QR code embeds a single-use token. Subsequent reconnections use fresh cryptographic challenges signed by a separate Android Keystore key for each PC. Hardware-backed storage depends on the Android device.

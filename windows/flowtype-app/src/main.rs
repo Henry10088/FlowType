@@ -29,7 +29,6 @@ use flowtype_core::protocol::{
     TargetState,
 };
 use futures_util::{SinkExt, StreamExt};
-use mdns_sd::{ServiceDaemon, ServiceInfo};
 use p256::ecdsa::signature::Verifier;
 use p256::ecdsa::{Signature, VerifyingKey};
 use p256::pkcs8::DecodePublicKey;
@@ -391,7 +390,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .spawn(move || {
                 let runtime =
                     tokio::runtime::Runtime::new().expect("cannot create network runtime");
-                if let Err(error) = runtime.block_on(run_network(network_state, endpoint_host)) {
+                if let Err(error) = runtime.block_on(run_network(network_state)) {
                     eprintln!("network stopped: {error}");
                     network_error_state.update_status(|status| {
                         status.summary = tr("连接服务不可用", "Connection unavailable").to_owned();

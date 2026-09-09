@@ -93,7 +93,9 @@ impl UiContext {
         self.heading_font = create_font(self.scale(17), FW_SEMIBOLD as i32, "Segoe UI");
         self.navigation_font = create_font(self.scale(15), FW_SEMIBOLD as i32, "Segoe UI");
         self.body_font = create_font(self.scale(14), FW_NORMAL as i32, "Segoe UI");
-        self.icon_font = create_font(self.scale(20), FW_NORMAL as i32, "Segoe Fluent Icons");
+        // These code points are from the broadly available MDL2 icon set.
+        // Fluent Icons does not contain all of them on older Windows builds.
+        self.icon_font = create_font(self.scale(20), FW_NORMAL as i32, "Segoe MDL2 Assets");
     }
 
     pub(super) fn rebuild_page(&mut self) {

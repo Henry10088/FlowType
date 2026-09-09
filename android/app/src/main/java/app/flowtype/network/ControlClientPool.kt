@@ -6,6 +6,7 @@ import app.flowtype.security.PhoneIdentity
 class ControlClientPool(
     private val phoneId: String,
     private val onSwitchComputer: (String, (Boolean) -> Unit) -> Unit,
+    private val onConnectionChanged: (String, Boolean) -> Unit,
     private val identityFactory: () -> PhoneIdentity = ::PhoneIdentity,
 ) {
     private val clients = mutableMapOf<String, ControlClient>()
@@ -26,6 +27,9 @@ class ControlClientPool(
                         pcId: String,
                         completion: (Boolean) -> Unit,
                     ) = this@ControlClientPool.onSwitchComputer(pcId, completion)
+
+                    override fun onConnectionChanged(pcId: String, connected: Boolean) =
+                        this@ControlClientPool.onConnectionChanged(pcId, connected)
                 })
             }.update(binding)
         }

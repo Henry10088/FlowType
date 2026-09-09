@@ -13,6 +13,7 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::SS_NOPREFIX;
+use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows_sys::Win32::UI::Controls::{
     DRAWITEMSTRUCT, ICC_PROGRESS_CLASS, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX,
     InitCommonControlsEx, ODS_FOCUS, ODS_SELECTED, PBM_SETPOS, PBM_SETRANGE32, PBS_SMOOTH,
@@ -245,10 +246,11 @@ pub fn run(
         return Err(std::io::Error::last_os_error().into());
     }
     if visible {
-        unsafe {
-            ShowWindow(hwnd, SW_SHOW);
-            UpdateWindow(hwnd)
-        };
+        // The installer can still own the foreground window when --show starts.
+        // Restore and activate the main window so it is visible to the user
+        // instead of being hidden behind the installer or floating ball.
+        show_window(hwnd);
+        unsafe { UpdateWindow(hwnd) };
     }
     let mut message: MSG = unsafe { zeroed() };
     while unsafe { GetMessageW(&mut message, null_mut(), 0, 0) } > 0 {
@@ -525,8 +527,26 @@ fn create_navigation(ui: &mut UiContext) {
 
 fn show_window(hwnd: HWND) {
     unsafe {
+        // AttachThreadInput requires the calling thread to own a USER queue.
+        let mut message: MSG = zeroed();
+        PeekMessageW(&mut message, null_mut(), 0, 0, PM_NOREMOVE);
         ShowWindow(hwnd, SW_RESTORE);
-        SetForegroundWindow(hwnd)
+        let foreground = GetForegroundWindow();
+        let current_thread = GetCurrentThreadId();
+        let foreground_thread = if foreground.is_null() {
+            0
+        } else {
+            GetWindowThreadProcessId(foreground, null_mut())
+        };
+        let attached = foreground_thread != 0 && foreground_thread != current_thread;
+        if attached {
+            AttachThreadInput(current_thread, foreground_thread, 1);
+        }
+        BringWindowToTop(hwnd);
+        SetForegroundWindow(hwnd);
+        if attached {
+            AttachThreadInput(current_thread, foreground_thread, 0);
+        }
     };
 }
 

@@ -10,7 +10,7 @@ This document describes the security properties implemented by FlowType protocol
 | --- | --- |
 | Is input protected if the LAN, Wi-Fi, router, or gateway is not trusted? | **Yes, within the documented endpoint assumptions.** TLS 1.3 encrypts accepted text and images, while the QR-pinned Windows public key prevents an on-path device from substituting its own server certificate. |
 | Can an intermediary impersonate a previously paired phone? | **No.** Windows requires a valid signature over a new random challenge on every connection. A copied phone public key can verify signatures but cannot create them. |
-| What can an intermediary do? | It can observe connection metadata and mDNS presence, delay packets, or block the connection. It cannot silently decrypt or modify content accepted by FlowType. |
+| What can an intermediary do? | It can observe connection metadata, delay packets, or block the connection. FlowType does not broadcast a discovery advertisement, and an intermediary cannot silently decrypt or modify accepted content. |
 | Does input content depend on a public FlowType relay? | **No.** The content path is a direct connection between the selected phone and PC. GitHub access is separate and is used for software updates. |
 | What is the main remaining trust boundary? | The phone, its selected input method, the PC, and the target application can access plaintext as part of providing input. A compromised endpoint is outside this model. |
 
@@ -82,11 +82,11 @@ This prevents a router or other on-path device from substituting its own certifi
 
 Tailscale adds its own network-layer encryption when it is used. FlowType's TLS layer remains enabled on Tailscale and does not depend on Tailscale for application identity.
 
-### Local discovery metadata
+### Online-state connections
 
-Windows advertises `_flowtype._tcp.local.` over mDNS so Android can show the online state of computers that are already paired. The advertisement exposes the PC ID, protocol version, address, and port to the local network. It is not an authentication mechanism.
+FlowType does not advertise a discovery service. After QR pairing, Android reconnects only to the saved endpoint and considers a PC online only after the encrypted sync or control connection receives an authenticated `ready` response.
 
-Android ignores advertisements whose PC ID is not already in its binding database. A matching advertisement changes only the online indicator; it does not replace the saved endpoint, TLS pin, or phone binding. A local attacker can observe or spoof this presence signal and may make the online indicator inaccurate, but the attacker must still pass the pinned TLS handshake and phone authentication before FlowType accepts content.
+This makes the online indicator an authenticated connection result instead of a spoofable LAN presence signal. It never replaces the saved endpoint, TLS pin, or phone binding. A changed address requires the user to pair the computer again.
 
 ## Phone authentication and replay protection
 
@@ -175,7 +175,7 @@ FlowType does not claim to protect input content from:
 - the selected Windows application, which necessarily receives the input text;
 - denial of service, including blocked traffic, unavailable networks, powered-off routers, or an application that refuses text injection.
 
-FlowType also cannot hide connection metadata or its mDNS presence advertisement from the local network. Its goal is confidentiality and integrity of accepted content, device authentication, and a narrow elevated Windows interface.
+FlowType cannot hide ordinary connection metadata from the local network. Its goal is confidentiality and integrity of accepted content, device authentication, and a narrow elevated Windows interface.
 
 ## Recommended user practices
 

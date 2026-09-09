@@ -404,13 +404,13 @@ full_text
 
 Android 草稿允许在不超过 200 ms 的短窗口内合并落盘，并在进入后台、切换输入表面和点击“新会话”时立即提交。Windows 不持久化输入事务日志；异常恢复以保留手机完整正文为优先。
 
-## 13. 发现与多地址
+## 13. 固定地址与在线状态
 
 - 初次绑定使用二维码中的多个候选地址和电脑身份，并逐个尝试到首个完整收到 `ready` 的地址。
-- 首次成功后只保存该固定地址并丢弃其他候选；后续断线、重启和 mDNS 发现都不得自动更换地址。
-- 局域网发现只广播服务类型、随机电脑 ID、端口和协议版本。
-- 不广播电脑自定义名称、Windows 用户名或已绑定手机。
-- mDNS 只更新在线状态；固定地址变化时用户需要重新添加电脑。
+- 首次成功后只保存该固定地址并丢弃其他候选；后续断线和重启都不得自动更换地址。
+- 不广播服务发现信息、电脑自定义名称、Windows 用户名或已绑定手机。
+- 当前电脑的同步连接或非当前电脑的控制连接收到已认证的 `ready` 后才显示在线；连接断开后立即显示未连接。
+- 固定地址变化时用户需要重新添加电脑。
 - V1 不提供手工填写 IP 或配对码。
 
 ## 14. 密钥与本地数据
@@ -506,7 +506,7 @@ V1 不承诺防御已经取得 Android root、Windows 管理员权限、屏幕�
 - Android 悬浮输入使用系统应用上层窗口和仅在该模式开启时运行的轻量前台服务，不使用无障碍服务。
 - Windows 使用 Rust、Win32 和 Common Controls，不使用 Slint、WebView 或 WinUI 3。
 - 局域网传输使用 WSS/TLS 1.3，业务消息使用 JSON。
-- Android 使用 OkHttp、Android Keystore、原生 SQLite 和系统局域网发现能力。
+- Android 使用 OkHttp、Android Keystore 和原生 SQLite。
 - Windows 使用 `windows`、`tokio`、`tokio-tungstenite`、`rustls` 和原生 Windows 系统能力。
 - Windows 安装包使用 Inno Setup；两端在线更新直接使用 GitHub Releases、签名清单和系统后台下载能力，详细边界见 [GitHub 在线更新设计基线](update-design-v1.md)。
 - 各目标应用中的 Unicode、字素退格和 Enter 注入细节通过真实兼容性验证确定。
