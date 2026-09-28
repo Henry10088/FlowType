@@ -1,7 +1,7 @@
 [
   {
     "protocol_version": 2,
-    "transfer_version": 1,
+    "transfer_version": 2,
     "type": "file_offer",
     "phone_id": "phone-1",
     "batch_id": "batch-1",
@@ -13,7 +13,7 @@
   },
   {
     "protocol_version": 2,
-    "transfer_version": 1,
+    "transfer_version": 2,
     "type": "file_ticket",
     "batch_id": "batch-1",
     "data_port": 32188,

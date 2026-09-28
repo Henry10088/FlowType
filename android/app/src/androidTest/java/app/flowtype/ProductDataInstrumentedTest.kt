@@ -217,6 +217,79 @@ class ProductDataInstrumentedTest {
     }
 
     @Test
+    fun reselectingAnotherTreeResetsPartialTargetsButPreservesCompletedFiles() {
+        val databaseName = "flowtype-reselection-${UUID.randomUUID()}.db"
+        val database = AppDatabase(context, databaseName)
+        try {
+            val store = FileTransferStore(database)
+            store.createBatch(FileTransferBatch("reselect", "pc-1", TransferDirection.COMPUTER_TO_PHONE,
+                TransferBatchState.WAITING_CONFIRMATION, 1, 1, 2, 1, 84, null))
+            store.appendManifestPage("reselect", listOf(
+                stored(0, "folder", TransferEntryKind.DIRECTORY, 0),
+                stored(1, "folder/partial", TransferEntryKind.FILE, 42),
+                stored(2, "folder/completed", TransferEntryKind.FILE, 42),
+            ))
+            store.setTargetTree("reselect", "content://documents/tree/old", 2)
+            for (ordinal in 0L..2L) {
+                store.setEntryTarget("reselect", ordinal, "content://documents/old/$ordinal", "file-$ordinal", "content://documents/old")
+            }
+            store.updateEntryProgress("reselect", 0, TransferEntryState.COMPLETED, 0)
+            store.updateEntryProgress("reselect", 1, TransferEntryState.WAITING_NETWORK, 16)
+            store.updateEntryProgress("reselect", 2, TransferEntryState.COMPLETED, 42)
+            store.setTargetTree("reselect", "content://documents/tree/old", 3)
+            assertEquals(16L, store.entry("reselect", 1)?.committedOffset)
+            assertEquals("content://documents/old/1", store.entry("reselect", 1)?.targetUri)
+            store.setTargetTree("reselect", "content://documents/tree/new", 4)
+            assertEquals(null, store.entry("reselect", 0)?.targetUri)
+            assertEquals(null, store.entry("reselect", 1)?.targetUri)
+            assertEquals(null, store.entry("reselect", 1)?.targetParentUri)
+            assertEquals(0L, store.entry("reselect", 1)?.committedOffset)
+            assertEquals(TransferEntryState.PENDING, store.entry("reselect", 1)?.state)
+            assertEquals("content://documents/old/2", store.entry("reselect", 2)?.targetUri)
+            assertEquals(TransferEntryState.COMPLETED, store.entry("reselect", 2)?.state)
+        } finally {
+            database.close()
+            context.deleteDatabase(databaseName)
+        }
+    }
+
+    @Test
+    fun recoveryUsesOnlySelectedComputerAndTerminalReceiptClearsPendingBatch() {
+        val databaseName = "flowtype-recovery-${UUID.randomUUID()}.db"
+        val database = AppDatabase(context, databaseName)
+        val store = FileTransferStore(database)
+        val requests = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val completed = java.util.concurrent.CountDownLatch(1)
+        val manager = app.flowtype.filetransfer.FileTransferManager(
+            context, store, "phone-1",
+            sendOffer = { pcId, offer -> requests += "$pcId:${offer.batchId}"; true },
+            sendDecision = { pcId, batchId, _ -> requests += "$pcId:$batchId"; true },
+            sendCancel = { _, _ -> true },
+            parallelism = { 1 },
+            onChanged = { if (!it.active && it.batchId == "selected") completed.countDown() },
+        )
+        try {
+            val now = System.currentTimeMillis()
+            store.createBatch(FileTransferBatch("other", "pc-a", TransferDirection.PHONE_TO_COMPUTER,
+                TransferBatchState.WAITING_NETWORK, now, now, 1, 0, 42, null))
+            store.createBatch(FileTransferBatch("selected", "pc-b", TransferDirection.COMPUTER_TO_PHONE,
+                TransferBatchState.WAITING_NETWORK, now, now, 1, 0, 42, "content://documents/tree/target"))
+            manager.setBinding(binding("pc-b"))
+            manager.resumeRecoverable()
+            // The worker processes the receipt after all recovery requests.
+            manager.onResult("selected", TransferBatchState.COMPLETED)
+            assertTrue(completed.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals(listOf("pc-b:selected"), requests.toList())
+            assertEquals(TransferBatchState.COMPLETED, store.loadBatch("selected")?.state)
+            assertEquals(TransferBatchState.WAITING_NETWORK, store.loadBatch("other")?.state)
+        } finally {
+            manager.close()
+            database.close()
+            context.deleteDatabase(databaseName)
+        }
+    }
+
+    @Test
     fun fileTransferSchemaUpgradesFromVersionsFourAndFive() {
         listOf(4, 5).forEach { oldVersion ->
             val databaseName = "flowtype-migration-$oldVersion-${UUID.randomUUID()}.db"

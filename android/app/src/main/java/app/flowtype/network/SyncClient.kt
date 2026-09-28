@@ -67,6 +67,8 @@ class SyncClient(
         fun onImageTransferFailed(transferId: String)
         fun onFileTicket(ticket: FileTicketMessage) = Unit
         fun onFileOffer(offer: FileOfferMessage) = Unit
+        fun onFileResult(batchId: String, state: app.flowtype.protocol.TransferBatchState) = Unit
+        fun onFileError(batchId: String, code: String) = Unit
     }
 
     private val lock = Any()
@@ -76,6 +78,7 @@ class SyncClient(
     private var socket: WebSocket? = null
     private var binding: ComputerBinding? = null
     private var ready = false
+    private var fileTransferSupported = false
     private var stopped = false
     private var generation = 0L
     private var reconnectAttempt = 0
@@ -143,22 +146,30 @@ class SyncClient(
         sent
     }
 
-    fun sendFileOffer(offer: FileOfferMessage): Boolean = synchronized(lock) {
-        if (!ready || offer.phoneId != phoneId) return@synchronized false
+    fun sendFileOffer(pcId: String, offer: FileOfferMessage): Boolean = synchronized(lock) {
+        if (!ready || binding?.pcId != pcId || offer.phoneId != phoneId) return@synchronized false
+        if (!fileTransferSupported) {
+            listener.onFileError(offer.batchId, "file_transfer_requires_update")
+            return@synchronized true
+        }
         runCatching { offer.validate(phoneId) }.getOrElse { return@synchronized false }
         val sent = socket?.send(FileTransferCodec.encodeOffer(offer)) == true
         if (sent) pendingFileOffers += offer.batchId
         sent
     }
 
-    fun cancelFileTransfer(batchId: String): Boolean = synchronized(lock) {
-        if (!ready) return@synchronized false
+    fun cancelFileTransfer(pcId: String, batchId: String): Boolean = synchronized(lock) {
+        if (!ready || binding?.pcId != pcId) return@synchronized false
         pendingFileOffers -= batchId
         socket?.send(FileTransferCodec.encodeCancel(FileCancelMessage(batchId))) == true
     }
 
-    fun decideFileOffer(batchId: String, accepted: Boolean): Boolean = synchronized(lock) {
-        if (!ready) return@synchronized false
+    fun decideFileOffer(pcId: String, batchId: String, accepted: Boolean): Boolean = synchronized(lock) {
+        if (!ready || binding?.pcId != pcId) return@synchronized false
+        if (!fileTransferSupported) {
+            listener.onFileError(batchId, "file_transfer_requires_update")
+            return@synchronized true
+        }
         val decision = app.flowtype.protocol.FileDecisionMessage(batchId, accepted)
         decision.validate()
         val sent = socket?.send(FileTransferCodec.encodeDecision(decision)) == true
@@ -266,7 +277,7 @@ class SyncClient(
             .put("type", if (current.pairingToken == null) "authenticate" else "pair")
             .put("phone_id", phoneId)
             .put("phone_name", Build.MODEL.ifBlank { "Android" })
-            .put("capabilities", JSONArray(listOf("health_check", "switch_ack")))
+            .put("capabilities", JSONArray(listOf("health_check", "switch_ack", "file_transfer_v2")))
             .put(
                 "signature",
                 Base64.encodeToString(phoneIdentity.sign(current.pcId, payload), Base64.NO_WRAP),
@@ -417,6 +428,9 @@ class SyncClient(
                         connectTimeoutRunnable = null
                         ready = true
                         reconnectAttempt = 0
+                        fileTransferSupported = value.optJSONArray("capabilities")?.let { capabilities ->
+                            (0 until capabilities.length()).any { capabilities.optString(it) == "file_transfer_v2" }
+                        } == true
                         healthCheckSupported = value.optJSONArray("capabilities")?.let { capabilities ->
                             (0 until capabilities.length()).any {
                                 capabilities.optString(it) == "health_check"
@@ -440,6 +454,19 @@ class SyncClient(
                                 pendingImageId = null
                                 listener.onImageTransferFailed(reply.transferId)
                             }
+                        }
+                    }
+                    "file_result", "file_error" -> {
+                        val reply = JSONObject(text)
+                        val batchId = reply.getString("batch_id")
+                        if (!pendingFileOffers.remove(batchId) && !acceptedIncomingBatches.remove(batchId)) return
+                        if (reply.getString("type") == "file_result") {
+                            val state = app.flowtype.protocol.TransferBatchState.entries.single {
+                                it.wireName == reply.getString("state") && it.terminal
+                            }
+                            listener.onFileResult(batchId, state)
+                        } else {
+                            listener.onFileError(batchId, reply.getString("code"))
                         }
                     }
                     "file_ticket" -> {

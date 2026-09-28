@@ -146,4 +146,5 @@
     <string name="keep_transferring">Keep transferring</string>
     <string name="cancel_transfer">Cancel transfer</string>
     <string name="file_reselect_message">FlowType no longer has access to the save folder. Choose that folder again to continue.</string>
+    <string name="file_transfer_requires_update">Update FlowType on both devices to transfer files.</string>
 </resources>

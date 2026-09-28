@@ -146,4 +146,5 @@
     <string name="keep_transferring">继续传输</string>
     <string name="cancel_transfer">取消传输</string>
     <string name="file_reselect_message">说写已无法访问保存文件夹，请重新选择该文件夹后继续。</string>
+    <string name="file_transfer_requires_update">请更新手机和电脑上的 FlowType 后再传输文件。</string>
 </resources>

@@ -101,7 +101,11 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
         val entry = stored.manifest
         entry.validate()
         require(offset in 0..entry.size)
-        var localHash: String? = null
+        if (offset > 0 && offset == entry.size) {
+            val hash = hashSource(resolver, source)
+            verifyDownloadedFile(ticket, entry, hash)
+            return FileUploadReceipt(offset, true, hash)
+        }
         val remainingLength = entry.size - offset
         val body = object : RequestBody() {
             override fun contentType() = OCTET_STREAM
@@ -127,7 +131,6 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
                     }
                     check(input.read() == -1) { "source became larger" }
                 }
-                localHash = hashSource(resolver, source)
             }
         }
         val request = authorizedRequest(ticket, "entries/${entry.entryId}")
@@ -141,10 +144,13 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
             val committed = value.getLong("committed_offset")
             val completed = value.getBoolean("completed")
             val remoteHash = value.optString("sha256").ifEmpty { null }
-            if (completed) {
-                check(committed == entry.size && remoteHash != null && remoteHash == localHash) {
+            if (committed == entry.size) {
+                val localHash = hashSource(resolver, source)
+                check(remoteHash != null && remoteHash == localHash) {
                     "file integrity check failed"
                 }
+                verifyDownloadedFile(ticket, entry, requireNotNull(localHash))
+                return FileUploadReceipt(committed, true, remoteHash)
             }
             return FileUploadReceipt(committed, completed, remoteHash)
         }

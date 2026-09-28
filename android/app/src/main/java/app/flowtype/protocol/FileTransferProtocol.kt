@@ -3,7 +3,7 @@ package app.flowtype.protocol
 import org.json.JSONArray
 import org.json.JSONObject
 
-const val FILE_TRANSFER_VERSION: Int = 1
+const val FILE_TRANSFER_VERSION: Int = 2
 const val MAX_PHONE_ID_BYTES: Int = 128
 const val MAX_BATCH_ID_BYTES: Int = 64
 const val MAX_ENTRY_ID_BYTES: Int = 64

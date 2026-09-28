@@ -764,6 +764,14 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         fileTransfers.onOffer(offer)
     }
 
+    override fun onFileResult(batchId: String, state: app.flowtype.protocol.TransferBatchState) {
+        fileTransfers.onResult(batchId, state)
+    }
+
+    override fun onFileError(batchId: String, code: String) {
+        fileTransfers.onError(batchId, code)
+    }
+
     private fun connect(binding: ComputerBinding) {
         currentBinding = binding
         fileTransfers.setBinding(binding)

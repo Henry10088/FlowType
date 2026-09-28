@@ -24,7 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use flowtype_core::file_transfer::{FileClientMessage, FileOffer, FileServerMessage};
+use flowtype_core::file_transfer::{FileOffer, FileServerMessage};
 use flowtype_core::ipc::{InjectorRequest, InjectorResponse};
 use flowtype_core::protocol::{
     Ack, Cancel, ClientMessage, ClientSessionState, ErrorCode, HealthAck, ProbeResult, ProbeState,
@@ -821,7 +821,6 @@ impl AppState {
         phone_id: &str,
         paths: &[std::path::PathBuf],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let offer = self.file_transfers.create_outbound_offer(phone_id, paths)?;
         let connection_id = self
             .online_connections
             .lock()
@@ -836,11 +835,15 @@ impl AppState {
                     .max()
             })
             .ok_or("phone is not connected")?;
-        self.file_offer_channels
+        let sender = self
+            .file_offer_channels
             .lock()
             .map_err(|_| "file offer channel unavailable")?
             .get(&connection_id)
             .ok_or("phone connection does not support file transfer")?
+            .clone();
+        let offer = self.file_transfers.create_outbound_offer(phone_id, paths)?;
+        sender
             .try_send(offer)
             .map_err(|_| "phone file queue is busy")?;
         Ok(())
@@ -939,6 +942,7 @@ impl AppState {
 
     fn unpair_phone(&self, phone_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         self.paired_phones.remove(phone_id)?;
+        self.file_transfers.revoke_phone(phone_id);
         self.notify_ui();
         Ok(())
     }

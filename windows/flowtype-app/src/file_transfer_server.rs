@@ -72,6 +72,42 @@ impl FileTransferSnapshot {
 }
 
 impl FileTransferCoordinator {
+    pub(crate) fn handle_control(
+        &self,
+        value: serde_json::Value,
+        phone_id: &str,
+    ) -> Option<FileServerMessage> {
+        use flowtype_core::file_transfer::FileClientMessage;
+        let batch_id = value
+            .get("batch_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned();
+        let result = (|| -> Result<Option<FileServerMessage>, &'static str> {
+            match serde_json::from_value::<FileClientMessage>(value)
+                .map_err(|_| "invalid file request")?
+            {
+                FileClientMessage::FileOffer(offer) => {
+                    self.accept_offer(&offer, phone_id).map(Some)
+                }
+                FileClientMessage::FileDecision(decision) => {
+                    self.accept_decision(&decision, phone_id)
+                }
+                FileClientMessage::FileCancel(cancel) => {
+                    cancel.validate().map_err(|_| "invalid file cancellation")?;
+                    self.cancel(&cancel.batch_id, phone_id)?;
+                    Ok(None)
+                }
+            }
+        })();
+        result.unwrap_or_else(|code| {
+            Some(FileServerMessage::FileError {
+                batch_id,
+                code: code.to_owned(),
+            })
+        })
+    }
+
     pub(crate) fn load_default() -> std::io::Result<Arc<Self>> {
         let receive_root = crate::settings::receive_folder()?;
         let store = FileTransferStore::load_default()?;
@@ -140,9 +176,14 @@ impl FileTransferCoordinator {
                     || existing.file_count != offer.file_count
                     || existing.directory_count != offer.directory_count
                     || existing.total_bytes != offer.total_bytes
-                    || existing.state.is_terminal()
                 {
                     return Err("batch id conflict");
+                }
+                if existing.state.is_terminal() {
+                    return Ok(FileServerMessage::FileResult {
+                        batch_id: existing.batch_id,
+                        state: existing.state,
+                    });
                 }
             }
             Err(_) => return Err("cannot create batch"),
@@ -167,6 +208,20 @@ impl FileTransferCoordinator {
             tickets.remove(batch_id);
         }
         Ok(())
+    }
+
+    pub(crate) fn revoke_phone(&self, phone_id: &str) {
+        if let Ok(mut tickets) = self.tickets.lock() {
+            tickets.retain(|_, grant| grant.phone_id != phone_id);
+        }
+        if let Ok(batches) = self.store.recoverable_batches() {
+            for batch in batches
+                .into_iter()
+                .filter(|batch| batch.phone_id == phone_id)
+            {
+                let _ = self.cancel(&batch.batch_id, phone_id);
+            }
+        }
     }
 
     pub(crate) fn create_outbound_offer(
@@ -266,6 +321,12 @@ impl FileTransferCoordinator {
             .map_err(|_| "unknown batch")?;
         if batch.phone_id != phone_id || batch.direction != TransferDirection::ComputerToPhone {
             return Err("batch owner mismatch");
+        }
+        if batch.state.is_terminal() {
+            return Ok(Some(FileServerMessage::FileResult {
+                batch_id: batch.batch_id,
+                state: batch.state,
+            }));
         }
         if !decision.accepted {
             self.cancel(&decision.batch_id, phone_id)?;
@@ -731,6 +792,14 @@ async fn route_request(
         .ok_or((StatusCode::NOT_FOUND, "not_found"))?;
     let batch_id = batch_id.to_owned();
     let direction = authorize_request(&coordinator, &batch_id, bearer_token(&request))?;
+    let batch = coordinator
+        .store
+        .load_batch(&batch_id)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized"))?;
+    if state.paired_phones.public_key(&batch.phone_id).is_none() {
+        coordinator.revoke_phone(&batch.phone_id);
+        return Err((StatusCode::UNAUTHORIZED, "unauthorized"));
+    }
 
     if action == "complete" {
         if request.method() != Method::POST {
@@ -825,7 +894,7 @@ async fn route_request(
     }
 
     if let Some(entry_id) = action.strip_prefix("verify/") {
-        if direction != TransferDirection::ComputerToPhone || request.method() != Method::POST {
+        if request.method() != Method::POST {
             return Err((StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"));
         }
         let ordinal = request
@@ -846,6 +915,14 @@ async fn route_request(
             .map_err(|_| (StatusCode::NOT_FOUND, "entry_not_found"))?;
         if entry.entry_id != entry_id || entry.kind != EntryKind::File {
             return Err((StatusCode::NOT_FOUND, "entry_not_found"));
+        }
+        if direction == TransferDirection::PhoneToComputer {
+            commit_uploaded_file(&coordinator, &batch_id, &entry, supplied_hash)
+                .map_err(|code| (StatusCode::CONFLICT, code))?;
+            return Ok(json_response(
+                StatusCode::OK,
+                r#"{"verified":true}"#.to_owned(),
+            ));
         }
         let source = coordinator
             .store
@@ -1305,21 +1382,13 @@ async fn receive_file(
     {
         return Err("integrity_failed");
     }
-    drop(file);
-    if target.exists() {
-        return Err("target_exists");
-    }
-    fs::rename(&part, &target).map_err(|_| "commit_failed")?;
-    if let Some(modified) = entry.modified_at_epoch_millis {
-        preserve_modified_time(&target, modified);
-    }
     coordinator
         .store
         .write_progress(
             batch_id,
             ordinal,
             EntryProgress {
-                state: flowtype_core::file_transfer::EntryState::Completed,
+                state: flowtype_core::file_transfer::EntryState::Transferring,
                 committed_offset: received,
             },
         )
@@ -1327,9 +1396,57 @@ async fn receive_file(
     state.notify_ui();
     Ok(ReceiveResult {
         committed_offset: received,
-        completed: true,
+        completed: false,
         sha256: Some(hash),
     })
+}
+
+// A fully received body remains staged until the sender confirms its hash.
+// Repeating verification also recovers a crash between rename and persistence.
+fn commit_uploaded_file(
+    coordinator: &FileTransferCoordinator,
+    batch_id: &str,
+    entry: &ManifestEntry,
+    supplied_hash: &str,
+) -> Result<(), &'static str> {
+    let target = coordinator
+        .store
+        .target_path(batch_id, entry.ordinal)
+        .map_err(|_| "target_unavailable")?;
+    let parent = target.parent().ok_or("target_unavailable")?;
+    let part = parent.join(format!(".flowtype-{batch_id}-{}.part", entry.entry_id));
+    let staged = part.exists();
+    let path = if staged { &part } else { &target };
+    if fs::metadata(path).map_err(|_| "target_unavailable")?.len() != entry.size
+        || !hash_file(path)
+            .map_err(|_| "target_unavailable")?
+            .eq_ignore_ascii_case(supplied_hash)
+    {
+        return Err("integrity_failed");
+    }
+    if !coordinator.ticket_is_active(batch_id) {
+        return Err("transfer_canceled");
+    }
+    if staged {
+        if target.exists() {
+            return Err("target_exists");
+        }
+        fs::rename(&part, &target).map_err(|_| "commit_failed")?;
+        if let Some(modified) = entry.modified_at_epoch_millis {
+            preserve_modified_time(&target, modified);
+        }
+    }
+    coordinator
+        .store
+        .write_progress(
+            batch_id,
+            entry.ordinal,
+            EntryProgress {
+                state: flowtype_core::file_transfer::EntryState::Completed,
+                committed_offset: entry.size,
+            },
+        )
+        .map_err(|_| "progress_unavailable")
 }
 
 fn hash_file(path: &std::path::Path) -> std::io::Result<String> {
@@ -1660,10 +1777,190 @@ mod tests {
         }
     }
 
+    #[test]
+    fn control_errors_are_replies_and_do_not_poison_subsequent_requests() {
+        let root = test_root("control-errors");
+        let coordinator = FileTransferCoordinator::new(
+            FileTransferStore::new(root.join("state")).unwrap(),
+            root.join("receive"),
+        );
+        let invalid = serde_json::json!({"type":"file_decision","batch_id":"missing",
+            "protocol_version":flowtype_core::PROTOCOL_VERSION,
+            "transfer_version":FILE_TRANSFER_VERSION,"accepted":true});
+        assert!(matches!(coordinator.handle_control(invalid, "phone-1"),
+            Some(FileServerMessage::FileError { batch_id, .. }) if batch_id == "missing"));
+        let valid = serde_json::to_value(FileClientMessage::FileOffer(offer("next"))).unwrap();
+        assert!(matches!(
+            coordinator.handle_control(valid, "phone-1"),
+            Some(FileServerMessage::FileTicket(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn terminal_receipt_survives_lost_response_and_server_restart_in_both_directions() {
+        let root = test_root("terminal-receipts");
+        let coordinator = FileTransferCoordinator::new(
+            FileTransferStore::new(root.join("state")).unwrap(),
+            root.join("receive"),
+        );
+        coordinator
+            .accept_offer(&offer("upload"), "phone-1")
+            .unwrap();
+        fs::write(root.join("source"), b"hello").unwrap();
+        let outbound = coordinator
+            .create_outbound_offer("phone-1", &[root.join("source")])
+            .unwrap();
+        let decision = FileDecision {
+            protocol_version: flowtype_core::PROTOCOL_VERSION,
+            transfer_version: FILE_TRANSFER_VERSION,
+            batch_id: outbound.batch_id.clone(),
+            accepted: true,
+        };
+        coordinator.accept_decision(&decision, "phone-1").unwrap();
+        for state in [
+            BatchState::Preparing,
+            BatchState::Transferring,
+            BatchState::Completed,
+        ] {
+            coordinator
+                .store
+                .update_state("upload", state, unix_time())
+                .unwrap();
+        }
+        coordinator
+            .store
+            .update_state(&outbound.batch_id, BatchState::PartialFailure, unix_time())
+            .unwrap();
+        drop(coordinator);
+        let coordinator = FileTransferCoordinator::new(
+            FileTransferStore::new(root.join("state")).unwrap(),
+            root.join("receive"),
+        );
+        for _ in 0..2 {
+            assert!(matches!(
+                coordinator
+                    .accept_offer(&offer("upload"), "phone-1")
+                    .unwrap(),
+                FileServerMessage::FileResult {
+                    state: BatchState::Completed,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                coordinator.accept_decision(&decision, "phone-1").unwrap(),
+                Some(FileServerMessage::FileResult {
+                    state: BatchState::PartialFailure,
+                    ..
+                })
+            ));
+        }
+        assert!(
+            coordinator
+                .accept_decision(&decision, "other-phone")
+                .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unpair_revokes_existing_tokens_and_in_flight_grants_only_for_that_phone() {
+        let root = test_root("unpair");
+        let coordinator = FileTransferCoordinator::new(
+            FileTransferStore::new(root.join("state")).unwrap(),
+            root.join("receive"),
+        );
+        let first = ticket_token(
+            coordinator
+                .accept_offer(&offer("first"), "phone-1")
+                .unwrap(),
+        );
+        let mut other = offer("other");
+        other.phone_id = "phone-2".into();
+        let second = ticket_token(coordinator.accept_offer(&other, "phone-2").unwrap());
+        coordinator.revoke_phone("phone-1");
+        assert!(!coordinator.authorize("first", &first));
+        assert!(!coordinator.ticket_is_active("first"));
+        assert_eq!(
+            coordinator.store.load_batch("first").unwrap().state,
+            BatchState::Canceled
+        );
+        assert!(coordinator.authorize("other", &second));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn uploaded_file_is_committed_only_after_matching_hash_and_commit_is_repeatable() {
+        let root = test_root("verified-commit");
+        let coordinator = FileTransferCoordinator::new(
+            FileTransferStore::new(root.join("state")).unwrap(),
+            root.join("receive"),
+        );
+        coordinator
+            .accept_offer(&offer("upload"), "phone-1")
+            .unwrap();
+        let entry = ManifestEntry {
+            ordinal: 0,
+            entry_id: "entry-1".into(),
+            relative_path: "a.txt".into(),
+            kind: EntryKind::File,
+            size: 42,
+            modified_at_epoch_millis: None,
+            mime_type: None,
+            sha256: None,
+        };
+        let mut manifest = coordinator.store.begin_manifest("upload").unwrap();
+        manifest.append(&entry).unwrap();
+        manifest.finish().unwrap();
+        coordinator
+            .store
+            .prepare_windows_targets("upload", &root.join("receive"), unix_time())
+            .unwrap();
+        let target = coordinator.store.target_path("upload", 0).unwrap();
+        let part = target
+            .parent()
+            .unwrap()
+            .join(".flowtype-upload-entry-1.part");
+        fs::write(&part, [b'x'; 42]).unwrap();
+        let hash = hash_file(&part).unwrap();
+        assert_eq!(
+            commit_uploaded_file(&coordinator, "upload", &entry, &"0".repeat(64)),
+            Err("integrity_failed")
+        );
+        assert!(!target.exists());
+        assert!(part.exists());
+        commit_uploaded_file(&coordinator, "upload", &entry, &hash).unwrap();
+        assert!(!part.exists());
+        assert_eq!(fs::read(&target).unwrap(), vec![b'x'; 42]);
+        // Simulate lost persistence after rename, then replay the verification.
+        coordinator
+            .store
+            .write_progress(
+                "upload",
+                0,
+                EntryProgress {
+                    state: flowtype_core::file_transfer::EntryState::Transferring,
+                    committed_offset: 42,
+                },
+            )
+            .unwrap();
+        commit_uploaded_file(&coordinator, "upload", &entry, &hash).unwrap();
+        assert_eq!(
+            coordinator.store.read_progress("upload", 0).unwrap().state,
+            flowtype_core::file_transfer::EntryState::Completed
+        );
+        coordinator.revoke_phone("phone-1");
+        assert_eq!(
+            commit_uploaded_file(&coordinator, "upload", &entry, &hash),
+            Err("transfer_canceled")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn ticket_token(message: FileServerMessage) -> String {
         match message {
             FileServerMessage::FileTicket(ticket) => ticket.token,
-            FileServerMessage::FileOffer(_) => panic!("expected a ticket"),
+            _ => panic!("expected a ticket"),
         }
     }
 

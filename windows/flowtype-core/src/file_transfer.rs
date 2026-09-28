@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::PROTOCOL_VERSION;
 
-pub const FILE_TRANSFER_VERSION: u16 = 1;
+pub const FILE_TRANSFER_VERSION: u16 = 2;
 pub const MAX_PHONE_ID_BYTES: usize = 128;
 pub const MAX_BATCH_ID_BYTES: usize = 64;
 pub const MAX_ENTRY_ID_BYTES: usize = 64;
@@ -29,6 +29,8 @@ pub enum FileClientMessage {
 pub enum FileServerMessage {
     FileOffer(FileOffer),
     FileTicket(FileTicket),
+    FileResult { batch_id: String, state: BatchState },
+    FileError { batch_id: String, code: String },
 }
 
 #[repr(u8)]

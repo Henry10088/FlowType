@@ -146,10 +146,43 @@ class FileTransferStore(private val database: AppDatabase) {
         require(targetTreeUri.isNotBlank() && targetTreeUri.length <= 32 * 1024) {
             "invalid target tree URI"
         }
+        val previous = requireNotNull(loadBatch(batchId))
+        val db = database.writableDatabase
+        db.beginTransaction()
+        try {
+            if (previous.targetTreeUri != null && previous.targetTreeUri != targetTreeUri) {
+                db.execSQL(
+                    """UPDATE file_transfer_entries SET target_uri = NULL, target_parent_uri = NULL,
+                        target_name = NULL, committed_offset = 0, state = ?, error_code = NULL
+                        WHERE batch_id = ? AND (kind = ? OR state != ?)""",
+                    arrayOf(
+                        TransferEntryState.PENDING.wireName, batchId,
+                        TransferEntryKind.DIRECTORY.wireName, TransferEntryState.COMPLETED.wireName,
+                    ),
+                )
+            }
+            db.update(
+                "file_transfer_batches",
+                ContentValues().apply {
+                    put("target_tree_uri", targetTreeUri)
+                    put("updated_at", now)
+                },
+                "batch_id = ?",
+                arrayOf(batchId),
+            ).also { check(it == 1) }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /** An authenticated terminal receipt repairs a lost completion response. */
+    fun reconcileResult(batchId: String, state: TransferBatchState, now: Long) {
+        require(state.terminal)
         database.writableDatabase.update(
             "file_transfer_batches",
             ContentValues().apply {
-                put("target_tree_uri", targetTreeUri)
+                put("state", state.wireName)
                 put("updated_at", now)
             },
             "batch_id = ?",

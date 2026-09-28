@@ -606,7 +606,9 @@ class MainActivity : ComponentActivity() {
             )
         } else if (state.fileTransfer.error != null) {
             syncStatus.setText(
-                if ("insufficient_space" in state.fileTransfer.error) {
+                if ("file_transfer_requires_update" in state.fileTransfer.error) {
+                    R.string.file_transfer_requires_update
+                } else if ("insufficient_space" in state.fileTransfer.error) {
                     R.string.file_transfer_insufficient_space
                 } else {
                     R.string.file_transfer_failed_title

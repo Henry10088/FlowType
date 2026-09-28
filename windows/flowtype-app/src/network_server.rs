@@ -137,7 +137,7 @@ async fn serve_connection(
             pc_id: &state.identity.pc_id,
             pc_name: &pc_name,
             candidate_endpoints: endpoint_urls(None),
-            capabilities: &["health_check", "switch_ack", "file_transfer_v1"],
+            capabilities: &["health_check", "switch_ack", "file_transfer_v2"],
         },
     )
     .await?;
@@ -160,8 +160,12 @@ async fn serve_connection(
         state: Arc::clone(&state),
         connection_id,
     };
-    state.register_file_offer_channel(connection_id, file_offer_tx.clone());
-    if !is_control {
+    let supports_files = auth
+        .capabilities
+        .iter()
+        .any(|value| value == "file_transfer_v2");
+    if !is_control && supports_files {
+        state.register_file_offer_channel(connection_id, file_offer_tx.clone());
         for offer in state.file_transfers.pending_outbound_offers(&auth.phone_id) {
             let _ = file_offer_tx.try_send(offer);
         }
@@ -253,30 +257,15 @@ async fn serve_connection(
                     message_type,
                     Some("file_offer" | "file_decision" | "file_cancel")
                 ) {
-                    match serde_json::from_value::<FileClientMessage>(value)? {
-                        FileClientMessage::FileOffer(offer) => {
-                            let ticket = state
-                                .file_transfers
-                                .accept_offer(&offer, &auth.phone_id)?;
-                            send_json(&mut websocket, &ticket).await?;
-                        }
-                        FileClientMessage::FileCancel(cancel) => {
-                            cancel.validate().map_err(|_| "invalid file cancellation")?;
-                            state
-                                .file_transfers
-                                .cancel(&cancel.batch_id, &auth.phone_id)?;
-                            state.notify_ui();
-                        }
-                        FileClientMessage::FileDecision(decision) => {
-                            if let Some(ticket) = state
-                                .file_transfers
-                                .accept_decision(&decision, &auth.phone_id)?
-                            {
-                                send_json(&mut websocket, &ticket).await?;
-                            }
-                            state.notify_ui();
-                        }
+                    if state.paired_phones.public_key(&auth.phone_id).is_none() {
+                        state.file_transfers.revoke_phone(&auth.phone_id);
+                        return Err("phone is not paired".into());
                     }
+                    let reply = state.file_transfers.handle_control(value, &auth.phone_id);
+                    if let Some(reply) = reply {
+                        send_json(&mut websocket, &reply).await?;
+                    }
+                    state.notify_ui();
                 } else if value.get("type").and_then(serde_json::Value::as_str) == Some("image_start") {
                     let image: ImageStart = serde_json::from_value(value)?;
                     image.validate(&auth.phone_id)?;

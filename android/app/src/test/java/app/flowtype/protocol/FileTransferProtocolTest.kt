@@ -19,6 +19,9 @@ class FileTransferProtocolTest {
             roots = listOf("资料"),
         )
         offer.validate("phone-1")
+        assertThrows(IllegalArgumentException::class.java) {
+            offer.copy(transferVersion = 1).validate("phone-1")
+        }
 
         val encoded = FileTransferCodec.encodeOffer(offer)
         val decoded = FileTransferCodec.decodeOffer(encoded)

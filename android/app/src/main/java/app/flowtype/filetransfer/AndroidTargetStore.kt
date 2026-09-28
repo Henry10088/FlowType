@@ -25,6 +25,8 @@ class AndroidTargetStore(
             for (stored in page) {
                 val entry = stored.manifest
                 ordinal = entry.ordinal + 1
+                // Completed files stay in the original location when changing the destination.
+                if (entry.kind == TransferEntryKind.FILE && stored.state == TransferEntryState.COMPLETED) continue
                 val parentPath = entry.relativePath.substringBeforeLast('/', "")
                 val parent = directories[parentPath] ?: error("directory appears after its child")
                 if (stored.targetUri != null) {
