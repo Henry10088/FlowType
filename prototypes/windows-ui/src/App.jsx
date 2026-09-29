@@ -46,7 +46,7 @@ export function App() {
   return <div className="stage">
     <div className="stage-note">Windows 界面原型 <span>·</span> 演示数据，不连接真实设备</div>
     <div className="window">
-      <header className="titlebar"><div className="brand"><span className="brand-mark" aria-hidden="true"><PencilSimpleLine className="brand-pencil" size={19} weight="regular" /><Circle className="brand-dot" size={6} weight="fill" /></span><strong>说写</strong><small>FlowType</small></div><div className="window-buttons" aria-hidden="true"><Minus size={16} /><X size={17} /></div></header>
+      <header className="titlebar"><div className="brand"><span className="brand-mark" aria-hidden="true"><PencilSimpleLine className="brand-pencil" size={19} weight="bold" /><Circle className="brand-dot" size={6} weight="fill" /></span><strong>说写</strong><small>FlowType</small></div><div className="window-buttons" aria-hidden="true"><Minus size={16} /><X size={17} /></div></header>
       <div className="workspace"><aside className="sidebar"><div className="nav-caption">工作空间</div><nav aria-label="主导航">{nav.map(([key, label, Icon]) => <button key={key} className={`nav-item ${page === key || (page === 'pairing' && key === 'phones') ? 'active' : ''}`} aria-current={page === key ? 'page' : undefined} onClick={() => setPage(key)}><Icon size={20} weight={page === key ? 'fill' : 'regular'} /><span>{label}</span>{key === 'phones' && <small>{phones.length}</small>}</button>)}</nav><div className="sidebar-foot"><ShieldCheck size={17} />已加密连接</div></aside>
       <main className="content">
         {page === 'status' && <><div className="heading"><span className="eyebrow">连接概览</span><h1>状态</h1></div>
