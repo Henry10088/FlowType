@@ -1,5 +1,6 @@
 /* Final optical pass at the desktop application's normal window size. */
-.content { padding-top: 30px; padding-bottom: 21px; }
+.content { padding-top: 22px; padding-bottom: 21px; }
+.eyebrow { display: none; }
 .heading { margin-bottom: 21px; }
 .hero { min-height: 108px; margin-bottom: 15px; }
 .info-row { min-height: 55px; }
@@ -15,7 +16,11 @@
 .phone-text small, .hint, .steps small { font-size: 12px; }
 .recipient, .tabs button, .dropzone>strong, .received-intro strong, .received-file strong { font-size: 13px; }
 .nav-item.active:before, .dot, .switch.on, .progress span { background-color: #00bab8; }
-.brand-mark { display: block; object-fit: cover; background: #101214; }
+.brand-mark { display: grid; place-items: center; position: relative; background: #101214; color: #f4f6f7; }
+.brand-pencil { transform: translate(-1px, -1px); }
+.brand-dot { position: absolute; right: 2px; bottom: 3px; color: #00bab8; }
+.pairing-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.pairing-heading .back { margin: 0; padding: 6px 0; white-space: nowrap; }
 .dot.offline { background-color: #abb9ba; }
 .pill.waiting .dot { background-color: #e3a13c; }
-@media (max-width: 760px) { .content { padding-top: 25px; } }
+@media (max-width: 760px) { .content { padding-top: 20px; } }
