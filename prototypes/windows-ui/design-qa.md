@@ -19,8 +19,8 @@ The user's subsequent annotation found that the Windows-generated ICO looked rou
 
 - Typography: Windows system-friendly Segoe UI / Microsoft YaHei UI fallback; title and object names have clear weight. Auxiliary copy is intentionally smaller than the old raster mock; a few secondary labels could be enlarged after user review (P3).
 - Spacing: fixed sidebar, aligned content column, consistent 35 px controls and 55 px status rows. No accidental clipping at the tested desktop viewport.
-- Color: white and cool gray surfaces; the product's `#00BAB8` for the logo pen/selection/activity accents, darker teal for text and primary-button contrast. Offline/waiting state remains separately labeled.
-- Assets: the titlebar mark is composed from the same line-icon library as the navigation, now with a black tile, teal pen, and white dot. This prototype change does **not** alter the installed Windows icon yet. The QR code is real rendered QR artwork carrying a clearly labeled **demo-only** value, never a pairing credential.
+- Color: white and cool gray surfaces; the product's `#00BAB8` for the logo tile/selection/activity accents, darker teal for text and primary-button contrast. Offline/waiting state remains separately labeled.
+- Assets: the titlebar mark is composed from the same line-icon library as the navigation, now with a teal tile and white pen/dot. This prototype change does **not** alter the installed Windows icon yet. The QR code is real rendered QR artwork carrying a clearly labeled **demo-only** value, never a pairing credential.
 - Copy: specific, task-oriented status labels; simulation controls and demo data are explicitly identified as prototype-only.
 
 ## Interaction evidence
@@ -39,5 +39,13 @@ Confirm the revised titlebar mark and higher page titles with the user. Do not p
 - First color trial: the regular-weight teal pen was too faint at titlebar size (P2). Changed the library icon to bold weight while keeping the teal `#00bab8` pen, black tile, and small white dot. The second capture shows a readable silhouette with no new clipping or halo.
 - Fidelity surfaces: type, spacing, and copy are unchanged; the teal comes from the existing product accent; the Phosphor icon remains crisp at normal size, with the black tile supplying contrast.
 - Open question: whether the user prefers the new color balance. The native Windows ICO is intentionally out of scope.
+
+## Corrected icon color direction
+
+- Source: `theme-icon-capture.png` (1280 × 720 px), the earlier interpretation with black tile and teal pen; the user's clarification reverses those colors.
+- Implementation: `theme-background-capture.png` (667 × 910 px), status screen, light theme, device scale 1. Both titlebar marks render at 27 × 27 CSS px. The viewport differs, so surrounding page placement is not compared pixel-for-pixel.
+- Full-view check: the corrected status capture shows unchanged title and content hierarchy at a compact viewport. Focused same-scale crop comparison: `theme-background-comparison.png`, both marks cropped to 32 × 32 px and enlarged 5× with nearest-neighbor interpolation.
+- Findings: no actionable P0/P1/P2 mismatch. The tile is `#00bab8` and the bold library pen is white; the small dot remains white. The silhouette stays visible at native size. Fonts, spacing, image quality, and copy outside the mark are unchanged. No layout clipping is visible.
+- History: the prior black tile/teal pen was a misinterpretation, corrected here. The native Windows ICO remains outside this prototype pass.
 
 final result: passed

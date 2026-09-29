@@ -2,7 +2,7 @@
 
 This is a visual and interaction prototype for FlowType's Windows app. Keep the established light theme, restrained teal accent, and existing page hierarchy. It is separate from Win32 and must not connect to devices or change transfer or sync protocols.
 
-User-approved refinement: page titles have no small eyebrow/caption above them and content starts higher in the window. The titlebar mark keeps the black-square, white-pen and teal-dot motif but must render cleanly at small sizes.
+User-approved refinement: page titles have no small eyebrow/caption above them and content starts higher in the window. The titlebar mark uses the theme teal background with a white pen and must render cleanly at small sizes.
 
 Run the local server yourself and open the preview in the browser available to this environment. Do not give the user server-start instructions when you can run it.
 

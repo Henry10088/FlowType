@@ -16,7 +16,7 @@
 .phone-text small, .hint, .steps small { font-size: 12px; }
 .recipient, .tabs button, .dropzone>strong, .received-intro strong, .received-file strong { font-size: 13px; }
 .nav-item.active:before, .dot, .switch.on, .progress span { background-color: #00bab8; }
-.brand-mark { display: grid; place-items: center; position: relative; background: #101214; color: #00bab8; }
+.brand-mark { display: grid; place-items: center; position: relative; background: #00bab8; color: #fff; }
 .brand-pencil { transform: translate(-1px, -1px); }
 .brand-dot { position: absolute; right: 2px; bottom: 3px; color: #f4f6f7; }
 .pairing-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
