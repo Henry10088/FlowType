@@ -66,10 +66,8 @@ impl Direct2dPainter {
         }
     }
 
-    pub(super) fn resize(&self, width: u32, height: u32) {
-        unsafe {
-            let _ = self.target.Resize(&D2D_SIZE_U { width, height });
-        }
+    pub(super) fn resize(&self, width: u32, height: u32) -> windows::core::Result<()> {
+        unsafe { self.target.Resize(&D2D_SIZE_U { width, height }) }
     }
 
     pub(super) fn set_dpi(&self, dpi: f32) {
@@ -83,10 +81,10 @@ impl Direct2dPainter {
         rows: &[PhonePaintRow],
     ) -> windows::core::Result<()> {
         unsafe {
-            let line = self.begin_shell(client_height)?;
             let text = self.brush(rgb(31, 31, 31))?;
             let teal = self.brush(rgb(0, 186, 184))?;
             let offline = self.brush(rgb(204, 204, 204))?;
+            let line = self.begin_shell(client_height)?;
 
             for (row, row_layout) in rows.iter().zip(&layout.rows) {
                 self.target.FillRectangle(
@@ -122,9 +120,9 @@ impl Direct2dPainter {
         layout: &StatusLayout,
     ) -> windows::core::Result<()> {
         unsafe {
-            let line = self.begin_shell(client_height)?;
             let teal = self.brush(rgb(0, 186, 184))?;
             let white = self.brush(rgb(255, 255, 255))?;
+            let line = self.begin_shell(client_height)?;
             for y in layout.separators {
                 self.target.FillRectangle(
                     &D2D_RECT_F {
@@ -143,6 +141,13 @@ impl Direct2dPainter {
         }
     }
 
+    pub(super) fn paint_files(&self, client_height: f32) -> windows::core::Result<()> {
+        unsafe {
+            self.begin_shell(client_height)?;
+            self.target.EndDraw(None, None)
+        }
+    }
+
     pub(super) fn paint_settings(
         &self,
         client_height: f32,
@@ -150,6 +155,12 @@ impl Direct2dPainter {
         service_ready: bool,
     ) -> windows::core::Result<()> {
         unsafe {
+            let color = if service_ready {
+                rgb(0, 186, 184)
+            } else {
+                rgb(209, 63, 63)
+            };
+            let dot = self.brush(color)?;
             let line = self.begin_shell(client_height)?;
             for y in layout.separators {
                 self.target.FillRectangle(
@@ -163,13 +174,7 @@ impl Direct2dPainter {
                 );
             }
             let status = layout.service_status_dot;
-            let color = if service_ready {
-                rgb(0, 186, 184)
-            } else {
-                rgb(209, 63, 63)
-            };
-            self.target
-                .FillEllipse(&ellipse(status), &self.brush(color)?);
+            self.target.FillEllipse(&ellipse(status), &dot);
             self.target.EndDraw(None, None)
         }
     }
@@ -181,12 +186,17 @@ impl Direct2dPainter {
         qr: Option<(usize, &[bool])>,
     ) -> windows::core::Result<()> {
         unsafe {
-            let _line = self.begin_shell(client_height)?;
             let teal = self.brush(rgb(0, 186, 184))?;
+            let black = if qr.is_some() {
+                Some(self.brush(rgb(0, 0, 0))?)
+            } else {
+                None
+            };
+            self.begin_shell(client_height)?;
             self.target.FillEllipse(&ellipse(layout.waiting_dot), &teal);
 
             if let Some((width, modules)) = qr {
-                let black = self.brush(rgb(0, 0, 0))?;
+                let black = black.as_ref().expect("QR brush exists");
                 let module = (220.0 / (width as f32 + 8.0)).floor().max(2.0);
                 let quiet = 4.0;
                 for row in 0..width {
@@ -201,7 +211,7 @@ impl Direct2dPainter {
                                     right: left + module,
                                     bottom: top + module,
                                 },
-                                &black,
+                                black,
                             );
                         }
                     }

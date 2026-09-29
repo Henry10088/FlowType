@@ -6,10 +6,10 @@ use std::sync::Arc;
 use qrcode::{Color, QrCode};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, COLOR_WINDOW, CreateSolidBrush, DT_CENTER, DT_LEFT, DT_SINGLELINE, DT_VCENTER,
-    DeleteObject, EndPaint, FW_NORMAL, FW_SEMIBOLD, FillRect, GetStockObject, HBRUSH, HFONT,
-    InvalidateRect, PAINTSTRUCT, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RDW_NOERASE,
-    RDW_UPDATENOW, RedrawWindow, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow, WHITE_BRUSH,
+    BeginPaint, CreateSolidBrush, DT_CENTER, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DeleteObject,
+    EndPaint, FW_NORMAL, FW_SEMIBOLD, FillRect, GetStockObject, HFONT, InvalidateRect, PAINTSTRUCT,
+    RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW, RedrawWindow,
+    SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow, WHITE_BRUSH,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::SS_NOPREFIX;
@@ -76,7 +76,7 @@ struct SaveNotice {
     text: String,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
     Status,
     Files,
@@ -191,6 +191,17 @@ impl UiContext {
         unsafe { GetClientRect(self.hwnd, &mut client) };
         (client.right.max(1), client.bottom.max(1))
     }
+
+    fn ensure_painter(&mut self) {
+        if self.direct2d.is_some() || std::env::var_os("FLOWTYPE_UI_FORCE_GDI").is_some() {
+            return;
+        }
+        let (width, height) = self.client_size();
+        let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32;
+        self.direct2d = Direct2dPainter::new(self.hwnd, width as u32, height as u32, dpi)
+            .map_err(|error| crate::diagnostics::log(format!("UI target create: {error}")))
+            .ok();
+    }
 }
 
 pub fn run(
@@ -213,7 +224,7 @@ pub fn run(
         hInstance: instance,
         hIcon: app_icon(),
         hCursor: unsafe { LoadCursorW(null_mut(), IDC_ARROW) },
-        hbrBackground: (COLOR_WINDOW as isize + 1) as HBRUSH,
+        hbrBackground: null_mut(),
         lpszClassName: class_name.as_ptr(),
         ..unsafe { zeroed() }
     };
@@ -301,9 +312,7 @@ unsafe extern "system" fn window_proc(
         WM_CREATE => {
             crate::diagnostics::log("window create");
             ui.rebuild_fonts();
-            let (width, height) = ui.client_size();
-            let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
-            ui.direct2d = Direct2dPainter::new(hwnd, width as u32, height as u32, dpi).ok();
+            ui.ensure_painter();
             ui.rebuild_page();
             unsafe { DragAcceptFiles(hwnd, 1) };
             ui.add_tray();
@@ -400,6 +409,7 @@ unsafe extern "system" fn window_proc(
             ui.paint();
             0
         }
+        WM_ERASEBKGND => 1,
         WM_DROPFILES => {
             ui.send_dropped_paths(wparam as _);
             0
@@ -407,8 +417,12 @@ unsafe extern "system" fn window_proc(
         WM_SIZE => {
             if let Some(painter) = ui.direct2d.as_ref() {
                 let (width, height) = ui.client_size();
-                painter.resize(width as u32, height as u32);
+                if let Err(error) = painter.resize(width as u32, height as u32) {
+                    crate::diagnostics::log(format!("UI target resize: {error}"));
+                    ui.direct2d = None;
+                }
             }
+            ui.ensure_painter();
             if wparam != SIZE_MINIMIZED as usize {
                 ui.reposition_responsive_controls();
             }
@@ -457,8 +471,15 @@ unsafe extern "system" fn window_proc(
                 let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
                 painter.set_dpi(dpi);
             }
+            ui.ensure_painter();
             ui.rebuild_fonts();
             ui.rebuild_page();
+            0
+        }
+        WM_DISPLAYCHANGE => {
+            ui.direct2d = None;
+            ui.ensure_painter();
+            unsafe { InvalidateRect(hwnd, null(), 0) };
             0
         }
         WM_GETMINMAXINFO => {

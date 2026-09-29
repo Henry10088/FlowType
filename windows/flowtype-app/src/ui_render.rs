@@ -208,50 +208,49 @@ impl UiContext {
         unsafe { GetClientRect(self.hwnd, &mut client) };
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32;
         let logical_height = client.bottom as f32 * 96.0 / dpi;
-        if self.page == Page::Phones {
-            let snapshot = self.state.snapshot();
-            let layout = self.phones_layout();
-            let rows = snapshot
-                .phones
-                .iter()
-                .map(|(_, phone)| {
-                    let connected = snapshot.status.connected_phone.as_deref()
-                        == Some(phone.phone_name.as_str());
-                    PhonePaintRow { connected }
-                })
-                .collect::<Vec<_>>();
-            if let Some(painter) = self.direct2d.as_ref() {
-                let _ = painter.paint_phones(logical_height, &layout, &rows);
-                unsafe { EndPaint(self.hwnd, &paint) };
-                return;
-            }
-        }
-        if let Some(painter) = self.direct2d.as_ref() {
-            let painted = match self.page {
-                Page::Status => Some(painter.paint_status(
+        // Notices are drawn by the shared GDI path until the component renderer owns them.
+        if self.save_notice.is_none() {
+            let result = self.direct2d.as_ref().map(|painter| match self.page {
+                Page::Status => painter.paint_status(
                     logical_height,
                     &StatusLayout::new(self.logical_client_width()),
-                )),
-                Page::Files => None,
-                Page::Settings if self.save_notice.is_none() => Some(painter.paint_settings(
+                ),
+                Page::Files => painter.paint_files(logical_height),
+                Page::Phones => {
+                    let snapshot = self.state.snapshot();
+                    let rows = snapshot
+                        .phones
+                        .iter()
+                        .map(|(_, phone)| PhonePaintRow {
+                            connected: snapshot.status.connected_phone.as_deref()
+                                == Some(phone.phone_name.as_str()),
+                        })
+                        .collect::<Vec<_>>();
+                    painter.paint_phones(logical_height, &self.phones_layout(), &rows)
+                }
+                Page::Settings => painter.paint_settings(
                     logical_height,
                     &SettingsLayout::new(self.logical_client_width()),
                     self.state.snapshot().injector_ready,
-                )),
-                Page::Pairing => Some(
-                    painter.paint_pairing(
-                        logical_height,
-                        &PairingLayout::new(self.logical_client_width()),
-                        self.qr
-                            .as_ref()
-                            .map(|(width, modules)| (*width, modules.as_slice())),
-                    ),
                 ),
-                _ => None,
-            };
-            if painted.is_some_and(|result| result.is_ok()) {
-                unsafe { EndPaint(self.hwnd, &paint) };
-                return;
+                Page::Pairing => painter.paint_pairing(
+                    logical_height,
+                    &PairingLayout::new(self.logical_client_width()),
+                    self.qr
+                        .as_ref()
+                        .map(|(width, modules)| (*width, modules.as_slice())),
+                ),
+            });
+            match result {
+                Some(Ok(())) => {
+                    unsafe { EndPaint(self.hwnd, &paint) };
+                    return;
+                }
+                Some(Err(error)) => {
+                    crate::diagnostics::log(format!("UI paint {:?} failed: {error}", self.page));
+                    self.direct2d = None;
+                }
+                None => {}
             }
         }
         fill(dc, &client, COLOR_WHITE);
@@ -297,7 +296,52 @@ impl UiContext {
                     );
                 }
             }
-            Page::Phones => {}
+            Page::Phones => {
+                let snapshot = self.state.snapshot();
+                let layout = self.phones_layout();
+                for ((_, phone), row) in snapshot.phones.iter().zip(layout.rows.iter()) {
+                    let bounds = row.bounds;
+                    draw_line(
+                        dc,
+                        self.scale(bounds.left as i32),
+                        self.scale(bounds.bottom as i32),
+                        self.scale(bounds.right as i32),
+                        self.scale(bounds.bottom as i32),
+                        COLOR_LINE,
+                    );
+                    let icon = row.icon;
+                    draw_label(
+                        dc,
+                        "\u{e8ea}",
+                        RECT {
+                            left: self.scale(icon.left as i32),
+                            top: self.scale(icon.top as i32),
+                            right: self.scale(icon.right as i32),
+                            bottom: self.scale(icon.bottom as i32),
+                        },
+                        self.icon_font,
+                        COLOR_TEXT,
+                        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                    );
+                    let dot = row.status_dot;
+                    fill_ellipse(
+                        dc,
+                        RECT {
+                            left: self.scale(dot.left as i32),
+                            top: self.scale(dot.top as i32),
+                            right: self.scale(dot.right as i32),
+                            bottom: self.scale(dot.bottom as i32),
+                        },
+                        if snapshot.status.connected_phone.as_deref()
+                            == Some(phone.phone_name.as_str())
+                        {
+                            COLOR_TEAL
+                        } else {
+                            COLOR_MUTED
+                        },
+                    );
+                }
+            }
             Page::Files => {}
             Page::Settings => {
                 draw_line(
