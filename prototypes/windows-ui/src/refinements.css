@@ -1,0 +1,21 @@
+/* Final optical pass at the desktop application's normal window size. */
+.content { padding-top: 30px; padding-bottom: 21px; }
+.heading { margin-bottom: 21px; }
+.hero { min-height: 108px; margin-bottom: 15px; }
+.info-row { min-height: 55px; }
+.actions { margin-top: 19px; }
+.setting-section { padding-bottom: 12px; margin-bottom: 13px; }
+.setting-row { min-height: 47px; font-size: 13px; }
+.setting-section h2 { font-size: 14px; margin-bottom: 6px; }
+.nav-item { font-size: 14px; }
+.button { font-size: 13px; }
+.intro, .hero-copy p { font-size: 13px; }
+.info-row { font-size: 14px; }
+.phone-text strong { font-size: 16px; }
+.phone-text small, .hint, .steps small { font-size: 12px; }
+.recipient, .tabs button, .dropzone>strong, .received-intro strong, .received-file strong { font-size: 13px; }
+.nav-item.active:before, .dot, .switch.on, .progress span { background-color: #00bab8; }
+.brand-mark { display: block; object-fit: cover; background: #101214; }
+.dot.offline { background-color: #abb9ba; }
+.pill.waiting .dot { background-color: #e3a13c; }
+@media (max-width: 760px) { .content { padding-top: 25px; } }
