@@ -60,6 +60,33 @@ pub(super) struct StatusLayout {
     pub pair_action: Rect,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct FilesLayout {
+    pub destination: Rect,
+    pub status: Rect,
+    pub failures: Rect,
+    pub drop_hint: Rect,
+    pub security_note: Rect,
+    pub receive_root: Rect,
+    pub receive_action: Rect,
+}
+
+impl FilesLayout {
+    pub(super) fn new(client_width: f32) -> Self {
+        let right = ShellLayout::new(client_width).content_right;
+        let text_width = right - 220.0 - 16.0;
+        Self {
+            destination: Rect::from_xywh(220.0, 132.0, text_width, 26.0),
+            status: Rect::from_xywh(220.0, 154.0, text_width, 42.0),
+            failures: Rect::from_xywh(220.0, 252.0, text_width, 42.0),
+            drop_hint: Rect::from_xywh(220.0, 310.0, text_width, 30.0),
+            security_note: Rect::from_xywh(220.0, 350.0, text_width, 48.0),
+            receive_root: Rect::from_xywh(220.0, 456.0, text_width - 112.0, 44.0),
+            receive_action: Rect::from_xywh(right - 116.0, 452.0, 100.0, 36.0),
+        }
+    }
+}
+
 impl StatusLayout {
     pub(super) fn new(client_width: f32) -> Self {
         let shell = ShellLayout::new(client_width);
@@ -78,6 +105,7 @@ pub(super) struct SettingsLayout {
     pub shell: ShellLayout,
     pub save_action: Rect,
     pub name_edit: Rect,
+    pub name_frame: Rect,
     pub service_status_dot: Rect,
     pub repair_action: Rect,
     pub separators: [f32; 2],
@@ -132,14 +160,21 @@ impl SettingsLayout {
         let update_history = Rect::from_xywh(update_action.left - 8.0 - 120.0, 476.0, 120.0, 32.0);
         let update_repository =
             Rect::from_xywh(update_history.left - 8.0 - 96.0, 476.0, 96.0, 32.0);
+        let name_edit = Rect::from_xywh(
+            350.0,
+            132.0,
+            (shell.content_right - 350.0 - 102.0).clamp(220.0, 330.0),
+            27.0,
+        );
         Self {
             shell,
             save_action,
-            name_edit: Rect::from_xywh(
-                350.0,
-                132.0,
-                (shell.content_right - 350.0 - 102.0).clamp(220.0, 330.0),
-                27.0,
+            name_edit,
+            name_frame: Rect::from_xywh(
+                name_edit.left - 8.0,
+                name_edit.top - 5.0,
+                name_edit.width() + 16.0,
+                37.0,
             ),
             service_status_dot: Rect::from_xywh(shell.content_left + 6.0, 316.0, 12.0, 12.0),
             repair_action: Rect::from_xywh(shell.content_right - 112.0, 298.0, 112.0, 38.0),
@@ -225,6 +260,15 @@ impl PhonesLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_receive_path_does_not_overlap_change_button() {
+        for width in [680.0, 760.0, 1200.0] {
+            let layout = FilesLayout::new(width);
+            assert!(layout.receive_root.right < layout.receive_action.left);
+            assert!(layout.receive_action.right <= width);
+        }
+    }
 
     #[test]
     fn header_actions_stay_right_aligned() {

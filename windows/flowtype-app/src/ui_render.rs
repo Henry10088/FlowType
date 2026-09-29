@@ -239,15 +239,17 @@ impl UiContext {
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32;
         let logical_height = client.bottom as f32 * 96.0 / dpi;
         let panels = page_panels(self.page, self.logical_client_width(), self.phone_ids.len());
-        // Notices are drawn by the shared GDI path until the component renderer owns them.
-        if self.save_notice.is_none() {
+        {
             let result = self.direct2d.as_ref().map(|painter| match self.page {
                 Page::Status => painter.paint_status(
                     logical_height,
                     &StatusLayout::new(self.logical_client_width()),
                     &panels,
+                    self.save_notice.as_ref(),
                 ),
-                Page::Files => painter.paint_files(logical_height, &panels),
+                Page::Files => {
+                    painter.paint_files(logical_height, &panels, self.save_notice.as_ref())
+                }
                 Page::Phones => {
                     let snapshot = self.state.snapshot();
                     let rows = snapshot
@@ -258,13 +260,21 @@ impl UiContext {
                                 == Some(phone.phone_name.as_str()),
                         })
                         .collect::<Vec<_>>();
-                    painter.paint_phones(logical_height, &self.phones_layout(), &rows, &panels)
+                    painter.paint_phones(
+                        logical_height,
+                        &self.phones_layout(),
+                        &rows,
+                        &panels,
+                        self.save_notice.as_ref(),
+                    )
                 }
                 Page::Settings => painter.paint_settings(
                     logical_height,
                     &SettingsLayout::new(self.logical_client_width()),
                     self.state.snapshot().injector_ready,
+                    unsafe { GetFocus() } == self.name_edit,
                     &panels,
+                    self.save_notice.as_ref(),
                 ),
                 Page::Pairing => painter.paint_pairing(
                     logical_height,
@@ -273,6 +283,7 @@ impl UiContext {
                         .as_ref()
                         .map(|(width, modules)| (*width, modules.as_slice())),
                     &panels,
+                    self.save_notice.as_ref(),
                 ),
             });
             match result {
@@ -392,21 +403,16 @@ impl UiContext {
             }
             Page::Files => {}
             Page::Settings => {
-                draw_line(
+                let field = SettingsLayout::new(self.logical_client_width()).name_frame;
+                outline_round_rect(
                     dc,
-                    self.scale(204),
-                    self.scale(262),
-                    self.scale(722),
-                    self.scale(262),
-                    COLOR_LINE,
-                );
-                draw_line(
-                    dc,
-                    self.scale(204),
-                    self.scale(382),
-                    self.scale(722),
-                    self.scale(382),
-                    COLOR_LINE,
+                    device_rect(field, dpi as u32),
+                    if unsafe { GetFocus() } == self.name_edit {
+                        COLOR_TEAL
+                    } else {
+                        COLOR_LINE
+                    },
+                    self.scale(12),
                 );
                 let dot = RECT {
                     left: self.scale(220),
@@ -491,7 +497,7 @@ impl UiContext {
                 if notice.success {
                     COLOR_TEAL_PALE
                 } else {
-                    0x00f1_e4e4
+                    0x00e4_e4f1
                 },
                 self.scale(8),
             );

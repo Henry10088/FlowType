@@ -353,9 +353,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings::set_auto_start(false)?;
         return Ok(());
     }
-    let Some(_instance) = SingleInstance::acquire()? else {
+    let Some(_instance) = SingleInstance::acquire(ui_preview)? else {
         diagnostics::log("startup existing_instance");
-        ui::show_existing_window();
+        if !ui_preview {
+            ui::show_existing_window();
+        }
         return Ok(());
     };
     let identity = PcIdentity::load_or_create()?;
@@ -465,8 +467,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 struct SingleInstance(HANDLE);
 
 impl SingleInstance {
-    fn acquire() -> std::io::Result<Option<Self>> {
-        let name = wide(r"Local\FlowType.MainApp");
+    fn acquire(preview: bool) -> std::io::Result<Option<Self>> {
+        let name = wide(if preview {
+            r"Local\FlowType.UiPreview"
+        } else {
+            r"Local\FlowType.MainApp"
+        });
         let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
         if handle.is_null() {
             return Err(std::io::Error::last_os_error());

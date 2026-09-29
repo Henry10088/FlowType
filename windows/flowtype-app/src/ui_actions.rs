@@ -1,3 +1,4 @@
+use super::ui_pages::file_transfer_status;
 use super::*;
 use std::path::PathBuf;
 use windows::Win32::Foundation::HWND as WinHwnd;
@@ -71,7 +72,7 @@ impl UiContext {
             Ok(()) => self.show_save_notice(true, tr("文件传输已取消", "File transfer canceled")),
             Err(error) => self.show_save_notice(false, &error.to_string()),
         }
-        self.rebuild_page();
+        self.update_file_controls(self.state.snapshot().file_transfer.as_ref());
     }
 
     pub(super) fn change_receive_folder(&mut self) {
@@ -81,7 +82,14 @@ impl UiContext {
         });
         match result {
             Ok(()) => {
-                self.rebuild_page();
+                let root = self
+                    .state
+                    .file_receive_root()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| {
+                        tr("接收位置不可用", "Receive folder unavailable").to_owned()
+                    });
+                set_control_text(self.file_receive_root, &root);
                 self.show_save_notice(true, tr("接收位置已更新", "Receive folder updated"));
             }
             Err(error) if error.to_string() == "canceled" => {}
@@ -96,6 +104,9 @@ impl UiContext {
     }
 
     pub(super) fn set_page(&mut self, page: Page) {
+        if self.page == page {
+            return;
+        }
         if self.page == Page::Pairing && page != Page::Pairing {
             self.state.cancel_pairing();
         }
@@ -374,8 +385,15 @@ impl UiContext {
                 }
             }
             Page::Files => {
-                self.rebuild_page();
-                return;
+                set_control_text(
+                    self.file_destination,
+                    snapshot
+                        .status
+                        .connected_phone
+                        .as_deref()
+                        .unwrap_or(tr("手机未连接", "Phone is not connected")),
+                );
+                self.update_file_controls(snapshot.file_transfer.as_ref());
             }
             Page::Settings => {
                 set_control_text(
@@ -390,9 +408,42 @@ impl UiContext {
             }
             Page::Pairing => {}
         }
-        unsafe { InvalidateRect(self.hwnd, null(), 0) };
+        if matches!(self.page, Page::Phones | Page::Settings) {
+            unsafe { InvalidateRect(self.hwnd, null(), 0) };
+        }
         self.update_tray();
         ui_floating::refresh(self.ball_hwnd);
+    }
+
+    pub(super) fn update_file_controls(
+        &self,
+        transfer: Option<&crate::file_transfer_server::FileTransferSnapshot>,
+    ) {
+        let active = transfer.is_some_and(|value| value.active());
+        let status = transfer.map_or_else(
+            || {
+                tr(
+                    "选择文件后，手机只需确认一次",
+                    "The phone confirms once per transfer",
+                )
+                .to_owned()
+            },
+            file_transfer_status,
+        );
+        set_control_text(self.file_status, &status);
+        let failures = transfer
+            .filter(|value| !value.failed_paths.is_empty())
+            .map_or_else(String::new, |value| {
+                format!(
+                    "{}：{}",
+                    tr("失败文件", "Failed files"),
+                    value.failed_paths.join(" · ")
+                )
+            });
+        set_control_text(self.file_failures, &failures);
+        set_control_visible(self.file_choose, !active);
+        set_control_visible(self.file_folder, !active);
+        set_control_visible(self.file_cancel, active);
     }
 
     pub(super) fn refresh_update_controls(&mut self) {
@@ -408,17 +459,13 @@ impl UiContext {
         } else {
             snapshot.message.clone()
         };
+        set_control_text(self.update_status, &status);
+        set_control_text(self.update_action, &snapshot.action_label);
+        set_control_visible(
+            self.update_action,
+            snapshot.action != update::UpdateAction::None,
+        );
         unsafe {
-            SetWindowTextW(self.update_status, wide(&status).as_ptr());
-            SetWindowTextW(self.update_action, wide(&snapshot.action_label).as_ptr());
-            ShowWindow(
-                self.update_action,
-                if snapshot.action == update::UpdateAction::None {
-                    SW_HIDE
-                } else {
-                    SW_SHOW
-                },
-            );
             if let Some((transferred, total)) = snapshot.progress {
                 let position = if total == 0 {
                     0
@@ -430,16 +477,10 @@ impl UiContext {
                 };
                 SendMessageW(self.update_progress, PBM_SETRANGE32, 0, 1000);
                 SendMessageW(self.update_progress, PBM_SETPOS, position as usize, 0);
-                ShowWindow(self.update_progress, SW_SHOW);
+                set_control_visible(self.update_progress, true);
             } else {
-                ShowWindow(self.update_progress, SW_HIDE);
+                set_control_visible(self.update_progress, false);
             }
-            RedrawWindow(
-                self.hwnd,
-                null(),
-                null_mut(),
-                RDW_INVALIDATE | RDW_NOERASE | RDW_ALLCHILDREN,
-            );
         }
         self.update_tray();
     }

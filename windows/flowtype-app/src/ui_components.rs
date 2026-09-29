@@ -21,6 +21,7 @@ pub(super) fn page_panels(page: Page, client_width: f32, phone_count: usize) -> 
     };
     match page {
         Page::Status => vec![panel(92.0, 296.0)],
+        Page::Phones if phone_count == 0 => vec![panel(100.0, 190.0)],
         Page::Phones => PhonesLayout::new(client_width, phone_count)
             .rows
             .iter()

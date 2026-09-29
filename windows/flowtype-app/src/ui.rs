@@ -24,6 +24,7 @@ use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
     SetProcessDpiAwarenessContext,
 };
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 use windows_sys::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP,
     NIIF_INFO, NIIF_WARNING, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
@@ -61,7 +62,9 @@ mod ui_tray;
 use ui_commands::*;
 use ui_components::*;
 use ui_direct2d::{Direct2dPainter, PhonePaintRow};
-use ui_layout::{PairingLayout, PhonesLayout, SettingsLayout, ShellLayout, StatusLayout};
+use ui_layout::{
+    FilesLayout, PairingLayout, PhonesLayout, SettingsLayout, ShellLayout, StatusLayout,
+};
 use ui_paint::*;
 use ui_theme::*;
 
@@ -103,6 +106,7 @@ struct UiContext {
     host: IpAddr,
     hwnd: HWND,
     page: Page,
+    shell_controls: Vec<HWND>,
     controls: Vec<HWND>,
     buttons: Vec<(HWND, ButtonKind)>,
     muted_controls: Vec<HWND>,
@@ -115,6 +119,21 @@ struct UiContext {
     status_address: HWND,
     status_error: HWND,
     phone_statuses: Vec<HWND>,
+    phone_names: Vec<HWND>,
+    file_destination: HWND,
+    file_status: HWND,
+    file_failures: HWND,
+    file_drop_hint: HWND,
+    file_security_note: HWND,
+    file_receive_root: HWND,
+    file_choose: HWND,
+    file_folder: HWND,
+    file_cancel: HWND,
+    pair_open_instruction: HWND,
+    pair_scan_instruction: HWND,
+    pair_computer: HWND,
+    pair_waiting: HWND,
+    pair_note: HWND,
     service_status: HWND,
     auto_start: HWND,
     show_floating: HWND,
@@ -149,6 +168,7 @@ impl UiContext {
             host,
             hwnd: null_mut(),
             page,
+            shell_controls: Vec::new(),
             controls: Vec::new(),
             buttons: Vec::new(),
             muted_controls: Vec::new(),
@@ -161,6 +181,21 @@ impl UiContext {
             status_address: null_mut(),
             status_error: null_mut(),
             phone_statuses: Vec::new(),
+            phone_names: Vec::new(),
+            file_destination: null_mut(),
+            file_status: null_mut(),
+            file_failures: null_mut(),
+            file_drop_hint: null_mut(),
+            file_security_note: null_mut(),
+            file_receive_root: null_mut(),
+            file_choose: null_mut(),
+            file_folder: null_mut(),
+            file_cancel: null_mut(),
+            pair_open_instruction: null_mut(),
+            pair_scan_instruction: null_mut(),
+            pair_computer: null_mut(),
+            pair_waiting: null_mut(),
+            pair_note: null_mut(),
             service_status: null_mut(),
             auto_start: null_mut(),
             show_floating: null_mut(),
@@ -244,8 +279,8 @@ pub fn run(
     let context_ptr = Box::into_raw(context);
     let title = wide(product_name());
     let system_dpi = unsafe { GetDpiForSystem() }.max(96) as i32;
-    let initial_width = 760 * system_dpi / 96;
-    let initial_height = 600 * system_dpi / 96;
+    let initial_width = 800 * system_dpi / 96;
+    let initial_height = 660 * system_dpi / 96;
     let hwnd = unsafe {
         CreateWindowExW(
             0,
@@ -274,10 +309,12 @@ pub fn run(
     }
     let mut message: MSG = unsafe { zeroed() };
     while unsafe { GetMessageW(&mut message, null_mut(), 0, 0) } > 0 {
-        unsafe {
-            TranslateMessage(&message);
-            DispatchMessageW(&message)
-        };
+        if unsafe { IsDialogMessageW(hwnd, &message) } == 0 {
+            unsafe {
+                TranslateMessage(&message);
+                DispatchMessageW(&message)
+            };
+        }
     }
     Ok(())
 }
@@ -286,9 +323,21 @@ fn set_control_text(control: HWND, value: &str) {
     if control.is_null() {
         return;
     }
+    if window_text(control) == value {
+        return;
+    }
     let value = wide(value);
     unsafe {
         SetWindowTextW(control, value.as_ptr());
+    }
+}
+
+fn set_control_visible(control: HWND, visible: bool) {
+    if control.is_null() {
+        return;
+    }
+    if (unsafe { IsWindowVisible(control) } != 0) != visible {
+        unsafe { ShowWindow(control, if visible { SW_SHOW } else { SW_HIDE }) };
     }
 }
 
@@ -317,6 +366,7 @@ unsafe extern "system" fn window_proc(
             crate::diagnostics::log("window create");
             ui.rebuild_fonts();
             ui.ensure_painter();
+            ui.create_shell();
             ui.rebuild_page();
             unsafe { DragAcceptFiles(hwnd, 1) };
             ui.add_tray();
@@ -327,6 +377,9 @@ unsafe extern "system" fn window_proc(
         }
         WM_COMMAND => {
             let id = wparam & 0xffff;
+            if id == ID_NAME && matches!((wparam >> 16) as u32, EN_SETFOCUS | EN_KILLFOCUS) {
+                unsafe { InvalidateRect(hwnd, null(), 0) };
+            }
             match command_for_id(id) {
                 Some(UiCommand::Navigate(page)) => {
                     ui.set_page(page);
@@ -433,9 +486,7 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_EXITSIZEMOVE => {
-            if ui.page != Page::Pairing {
-                ui.rebuild_page();
-            }
+            ui.reposition_responsive_controls();
             0
         }
         WM_DRAWITEM => {
@@ -477,6 +528,7 @@ unsafe extern "system" fn window_proc(
             }
             ui.ensure_painter();
             ui.rebuild_fonts();
+            ui.refresh_shell();
             ui.rebuild_page();
             0
         }
@@ -488,8 +540,8 @@ unsafe extern "system" fn window_proc(
         }
         WM_GETMINMAXINFO => {
             let info = unsafe { &mut *(lparam as *mut MINMAXINFO) };
-            info.ptMinTrackSize.x = ui.scale(680);
-            info.ptMinTrackSize.y = ui.scale(560);
+            info.ptMinTrackSize.x = ui.scale(760);
+            info.ptMinTrackSize.y = ui.scale(640);
             0
         }
         WM_CLOSE => {

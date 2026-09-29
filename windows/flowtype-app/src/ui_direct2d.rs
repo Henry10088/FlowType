@@ -17,6 +17,7 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
 use windows::core::w;
 
+use super::SaveNotice;
 use super::ui_layout::{PairingLayout, PhonesLayout, Rect, SettingsLayout, StatusLayout};
 
 pub(super) struct PhonePaintRow {
@@ -26,6 +27,7 @@ pub(super) struct PhonePaintRow {
 pub(super) struct Direct2dPainter {
     target: ID2D1HwndRenderTarget,
     icon: IDWriteTextFormat,
+    body: IDWriteTextFormat,
 }
 
 impl Direct2dPainter {
@@ -58,11 +60,12 @@ impl Direct2dPainter {
             let write: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let icon = text_format(
                 &write,
-                w!("Segoe Fluent Icons"),
+                w!("Segoe MDL2 Assets"),
                 DWRITE_FONT_WEIGHT_NORMAL,
                 20.0,
             )?;
-            Ok(Self { target, icon })
+            let body = text_format(&write, w!("Segoe UI"), DWRITE_FONT_WEIGHT_NORMAL, 14.0)?;
+            Ok(Self { target, icon, body })
         }
     }
 
@@ -80,11 +83,13 @@ impl Direct2dPainter {
         layout: &PhonesLayout,
         rows: &[PhonePaintRow],
         panels: &[Rect],
+        notice: Option<&SaveNotice>,
     ) -> windows::core::Result<()> {
         unsafe {
             let text = self.brush(rgb(31, 31, 31))?;
             let teal = self.brush(rgb(0, 186, 184))?;
             let offline = self.brush(rgb(204, 204, 204))?;
+            let notice_brushes = self.notice_brushes(notice)?;
             self.begin_shell(client_height, panels)?;
 
             for (row, row_layout) in rows.iter().zip(&layout.rows) {
@@ -102,6 +107,7 @@ impl Direct2dPainter {
                     if row.connected { &teal } else { &offline },
                 );
             }
+            self.draw_notice(notice, notice_brushes.as_ref());
             self.target.EndDraw(None, None)
         }
     }
@@ -111,10 +117,12 @@ impl Direct2dPainter {
         client_height: f32,
         layout: &StatusLayout,
         panels: &[Rect],
+        notice: Option<&SaveNotice>,
     ) -> windows::core::Result<()> {
         unsafe {
             let teal = self.brush(rgb(0, 186, 184))?;
             let white = self.brush(rgb(255, 255, 255))?;
+            let notice_brushes = self.notice_brushes(notice)?;
             let line = self.begin_shell(client_height, panels)?;
             for y in layout.separators {
                 self.target.FillRectangle(
@@ -130,6 +138,7 @@ impl Direct2dPainter {
             let icon = layout.status_icon;
             self.target.FillEllipse(&ellipse(icon), &teal);
             self.draw_text("\u{e73e}", icon, &self.icon, &white);
+            self.draw_notice(notice, notice_brushes.as_ref());
             self.target.EndDraw(None, None)
         }
     }
@@ -138,9 +147,12 @@ impl Direct2dPainter {
         &self,
         client_height: f32,
         panels: &[Rect],
+        notice: Option<&SaveNotice>,
     ) -> windows::core::Result<()> {
         unsafe {
+            let notice_brushes = self.notice_brushes(notice)?;
             self.begin_shell(client_height, panels)?;
+            self.draw_notice(notice, notice_brushes.as_ref());
             self.target.EndDraw(None, None)
         }
     }
@@ -150,7 +162,9 @@ impl Direct2dPainter {
         client_height: f32,
         layout: &SettingsLayout,
         service_ready: bool,
+        name_focused: bool,
         panels: &[Rect],
+        notice: Option<&SaveNotice>,
     ) -> windows::core::Result<()> {
         unsafe {
             let color = if service_ready {
@@ -159,20 +173,32 @@ impl Direct2dPainter {
                 rgb(209, 63, 63)
             };
             let dot = self.brush(color)?;
-            let line = self.begin_shell(client_height, panels)?;
-            for y in layout.separators {
-                self.target.FillRectangle(
-                    &D2D_RECT_F {
-                        left: layout.shell.content_left - 16.0,
-                        top: y - 0.5,
-                        right: layout.shell.content_right - 20.0,
-                        bottom: y + 0.5,
+            let field_border = self.brush(if name_focused {
+                rgb(0, 186, 184)
+            } else {
+                rgb(226, 229, 233)
+            })?;
+            let notice_brushes = self.notice_brushes(notice)?;
+            self.begin_shell(client_height, panels)?;
+            let field = layout.name_frame;
+            self.target.DrawRoundedRectangle(
+                &D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: field.left,
+                        top: field.top,
+                        right: field.right,
+                        bottom: field.bottom,
                     },
-                    &line,
-                );
-            }
+                    radiusX: 6.0,
+                    radiusY: 6.0,
+                },
+                &field_border,
+                1.0,
+                None,
+            );
             let status = layout.service_status_dot;
             self.target.FillEllipse(&ellipse(status), &dot);
+            self.draw_notice(notice, notice_brushes.as_ref());
             self.target.EndDraw(None, None)
         }
     }
@@ -183,6 +209,7 @@ impl Direct2dPainter {
         layout: &PairingLayout,
         qr: Option<(usize, &[bool])>,
         panels: &[Rect],
+        notice: Option<&SaveNotice>,
     ) -> windows::core::Result<()> {
         unsafe {
             let teal = self.brush(rgb(0, 186, 184))?;
@@ -191,6 +218,7 @@ impl Direct2dPainter {
             } else {
                 None
             };
+            let notice_brushes = self.notice_brushes(notice)?;
             self.begin_shell(client_height, panels)?;
             self.target.FillEllipse(&ellipse(layout.waiting_dot), &teal);
 
@@ -216,6 +244,7 @@ impl Direct2dPainter {
                     }
                 }
             }
+            self.draw_notice(notice, notice_brushes.as_ref());
             self.target.EndDraw(None, None)
         }
     }
@@ -271,6 +300,68 @@ impl Direct2dPainter {
         unsafe { self.target.CreateSolidColorBrush(&color, None) }
     }
 
+    unsafe fn notice_brushes(
+        &self,
+        notice: Option<&SaveNotice>,
+    ) -> windows::core::Result<Option<NoticeBrushes>> {
+        let Some(notice) = notice else {
+            return Ok(None);
+        };
+        Ok(Some(NoticeBrushes {
+            background: unsafe {
+                self.brush(if notice.success {
+                    rgb(234, 249, 248)
+                } else {
+                    rgb(241, 228, 228)
+                })?
+            },
+            accent: unsafe {
+                self.brush(if notice.success {
+                    rgb(0, 186, 184)
+                } else {
+                    rgb(209, 63, 63)
+                })?
+            },
+            text: unsafe { self.brush(rgb(31, 31, 31))? },
+            white: unsafe { self.brush(rgb(255, 255, 255))? },
+        }))
+    }
+
+    unsafe fn draw_notice(&self, notice: Option<&SaveNotice>, brushes: Option<&NoticeBrushes>) {
+        let (Some(notice), Some(brushes)) = (notice, brushes) else {
+            return;
+        };
+        let right = unsafe { self.target.GetSize().width } - 18.0;
+        let toast = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: right - 222.0,
+                top: 76.0,
+                right,
+                bottom: 120.0,
+            },
+            radiusX: 8.0,
+            radiusY: 8.0,
+        };
+        unsafe {
+            self.target
+                .FillRoundedRectangle(&toast, &brushes.background);
+            let icon = Rect::from_xywh(right - 212.0, 86.0, 24.0, 24.0);
+            self.target.FillEllipse(&ellipse(icon), &brushes.accent);
+            self.draw_text(
+                if notice.success { "\u{e73e}" } else { "!" },
+                icon,
+                &self.icon,
+                &brushes.white,
+            );
+            self.draw_text(
+                &notice.text,
+                Rect::from_xywh(right - 176.0, 76.0, 166.0, 44.0),
+                &self.body,
+                &brushes.text,
+            );
+        }
+    }
+
     unsafe fn draw_text(
         &self,
         value: &str,
@@ -295,6 +386,13 @@ impl Direct2dPainter {
             );
         }
     }
+}
+
+struct NoticeBrushes {
+    background: ID2D1SolidColorBrush,
+    accent: ID2D1SolidColorBrush,
+    text: ID2D1SolidColorBrush,
+    white: ID2D1SolidColorBrush,
 }
 
 fn ellipse(rect: Rect) -> windows::Win32::Graphics::Direct2D::D2D1_ELLIPSE {
