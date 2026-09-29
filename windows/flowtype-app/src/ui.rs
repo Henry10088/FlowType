@@ -6,18 +6,19 @@ use std::sync::Arc;
 use qrcode::{Color, QrCode};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DT_CENTER, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DeleteObject,
-    EndPaint, FW_NORMAL, FW_SEMIBOLD, FillRect, GetStockObject, HFONT, InvalidateRect, PAINTSTRUCT,
-    RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW, RedrawWindow,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, DT_CENTER,
+    DT_LEFT, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, EndPaint, FW_NORMAL, FW_SEMIBOLD,
+    FillRect, GetStockObject, HFONT, HGDIOBJ, InvalidateRect, PAINTSTRUCT, RDW_ALLCHILDREN,
+    RDW_ERASE, RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW, RedrawWindow, SRCCOPY, SelectObject,
     SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow, WHITE_BRUSH,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::SS_NOPREFIX;
 use windows_sys::Win32::UI::Controls::{
     DRAWITEMSTRUCT, ICC_PROGRESS_CLASS, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX,
-    InitCommonControlsEx, ODS_FOCUS, ODS_SELECTED, PBM_SETPOS, PBM_SETRANGE32, PBS_SMOOTH,
-    TOOLTIPS_CLASSW, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTS_ALWAYSTIP, TTS_NOPREFIX,
-    TTTOOLINFOW,
+    InitCommonControlsEx, ODS_DISABLED, ODS_FOCUS, ODS_SELECTED, PBM_SETPOS, PBM_SETRANGE32,
+    PBS_SMOOTH, TOOLTIPS_CLASSW, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTS_ALWAYSTIP,
+    TTS_NOPREFIX, TTTOOLINFOW,
 };
 use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
@@ -38,6 +39,8 @@ use crate::{AppState, PORT, WM_APP_STATE, settings, update};
 mod ui_actions;
 #[path = "ui_commands.rs"]
 mod ui_commands;
+#[path = "ui_components.rs"]
+mod ui_components;
 #[path = "ui_direct2d.rs"]
 mod ui_direct2d;
 #[path = "ui_floating.rs"]
@@ -56,6 +59,7 @@ mod ui_theme;
 mod ui_tray;
 
 use ui_commands::*;
+use ui_components::*;
 use ui_direct2d::{Direct2dPainter, PhonePaintRow};
 use ui_layout::{PairingLayout, PhonesLayout, SettingsLayout, ShellLayout, StatusLayout};
 use ui_paint::*;
@@ -247,7 +251,7 @@ pub fn run(
             0,
             class_name.as_ptr(),
             title.as_ptr(),
-            WS_OVERLAPPEDWINDOW,
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             initial_width,

@@ -11,6 +11,13 @@ impl UiContext {
         };
         let pressed = item.itemState & ODS_SELECTED != 0;
         let focused = item.itemState & ODS_FOCUS != 0;
+        let disabled = item.itemState & ODS_DISABLED != 0;
+        let visual = ButtonVisual {
+            pressed,
+            focused,
+            disabled,
+            hovered: button_hovered(item.hwndItem),
+        };
         let mut rect = item.rcItem;
         let text = window_text(item.hwndItem);
         unsafe { SetBkMode(item.hDC, TRANSPARENT as i32) };
@@ -18,21 +25,44 @@ impl UiContext {
         match kind {
             ButtonKind::Navigation(target) => {
                 let selected = self.selected_navigation() == *target;
-                fill(
-                    item.hDC,
-                    &rect,
-                    if selected {
-                        COLOR_TEAL_PALE
-                    } else {
-                        COLOR_SIDEBAR
-                    },
-                );
+                fill(item.hDC, &rect, COLOR_SIDEBAR);
+                let selection = RECT {
+                    left: rect.left + self.scale(NAV_INSET),
+                    right: rect.right - self.scale(NAV_INSET),
+                    top: rect.top + self.scale(2),
+                    bottom: rect.bottom - self.scale(2),
+                };
+                if selected {
+                    fill_round_rect(
+                        item.hDC,
+                        selection,
+                        COLOR_TEAL_PALE,
+                        self.scale(CORNER_RADIUS),
+                    );
+                } else if visual.hovered || pressed {
+                    fill_round_rect(
+                        item.hDC,
+                        selection,
+                        if pressed { COLOR_PRESSED } else { COLOR_HOVER },
+                        self.scale(CORNER_RADIUS),
+                    );
+                }
                 if selected {
                     let marker = RECT {
-                        right: self.scale(4),
-                        ..rect
+                        left: selection.left,
+                        right: selection.left + self.scale(3),
+                        top: selection.top + self.scale(9),
+                        bottom: selection.bottom - self.scale(9),
                     };
-                    fill(item.hDC, &marker, COLOR_TEAL);
+                    fill_round_rect(item.hDC, marker, COLOR_TEAL, self.scale(2));
+                }
+                if focused {
+                    outline_round_rect(
+                        item.hDC,
+                        selection,
+                        COLOR_TEAL,
+                        self.scale(CORNER_RADIUS * 2),
+                    );
                 }
                 let icon = match target {
                     Page::Status => "\u{e7f4}",
@@ -59,17 +89,20 @@ impl UiContext {
                     &text,
                     rect,
                     self.navigation_font,
-                    COLOR_TEXT,
+                    if disabled { COLOR_MUTED } else { COLOR_TEXT },
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE,
                 );
             }
             ButtonKind::Secondary => {
-                fill(
-                    item.hDC,
-                    &rect,
-                    if pressed { 0x00f3_f3f3 } else { COLOR_WHITE },
-                );
-                outline_round_rect(item.hDC, rect, COLOR_LINE, self.scale(4));
+                let style = if matches!(
+                    item.CtlID as usize,
+                    ID_PAIR | ID_SAVE_SETTINGS | ID_CHOOSE_FILES
+                ) {
+                    ActionStyle::Primary
+                } else {
+                    ActionStyle::Secondary
+                };
+                draw_action(item.hDC, rect, style, visual, self.scale(CORNER_RADIUS));
                 let mut text_rect = rect;
                 if item.CtlID as usize == ID_PAIR {
                     let icon_rect = RECT {
@@ -82,7 +115,11 @@ impl UiContext {
                         "\u{e8ea}",
                         icon_rect,
                         self.icon_font,
-                        COLOR_TEAL,
+                        if style == ActionStyle::Primary {
+                            COLOR_WHITE
+                        } else {
+                            COLOR_TEAL
+                        },
                         DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                     );
                     text_rect.left += self.scale(26);
@@ -92,15 +129,17 @@ impl UiContext {
                     &text,
                     text_rect,
                     self.body_font,
-                    COLOR_TEXT,
+                    action_text_color(style, disabled),
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                 );
             }
             ButtonKind::Back => {
-                fill(
+                draw_action(
                     item.hDC,
-                    &rect,
-                    if pressed { 0x00f3_f3f3 } else { COLOR_WHITE },
+                    rect,
+                    ActionStyle::Subtle,
+                    visual,
+                    self.scale(CORNER_RADIUS),
                 );
                 draw_label(
                     item.hDC,
@@ -118,6 +157,9 @@ impl UiContext {
                     self.auto_start_checked
                 };
                 fill(item.hDC, &rect, COLOR_WHITE);
+                if visual.hovered {
+                    fill_round_rect(item.hDC, rect, COLOR_HOVER, self.scale(CORNER_RADIUS));
+                }
                 let box_size = self.scale(18);
                 let top = (rect.top + rect.bottom - box_size) / 2;
                 let box_rect = RECT {
@@ -135,7 +177,7 @@ impl UiContext {
                     item.hDC,
                     box_rect,
                     if checked { COLOR_TEAL } else { COLOR_LINE },
-                    self.scale(2),
+                    self.scale(6),
                 );
                 if checked {
                     draw_checkmark(item.hDC, box_rect, COLOR_WHITE);
@@ -151,16 +193,13 @@ impl UiContext {
                 );
             }
             ButtonKind::Language => {
-                fill(
+                draw_action(
                     item.hDC,
-                    &rect,
-                    if pressed {
-                        COLOR_TEAL_PALE
-                    } else {
-                        COLOR_WHITE
-                    },
+                    rect,
+                    ActionStyle::Secondary,
+                    visual,
+                    self.scale(CORNER_RADIUS),
                 );
-                outline_round_rect(item.hDC, rect, COLOR_LINE, self.scale(4));
                 draw_label(
                     item.hDC,
                     "\u{e774}",
@@ -171,25 +210,16 @@ impl UiContext {
                 );
             }
         }
-        if focused && !matches!(kind, ButtonKind::Navigation(_)) {
-            let focus = if matches!(kind, ButtonKind::Checkbox) {
-                let text_width = measure_text_width(item.hDC, &text, self.body_font);
-                let text_height = self.scale(20);
-                RECT {
-                    left: rect.left - self.scale(2),
-                    top: (rect.top + rect.bottom - text_height) / 2,
-                    right: rect.left + text_width + self.scale(2),
-                    bottom: (rect.top + rect.bottom + text_height) / 2,
-                }
-            } else {
-                RECT {
-                    left: item.rcItem.left + self.scale(3),
-                    top: item.rcItem.top + self.scale(3),
-                    right: item.rcItem.right - self.scale(3),
-                    bottom: item.rcItem.bottom - self.scale(3),
-                }
+        if focused && matches!(kind, ButtonKind::Checkbox) {
+            let text_width = measure_text_width(item.hDC, &text, self.body_font);
+            let text_height = self.scale(20);
+            let focus = RECT {
+                left: rect.left - self.scale(2),
+                top: (rect.top + rect.bottom - text_height) / 2,
+                right: rect.left + text_width + self.scale(2),
+                bottom: (rect.top + rect.bottom + text_height) / 2,
             };
-            outline_round_rect(item.hDC, focus, COLOR_TEAL, self.scale(4));
+            outline_round_rect(item.hDC, focus, COLOR_TEAL, self.scale(CORNER_RADIUS * 2));
         }
     }
 
@@ -203,19 +233,21 @@ impl UiContext {
 
     pub(super) fn paint(&mut self) {
         let mut paint: PAINTSTRUCT = unsafe { zeroed() };
-        let dc = unsafe { BeginPaint(self.hwnd, &mut paint) };
+        let output_dc = unsafe { BeginPaint(self.hwnd, &mut paint) };
         let mut client: RECT = unsafe { zeroed() };
         unsafe { GetClientRect(self.hwnd, &mut client) };
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32;
         let logical_height = client.bottom as f32 * 96.0 / dpi;
+        let panels = page_panels(self.page, self.logical_client_width(), self.phone_ids.len());
         // Notices are drawn by the shared GDI path until the component renderer owns them.
         if self.save_notice.is_none() {
             let result = self.direct2d.as_ref().map(|painter| match self.page {
                 Page::Status => painter.paint_status(
                     logical_height,
                     &StatusLayout::new(self.logical_client_width()),
+                    &panels,
                 ),
-                Page::Files => painter.paint_files(logical_height),
+                Page::Files => painter.paint_files(logical_height, &panels),
                 Page::Phones => {
                     let snapshot = self.state.snapshot();
                     let rows = snapshot
@@ -226,12 +258,13 @@ impl UiContext {
                                 == Some(phone.phone_name.as_str()),
                         })
                         .collect::<Vec<_>>();
-                    painter.paint_phones(logical_height, &self.phones_layout(), &rows)
+                    painter.paint_phones(logical_height, &self.phones_layout(), &rows, &panels)
                 }
                 Page::Settings => painter.paint_settings(
                     logical_height,
                     &SettingsLayout::new(self.logical_client_width()),
                     self.state.snapshot().injector_ready,
+                    &panels,
                 ),
                 Page::Pairing => painter.paint_pairing(
                     logical_height,
@@ -239,6 +272,7 @@ impl UiContext {
                     self.qr
                         .as_ref()
                         .map(|(width, modules)| (*width, modules.as_slice())),
+                    &panels,
                 ),
             });
             match result {
@@ -253,6 +287,22 @@ impl UiContext {
                 None => {}
             }
         }
+        let buffer_dc = unsafe { CreateCompatibleDC(output_dc) };
+        let bitmap = if !buffer_dc.is_null() {
+            unsafe { CreateCompatibleBitmap(output_dc, client.right.max(1), client.bottom.max(1)) }
+        } else {
+            null_mut()
+        };
+        let old_bitmap = if !bitmap.is_null() {
+            unsafe { SelectObject(buffer_dc, bitmap as HGDIOBJ) }
+        } else {
+            null_mut()
+        };
+        let dc = if old_bitmap.is_null() {
+            output_dc
+        } else {
+            buffer_dc
+        };
         fill(dc, &client, COLOR_WHITE);
         let sidebar = RECT {
             right: self.scale(180),
@@ -267,6 +317,13 @@ impl UiContext {
             client.bottom,
             COLOR_LINE,
         );
+        for panel in panels {
+            draw_panel(
+                dc,
+                device_rect(panel, dpi as u32),
+                self.scale(CORNER_RADIUS),
+            );
+        }
 
         match self.page {
             Page::Status => {
@@ -300,15 +357,6 @@ impl UiContext {
                 let snapshot = self.state.snapshot();
                 let layout = self.phones_layout();
                 for ((_, phone), row) in snapshot.phones.iter().zip(layout.rows.iter()) {
-                    let bounds = row.bounds;
-                    draw_line(
-                        dc,
-                        self.scale(bounds.left as i32),
-                        self.scale(bounds.bottom as i32),
-                        self.scale(bounds.right as i32),
-                        self.scale(bounds.bottom as i32),
-                        COLOR_LINE,
-                    );
                     let icon = row.icon;
                     draw_label(
                         dc,
@@ -476,6 +524,28 @@ impl UiContext {
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
         }
-        unsafe { EndPaint(self.hwnd, &paint) };
+        unsafe {
+            if !old_bitmap.is_null() {
+                BitBlt(
+                    output_dc,
+                    0,
+                    0,
+                    client.right,
+                    client.bottom,
+                    dc,
+                    0,
+                    0,
+                    SRCCOPY,
+                );
+                SelectObject(buffer_dc, old_bitmap);
+            }
+            if !bitmap.is_null() {
+                DeleteObject(bitmap);
+            }
+            if !buffer_dc.is_null() {
+                DeleteDC(buffer_dc);
+            }
+            EndPaint(self.hwnd, &paint);
+        }
     }
 }

@@ -741,6 +741,9 @@ impl UiContext {
             self.body_font,
         );
         self.buttons.push((control, kind));
+        if !control.is_null() {
+            track_button_hover(control);
+        }
         control
     }
 

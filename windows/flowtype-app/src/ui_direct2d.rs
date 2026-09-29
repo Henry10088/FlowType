@@ -5,8 +5,8 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1CreateFactory,
-    ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
+    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
+    D2D1CreateFactory, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -79,23 +79,15 @@ impl Direct2dPainter {
         client_height: f32,
         layout: &PhonesLayout,
         rows: &[PhonePaintRow],
+        panels: &[Rect],
     ) -> windows::core::Result<()> {
         unsafe {
             let text = self.brush(rgb(31, 31, 31))?;
             let teal = self.brush(rgb(0, 186, 184))?;
             let offline = self.brush(rgb(204, 204, 204))?;
-            let line = self.begin_shell(client_height)?;
+            self.begin_shell(client_height, panels)?;
 
             for (row, row_layout) in rows.iter().zip(&layout.rows) {
-                self.target.FillRectangle(
-                    &D2D_RECT_F {
-                        left: row_layout.bounds.left,
-                        top: row_layout.bounds.bottom - 1.0,
-                        right: row_layout.bounds.right,
-                        bottom: row_layout.bounds.bottom,
-                    },
-                    &line,
-                );
                 self.draw_text("\u{e8ea}", row_layout.icon, &self.icon, &text);
                 let dot = row_layout.status_dot;
                 self.target.FillEllipse(
@@ -118,11 +110,12 @@ impl Direct2dPainter {
         &self,
         client_height: f32,
         layout: &StatusLayout,
+        panels: &[Rect],
     ) -> windows::core::Result<()> {
         unsafe {
             let teal = self.brush(rgb(0, 186, 184))?;
             let white = self.brush(rgb(255, 255, 255))?;
-            let line = self.begin_shell(client_height)?;
+            let line = self.begin_shell(client_height, panels)?;
             for y in layout.separators {
                 self.target.FillRectangle(
                     &D2D_RECT_F {
@@ -141,9 +134,13 @@ impl Direct2dPainter {
         }
     }
 
-    pub(super) fn paint_files(&self, client_height: f32) -> windows::core::Result<()> {
+    pub(super) fn paint_files(
+        &self,
+        client_height: f32,
+        panels: &[Rect],
+    ) -> windows::core::Result<()> {
         unsafe {
-            self.begin_shell(client_height)?;
+            self.begin_shell(client_height, panels)?;
             self.target.EndDraw(None, None)
         }
     }
@@ -153,6 +150,7 @@ impl Direct2dPainter {
         client_height: f32,
         layout: &SettingsLayout,
         service_ready: bool,
+        panels: &[Rect],
     ) -> windows::core::Result<()> {
         unsafe {
             let color = if service_ready {
@@ -161,7 +159,7 @@ impl Direct2dPainter {
                 rgb(209, 63, 63)
             };
             let dot = self.brush(color)?;
-            let line = self.begin_shell(client_height)?;
+            let line = self.begin_shell(client_height, panels)?;
             for y in layout.separators {
                 self.target.FillRectangle(
                     &D2D_RECT_F {
@@ -184,6 +182,7 @@ impl Direct2dPainter {
         client_height: f32,
         layout: &PairingLayout,
         qr: Option<(usize, &[bool])>,
+        panels: &[Rect],
     ) -> windows::core::Result<()> {
         unsafe {
             let teal = self.brush(rgb(0, 186, 184))?;
@@ -192,7 +191,7 @@ impl Direct2dPainter {
             } else {
                 None
             };
-            self.begin_shell(client_height)?;
+            self.begin_shell(client_height, panels)?;
             self.target.FillEllipse(&ellipse(layout.waiting_dot), &teal);
 
             if let Some((width, modules)) = qr {
@@ -224,9 +223,11 @@ impl Direct2dPainter {
     unsafe fn begin_shell(
         &self,
         client_height: f32,
+        panels: &[Rect],
     ) -> windows::core::Result<ID2D1SolidColorBrush> {
-        let sidebar = unsafe { self.brush(rgb(251, 251, 251))? };
-        let line = unsafe { self.brush(rgb(223, 223, 223))? };
+        let sidebar = unsafe { self.brush(rgb(247, 248, 250))? };
+        let line = unsafe { self.brush(rgb(226, 229, 233))? };
+        let surface = unsafe { self.brush(rgb(255, 255, 255))? };
         unsafe {
             self.target.BeginDraw();
             self.target.Clear(Some(&rgb(255, 255, 255)));
@@ -248,6 +249,20 @@ impl Direct2dPainter {
                 },
                 &line,
             );
+            for panel in panels {
+                let rounded = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: panel.left,
+                        top: panel.top,
+                        right: panel.right,
+                        bottom: panel.bottom,
+                    },
+                    radiusX: 8.0,
+                    radiusY: 8.0,
+                };
+                self.target.FillRoundedRectangle(&rounded, &surface);
+                self.target.DrawRoundedRectangle(&rounded, &line, 1.0, None);
+            }
         }
         Ok(line)
     }
