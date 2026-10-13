@@ -4,9 +4,9 @@ use std::sync::{Arc, OnceLock};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
-    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP, HDC,
-    HGDIOBJ, SelectObject,
+    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, BeginPaint,
+    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint,
+    HBITMAP, HDC, HGDIOBJ, PAINTSTRUCT, SelectObject,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
@@ -583,6 +583,16 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if message == WM_PAINT {
+        // UpdateLayeredWindow supplies the pixels, but WM_PAINT must still
+        // validate the update region or GetMessageW keeps returning it at idle.
+        let mut paint: PAINTSTRUCT = unsafe { zeroed() };
+        unsafe {
+            BeginPaint(hwnd, &mut paint);
+            EndPaint(hwnd, &paint);
+        }
+        return 0;
+    }
     if message == WM_NCCREATE {
         let create = unsafe { &*(lparam as *const CREATESTRUCTW) };
         let context = create.lpCreateParams as *mut BallContext;
@@ -692,7 +702,7 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
-        WM_ERASEBKGND | WM_PAINT => 0,
+        WM_ERASEBKGND => 0,
         WM_NCDESTROY => {
             if !context.tooltip.is_null() {
                 unsafe { DestroyWindow(context.tooltip) };
@@ -704,5 +714,61 @@ unsafe extern "system" fn window_proc(
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::Graphics::Gdi::{GetUpdateRect, InvalidateRect};
+
+    struct TestWindow(HWND);
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    #[test]
+    fn layered_window_paint_clears_repeated_invalidations() {
+        // Subclass a small window to exercise the real floating-ball handler
+        // without starting network services or touching the user's settings.
+        let class = wide("STATIC");
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                class.as_ptr(),
+                null(),
+                WS_POPUP,
+                0,
+                0,
+                62,
+                62,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        assert!(!hwnd.is_null(), "{}", std::io::Error::last_os_error());
+        let _window = TestWindow(hwnd);
+        unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, window_proc as *const () as isize) };
+        assert_ne!(
+            unsafe { SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA) },
+            0
+        );
+        unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+
+        for _ in 0..32 {
+            assert_ne!(unsafe { InvalidateRect(hwnd, null(), 0) }, 0);
+            assert_ne!(unsafe { GetUpdateRect(hwnd, null_mut(), 0) }, 0);
+            unsafe { SendMessageW(hwnd, WM_PAINT, 0, 0) };
+            assert_eq!(
+                unsafe { GetUpdateRect(hwnd, null_mut(), 0) },
+                0,
+                "WM_PAINT must clear pending paint to let the UI thread sleep"
+            );
+        }
     }
 }
