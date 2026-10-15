@@ -111,7 +111,9 @@ object AndroidManifestBuilder {
                 if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
                     appendDirectory(resolver, treeUri, child, childPath, nextOrdinal)
                 } else {
-                    val size = if (cursor.isNull(3)) 0 else cursor.getLong(3)
+                    val size = if (cursor.isNull(3)) {
+                        resolver.openAssetFileDescriptor(child, "r")?.use { it.length } ?: -1
+                    } else cursor.getLong(3)
                     require(size >= 0) { "file size is unavailable" }
                     val fileOrdinal = nextOrdinal()
                     yield(StoredTransferEntry(

@@ -290,11 +290,11 @@ class ProductDataInstrumentedTest {
     }
 
     @Test
-    fun fileTransferSchemaUpgradesFromVersionsFourAndFive() {
-        listOf(4, 5).forEach { oldVersion ->
+    fun fileTransferSchemaUpgradesFromVersionsThreeThroughSix() {
+        listOf(3, 4, 5, 6).forEach { oldVersion ->
             val databaseName = "flowtype-migration-$oldVersion-${UUID.randomUUID()}.db"
             context.openOrCreateDatabase(databaseName, Context.MODE_PRIVATE, null).use { db ->
-                db.execSQL(
+                if (oldVersion >= 4) db.execSQL(
                     """CREATE TABLE file_transfer_entries (
                         batch_id TEXT NOT NULL,
                         ordinal INTEGER NOT NULL,
@@ -308,6 +308,7 @@ class ProductDataInstrumentedTest {
                         sha256 TEXT,
                         target_uri TEXT,
                         ${if (oldVersion >= 5) "target_name TEXT," else ""}
+                        ${if (oldVersion >= 6) "target_parent_uri TEXT," else ""}
                         state TEXT NOT NULL,
                         committed_offset INTEGER NOT NULL DEFAULT 0,
                         error_code TEXT,
@@ -328,10 +329,53 @@ class ProductDataInstrumentedTest {
                 }
                 assertTrue(columns.contains("target_name"))
                 assertTrue(columns.contains("target_parent_uri"))
+                assertTrue(columns.contains("commit_sha256"))
+                assertTrue(columns.contains("final_uri"))
             } finally {
                 database.close()
                 context.deleteDatabase(databaseName)
             }
+        }
+    }
+
+    @Test
+    fun systemPauseDefersRecoveryAndReconnectReplaysOfflineCancellation() {
+        val databaseName = "flowtype-pause-${UUID.randomUUID()}.db"
+        val database = AppDatabase(context, databaseName)
+        val store = FileTransferStore(database)
+        val requests = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val pausedBarrier = java.util.concurrent.CountDownLatch(1)
+        val resumedBarrier = java.util.concurrent.CountDownLatch(1)
+        val manager = app.flowtype.filetransfer.FileTransferManager(context, store, "phone-1",
+            sendOffer = { _, offer -> requests += "offer:${offer.batchId}"; true },
+            sendDecision = { _, _, _ -> true },
+            sendCancel = { _, id -> requests += "cancel:$id"; true }, parallelism = { 2 },
+            onChanged = {
+                if (it.batchId == "barrier") pausedBarrier.countDown()
+                if (it.batchId == "first") resumedBarrier.countDown()
+            })
+        try {
+            val now = System.currentTimeMillis()
+            listOf("canceled", "first", "second", "barrier").forEachIndexed { index, id ->
+                store.createBatch(FileTransferBatch(id, "pc", TransferDirection.PHONE_TO_COMPUTER,
+                    if (id == "canceled") TransferBatchState.CANCELED else TransferBatchState.WAITING_NETWORK,
+                    now + index, now + index, 1, 0, 1, null))
+            }
+            manager.setBinding(binding("pc"))
+            manager.pauseExecution()
+            manager.resumeRecoverable()
+            manager.onResult("barrier", TransferBatchState.COMPLETED)
+            assertTrue(pausedBarrier.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            assertTrue(requests.isEmpty())
+            manager.resumeExecution()
+            manager.onResult("first", TransferBatchState.COMPLETED)
+            assertTrue(resumedBarrier.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals(listOf("cancel:canceled", "offer:first"), requests.toList())
+            assertEquals(TransferBatchState.WAITING_NETWORK, store.loadBatch("second")!!.state)
+        } finally {
+            manager.close()
+            database.close()
+            context.deleteDatabase(databaseName)
         }
     }
 

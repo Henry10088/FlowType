@@ -33,6 +33,8 @@ data class StoredTransferEntry(
     val state: TransferEntryState = TransferEntryState.PENDING,
     val committedOffset: Long = 0,
     val errorCode: String? = null,
+    val commitSha256: String? = null,
+    val finalUri: String? = null,
 ) {
     fun validate() {
         manifest.validate()
@@ -153,7 +155,8 @@ class FileTransferStore(private val database: AppDatabase) {
             if (previous.targetTreeUri != null && previous.targetTreeUri != targetTreeUri) {
                 db.execSQL(
                     """UPDATE file_transfer_entries SET target_uri = NULL, target_parent_uri = NULL,
-                        target_name = NULL, committed_offset = 0, state = ?, error_code = NULL
+                        target_name = NULL, committed_offset = 0, state = ?, error_code = NULL,
+                        commit_sha256 = NULL, final_uri = NULL
                         WHERE batch_id = ? AND (kind = ? OR state != ?)""",
                     arrayOf(
                         TransferEntryState.PENDING.wireName, batchId,
@@ -245,6 +248,15 @@ class FileTransferStore(private val database: AppDatabase) {
         ).also { check(it == 1) }
     }
 
+    fun journalCommit(batchId: String, ordinal: Long, hash: String, finalUri: String? = null) {
+        require(hash.matches(Regex("[0-9a-f]{64}")))
+        database.writableDatabase.update("file_transfer_entries", ContentValues().apply {
+            put("commit_sha256", hash)
+            putNullable("final_uri", finalUri)
+        }, "batch_id = ? AND ordinal = ?", arrayOf(batchId, ordinal.toString()))
+            .also { check(it == 1) }
+    }
+
     fun loadBatch(batchId: String): FileTransferBatch? = database.readableDatabase.query(
         "file_transfer_batches",
         BATCH_COLUMNS,
@@ -283,6 +295,11 @@ class FileTransferStore(private val database: AppDatabase) {
             null,
             "updated_at, batch_id",
         ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.batch()) } }
+
+    fun canceledBatches(pcId: String): List<FileTransferBatch> = database.readableDatabase.query(
+        "file_transfer_batches", BATCH_COLUMNS, "pc_id = ? AND state = ?",
+        arrayOf(pcId, TransferBatchState.CANCELED.wireName), null, null, "created_at",
+    ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.batch()) } }
 
     fun deleteBatch(batchId: String) {
         validateIdentifier(batchId, MAX_BATCH_ID_BYTES)
@@ -377,6 +394,8 @@ class FileTransferStore(private val database: AppDatabase) {
         put("state", state.wireName)
         put("committed_offset", committedOffset)
         putNullable("error_code", errorCode)
+        putNullable("commit_sha256", commitSha256)
+        putNullable("final_uri", finalUri)
     }
 
     private fun android.database.Cursor.batch() = FileTransferBatch(
@@ -410,6 +429,8 @@ class FileTransferStore(private val database: AppDatabase) {
         state = enumByWireName(getString(12)),
         committedOffset = getLong(13),
         errorCode = if (isNull(14)) null else getString(14),
+        commitSha256 = if (isNull(15)) null else getString(15),
+        finalUri = if (isNull(16)) null else getString(16),
     )
 
     private inline fun <reified T : Enum<T>> enumByWireName(value: String): T = enumValues<T>().single {
@@ -472,6 +493,8 @@ class FileTransferStore(private val database: AppDatabase) {
             "state",
             "committed_offset",
             "error_code",
+            "commit_sha256",
+            "final_uri",
         )
     }
 }

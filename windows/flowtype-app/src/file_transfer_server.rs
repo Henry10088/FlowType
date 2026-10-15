@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -21,7 +21,7 @@ use hyper::header::{AUTHORIZATION, CONTENT_TYPE};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
@@ -46,10 +46,40 @@ struct TicketGrant {
     direction: TransferDirection,
 }
 
+struct VerificationJob {
+    hash: String,
+    result: Mutex<Option<Result<(), &'static str>>>,
+    started: std::time::Instant,
+}
+
 pub(crate) struct FileTransferCoordinator {
     store: Arc<FileTransferStore>,
     receive_root: Mutex<PathBuf>,
     tickets: Mutex<HashMap<String, TicketGrant>>,
+    operations: Mutex<HashSet<(String, String)>>,
+    verifications: Mutex<HashMap<(String, String), Arc<VerificationJob>>>,
+    batch_starts: Mutex<()>,
+}
+
+struct OperationLease<'a> {
+    coordinator: &'a FileTransferCoordinator,
+    key: (String, String),
+}
+
+impl Drop for OperationLease<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut operations) = self.coordinator.operations.lock() {
+            operations.remove(&self.key);
+        }
+        if self
+            .coordinator
+            .store
+            .load_batch(&self.key.0)
+            .is_ok_and(|batch| batch.state == BatchState::Canceled)
+        {
+            cleanup_partial_files(&self.coordinator.store, &self.key.0);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +146,9 @@ impl FileTransferCoordinator {
             store: Arc::new(store),
             receive_root: Mutex::new(receive_root),
             tickets: Mutex::new(HashMap::new()),
+            operations: Mutex::new(HashSet::new()),
+            verifications: Mutex::new(HashMap::new()),
+            batch_starts: Mutex::new(()),
         }))
     }
 
@@ -125,6 +158,9 @@ impl FileTransferCoordinator {
             store: Arc::new(store),
             receive_root: Mutex::new(receive_root),
             tickets: Mutex::new(HashMap::new()),
+            operations: Mutex::new(HashSet::new()),
+            verifications: Mutex::new(HashMap::new()),
+            batch_starts: Mutex::new(()),
         })
     }
 
@@ -133,6 +169,125 @@ impl FileTransferCoordinator {
             .lock()
             .map(|path| path.clone())
             .map_err(|_| "receive folder unavailable")
+    }
+
+    fn acquire_operation(
+        &self,
+        batch_id: &str,
+        action: &str,
+    ) -> Result<OperationLease<'_>, &'static str> {
+        // Upload, verification and failure reporting all own the same entry.
+        let resource = action.split_once('/').map_or(action, |(_, id)| id);
+        let key = (batch_id.to_owned(), resource.to_owned());
+        if !action.starts_with("verify/")
+            && self
+                .verifications
+                .lock()
+                .map_err(|_| "transfer_busy")?
+                .contains_key(&key)
+        {
+            return Err("transfer_busy");
+        }
+        if !self
+            .operations
+            .lock()
+            .map_err(|_| "transfer_busy")?
+            .insert(key.clone())
+        {
+            return Err("transfer_busy");
+        }
+        Ok(OperationLease {
+            coordinator: self,
+            key,
+        })
+    }
+
+    fn poll_verification(
+        self: &Arc<Self>,
+        batch_id: &str,
+        entry: &ManifestEntry,
+        hash: &str,
+        direction: TransferDirection,
+    ) -> Result<bool, &'static str> {
+        let key = (batch_id.to_owned(), entry.entry_id.clone());
+        let mut jobs = self.verifications.lock().map_err(|_| "transfer_busy")?;
+        jobs.retain(|_, job| {
+            job.started.elapsed() < Duration::from_secs(600)
+                || job.result.lock().is_ok_and(|result| result.is_none())
+        });
+        if let Some(job) = jobs.get(&key) {
+            if job.hash != hash {
+                return Err("integrity_failed");
+            }
+            let result = *job.result.lock().map_err(|_| "verification_failed")?;
+            if let Some(result) = result {
+                jobs.remove(&key);
+                return result.map(|()| true);
+            }
+            return Ok(false);
+        }
+        if jobs.len() >= MAX_DATA_CONNECTIONS {
+            // A disconnected caller may never poll a completed job. Its result
+            // can be recomputed from durable progress; only live jobs use slots.
+            jobs.retain(|_, job| job.result.lock().is_ok_and(|result| result.is_none()));
+        }
+        if jobs.len() >= MAX_DATA_CONNECTIONS {
+            return Err("transfer_busy");
+        }
+        let job = Arc::new(VerificationJob {
+            hash: hash.to_owned(),
+            result: Mutex::new(None),
+            started: std::time::Instant::now(),
+        });
+        jobs.insert(key, Arc::clone(&job));
+        let coordinator = Arc::clone(self);
+        let batch_id = batch_id.to_owned();
+        let entry = entry.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = verify_entry(&coordinator, &batch_id, &entry, &job.hash, direction);
+            if let Ok(mut slot) = job.result.lock() {
+                *slot = Some(result);
+            }
+            if coordinator
+                .store
+                .load_batch(&batch_id)
+                .is_ok_and(|batch| batch.state == BatchState::Canceled)
+            {
+                cleanup_partial_files(&coordinator.store, &batch_id);
+            }
+        });
+        Ok(false)
+    }
+
+    fn prepare_incoming(&self, batch_id: &str) -> Result<(), &'static str> {
+        let batch = self
+            .store
+            .load_batch(batch_id)
+            .map_err(|_| "batch_unavailable")?;
+        if batch.state.is_terminal() {
+            return Err("transfer_canceled");
+        }
+        let receive_root = batch
+            .target_root
+            .as_ref()
+            .map(PathBuf::from)
+            .map(Ok)
+            .unwrap_or_else(|| self.receive_root())?;
+        if batch.target_root.is_none() && !has_available_space(&receive_root, batch.total_bytes) {
+            return Err("insufficient_space");
+        }
+        self.store
+            .prepare_windows_targets(batch_id, &receive_root, unix_time())
+            .map_err(|_| "target_preparation_failed")?;
+        if matches!(batch.state, BatchState::Queued | BatchState::WaitingNetwork) {
+            self.store
+                .update_state(batch_id, BatchState::Preparing, unix_time())
+                .map_err(|_| "batch_state_failed")?;
+        }
+        self.store
+            .update_state(batch_id, BatchState::Transferring, unix_time())
+            .map_err(|_| "batch_state_failed")?;
+        Ok(())
     }
 
     pub(crate) fn set_receive_root(&self, path: PathBuf) -> Result<(), &'static str> {
@@ -153,6 +308,17 @@ impl FileTransferCoordinator {
             .map_err(|_| "invalid file offer")?;
         if offer.direction != TransferDirection::PhoneToComputer {
             return Err("unexpected transfer direction");
+        }
+        let _start = self.batch_starts.try_lock().map_err(|_| "transfer_busy")?;
+        if self.store.load_batch(&offer.batch_id).is_err()
+            && self
+                .store
+                .recoverable_batches()
+                .map_err(|_| "batch_unavailable")?
+                .iter()
+                .any(|batch| batch.phone_id == authenticated_phone_id)
+        {
+            return Err("transfer_busy");
         }
         let batch = BatchRecord::new(
             offer.batch_id.clone(),
@@ -207,6 +373,8 @@ impl FileTransferCoordinator {
         if let Ok(mut tickets) = self.tickets.lock() {
             tickets.remove(batch_id);
         }
+        // Also runs after in-flight operations release their handles.
+        cleanup_partial_files(&self.store, batch_id);
         Ok(())
     }
 
@@ -229,7 +397,14 @@ impl FileTransferCoordinator {
         phone_id: &str,
         roots: &[PathBuf],
     ) -> Result<FileOffer, &'static str> {
-        if self.outbound_batch(phone_id).is_some() {
+        let _start = self.batch_starts.try_lock().map_err(|_| "transfer_busy")?;
+        if self
+            .store
+            .recoverable_batches()
+            .map_err(|_| "batch_unavailable")?
+            .iter()
+            .any(|batch| batch.phone_id == phone_id)
+        {
             return Err("a file transfer is already active");
         }
         let prepared = prepare_outbound_plan(roots)?;
@@ -398,17 +573,6 @@ impl FileTransferCoordinator {
             .collect()
     }
 
-    pub(crate) fn outbound_batch(&self, phone_id: &str) -> Option<BatchRecord> {
-        self.store
-            .recoverable_batches()
-            .ok()?
-            .into_iter()
-            .filter(|batch| {
-                batch.phone_id == phone_id && batch.direction == TransferDirection::ComputerToPhone
-            })
-            .max_by_key(|batch| (batch.created_at_epoch_seconds, batch.batch_id.clone()))
-    }
-
     pub(crate) fn transfer_snapshot(&self, phone_id: &str) -> Option<FileTransferSnapshot> {
         let batches = self.store.batches().ok()?;
         let batch = batches
@@ -534,28 +698,34 @@ impl FileTransferCoordinator {
     }
 }
 
+fn cleanup_partial_files(store: &FileTransferStore, batch_id: &str) {
+    if !store
+        .load_batch(batch_id)
+        .is_ok_and(|batch| batch.direction == TransferDirection::PhoneToComputer)
+        || !store.manifest_is_complete(batch_id)
+    {
+        return;
+    }
+    let _ = store.for_each_manifest_entry(batch_id, |entry| {
+        if entry.kind == EntryKind::File
+            && let Ok(target) = store.target_path(batch_id, entry.ordinal)
+            && let Some(parent) = target.parent()
+        {
+            let _ = fs::remove_file(
+                parent.join(format!(".flowtype-{batch_id}-{}.part", entry.entry_id)),
+            );
+        }
+        Ok(())
+    });
+}
+
 fn cleanup_expired(store: &FileTransferStore, cutoff: u64) {
     let Ok(batches) = store.batches() else { return };
     for batch in batches {
         if batch.updated_at_epoch_seconds >= cutoff {
             continue;
         }
-        if store.manifest_is_complete(&batch.batch_id) {
-            let _ = store.for_each_manifest_entry(&batch.batch_id, |entry| {
-                if batch.direction == TransferDirection::PhoneToComputer
-                    && entry.kind == EntryKind::File
-                    && let Ok(target) = store.target_path(&batch.batch_id, entry.ordinal)
-                    && let Some(parent) = target.parent()
-                {
-                    let part = parent.join(format!(
-                        ".flowtype-{}-{}.part",
-                        batch.batch_id, entry.entry_id
-                    ));
-                    let _ = fs::remove_file(part);
-                }
-                Ok(())
-            });
-        }
+        cleanup_partial_files(store, &batch.batch_id);
         let _ = store.delete_batch(&batch.batch_id);
     }
 }
@@ -753,6 +923,8 @@ pub(crate) async fn run_file_transfer_server(
             let service =
                 service_fn(move |request| serve_request(request, Arc::clone(&request_state)));
             let _ = http1::Builder::new()
+                .timer(TokioTimer::new())
+                .header_read_timeout(Duration::from_secs(15))
                 .keep_alive(true)
                 .serve_connection(TokioIo::new(stream), service)
                 .await;
@@ -764,7 +936,19 @@ async fn serve_request(
     request: Request<Incoming>,
     state: Arc<AppState>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
-    let response = match route_request(request, Arc::clone(&state)).await {
+    // Disk scans and hashes must not occupy workers serving the text socket.
+    // The connection semaphore bounds these blocking jobs to eight.
+    let runtime = tokio::runtime::Handle::current();
+    let request_state = Arc::clone(&state);
+    let result = tokio::task::spawn_blocking(move || {
+        runtime.block_on(route_request(request, request_state))
+    })
+    .await
+    .unwrap_or(Err((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "file_worker_failed",
+    )));
+    let response = match result {
         Ok(response) => response,
         Err((status, code)) => json_response(status, format!(r#"{{"code":"{code}"}}"#)),
     };
@@ -800,6 +984,9 @@ async fn route_request(
         coordinator.revoke_phone(&batch.phone_id);
         return Err((StatusCode::UNAUTHORIZED, "unauthorized"));
     }
+    let _operation = coordinator
+        .acquire_operation(&batch_id, action)
+        .map_err(|code| (StatusCode::CONFLICT, code))?;
 
     if action == "complete" {
         if request.method() != Method::POST {
@@ -866,7 +1053,11 @@ async fn route_request(
             .store
             .read_progress(&batch_id, ordinal)
             .map_err(|_| (StatusCode::CONFLICT, "progress_unavailable"))?;
-        if progress.state != flowtype_core::file_transfer::EntryState::Completed {
+        // Download verification precedes the phone's SAF commit. The receiver
+        // can still fail to publish the file, and is authoritative about that.
+        if progress.state != flowtype_core::file_transfer::EntryState::Completed
+            || direction == TransferDirection::ComputerToPhone
+        {
             coordinator
                 .store
                 .write_progress(
@@ -916,40 +1107,27 @@ async fn route_request(
         if entry.entry_id != entry_id || entry.kind != EntryKind::File {
             return Err((StatusCode::NOT_FOUND, "entry_not_found"));
         }
-        if direction == TransferDirection::PhoneToComputer {
-            commit_uploaded_file(&coordinator, &batch_id, &entry, supplied_hash)
+        if request
+            .headers()
+            .get("x-flowtype-async-verify")
+            .is_some_and(|v| v == "1")
+        {
+            if !coordinator
+                .poll_verification(&batch_id, &entry, supplied_hash, direction)
+                .map_err(|code| (StatusCode::CONFLICT, code))?
+            {
+                return Ok(json_response(
+                    StatusCode::ACCEPTED,
+                    r#"{"verifying":true}"#.to_owned(),
+                ));
+            }
+        } else {
+            verify_entry(&coordinator, &batch_id, &entry, supplied_hash, direction)
                 .map_err(|code| (StatusCode::CONFLICT, code))?;
-            return Ok(json_response(
-                StatusCode::OK,
-                r#"{"verified":true}"#.to_owned(),
-            ));
         }
-        let source = coordinator
-            .store
-            .source_path(&batch_id, ordinal)
-            .map_err(|_| (StatusCode::NOT_FOUND, "source_unavailable"))?;
-        if !source_matches_entry(&source, &entry) {
-            return Err((StatusCode::CONFLICT, "source_changed"));
-        }
-        let source_hash =
-            hash_file(&source).map_err(|_| (StatusCode::CONFLICT, "source_unavailable"))?;
-        if !source_hash.eq_ignore_ascii_case(supplied_hash) {
-            return Err((StatusCode::CONFLICT, "integrity_failed"));
-        }
-        coordinator
-            .store
-            .write_progress(
-                &batch_id,
-                ordinal,
-                EntryProgress {
-                    state: flowtype_core::file_transfer::EntryState::Completed,
-                    committed_offset: entry.size,
-                },
-            )
-            .map_err(|_| (StatusCode::CONFLICT, "progress_unavailable"))?;
         return Ok(json_response(
             StatusCode::OK,
-            serde_json::json!({"verified": true, "sha256": source_hash}).to_string(),
+            serde_json::json!({"verified": true}).to_string(),
         ));
     }
 
@@ -1028,14 +1206,18 @@ async fn route_request(
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok())
             .ok_or((StatusCode::BAD_REQUEST, "invalid_offset"))?;
+        let deferred_hash = request
+            .headers()
+            .get("x-flowtype-deferred-hash")
+            .is_some_and(|value| value == "1");
         let result = receive_file(
             &batch_id,
-            ordinal,
             &entry,
             offset,
+            deferred_hash,
             request.into_body(),
             &coordinator,
-            &state,
+            || state.notify_ui(),
         )
         .await
         .map_err(|code| (StatusCode::CONFLICT, code))?;
@@ -1095,6 +1277,9 @@ async fn route_request(
         return Err((StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"));
     }
     if coordinator.store.manifest_is_complete(&batch_id) {
+        coordinator
+            .prepare_incoming(&batch_id)
+            .map_err(|code| (StatusCode::CONFLICT, code))?;
         return Ok(json_response(
             StatusCode::OK,
             r#"{"accepted":true,"resumed":true}"#.to_owned(),
@@ -1163,7 +1348,13 @@ async fn ingest_manifest(
         .begin_manifest(batch_id)
         .map_err(|_| "manifest_already_started")?;
     let mut pending = Vec::new();
-    while let Some(frame) = body.frame().await {
+    while let Some(frame) = tokio::time::timeout(Duration::from_secs(30), body.frame())
+        .await
+        .map_err(|_| "body_idle_timeout")?
+    {
+        if !coordinator.ticket_is_active(batch_id) {
+            return Err("transfer_canceled");
+        }
         let frame = frame.map_err(|_| "body_read_failed")?;
         let Ok(data) = frame.into_data() else {
             continue;
@@ -1178,27 +1369,7 @@ async fn ingest_manifest(
         return Err("incomplete_manifest_line");
     }
     writer.finish().map_err(|_| "manifest_count_mismatch")?;
-    let batch = coordinator
-        .store
-        .load_batch(batch_id)
-        .map_err(|_| "batch_unavailable")?;
-    let receive_root = coordinator.receive_root()?;
-    if !has_available_space(&receive_root, batch.total_bytes) {
-        return Err("insufficient_space");
-    }
-    coordinator
-        .store
-        .prepare_windows_targets(batch_id, &receive_root, unix_time())
-        .map_err(|_| "target_preparation_failed")?;
-    coordinator
-        .store
-        .update_state(batch_id, BatchState::Preparing, unix_time())
-        .map_err(|_| "batch_state_failed")?;
-    coordinator
-        .store
-        .update_state(batch_id, BatchState::Transferring, unix_time())
-        .map_err(|_| "batch_state_failed")?;
-    Ok(())
+    coordinator.prepare_incoming(batch_id)
 }
 
 fn has_available_space(path: &std::path::Path, required: u64) -> bool {
@@ -1230,13 +1401,14 @@ struct ReceiveResult {
 
 async fn receive_file(
     batch_id: &str,
-    ordinal: u64,
     entry: &ManifestEntry,
     offset: u64,
-    mut body: Incoming,
+    deferred_hash: bool,
+    mut body: impl hyper::body::Body<Data = Bytes> + Unpin,
     coordinator: &FileTransferCoordinator,
-    state: &AppState,
+    notify_progress: impl Fn(),
 ) -> Result<ReceiveResult, &'static str> {
+    let ordinal = entry.ordinal;
     if offset > entry.size {
         return Err("invalid_offset");
     }
@@ -1252,16 +1424,23 @@ async fn receive_file(
         .target_path(batch_id, ordinal)
         .map_err(|_| "target_unavailable")?;
     if progress.state == flowtype_core::file_transfer::EntryState::Completed {
-        let hash = hash_file(&target).map_err(|_| "target_unavailable")?;
+        let hash = if deferred_hash {
+            None
+        } else {
+            Some(hash_file(&target).map_err(|_| "target_unavailable")?)
+        };
         return Ok(ReceiveResult {
             committed_offset: entry.size,
             completed: true,
-            sha256: Some(hash),
+            sha256: hash,
         });
     }
     let parent = target.parent().ok_or("target_unavailable")?;
     fs::create_dir_all(parent).map_err(|_| "target_unavailable")?;
     let part = parent.join(format!(".flowtype-{batch_id}-{}.part", entry.entry_id));
+    if fs::symlink_metadata(&part).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err("target_unavailable");
+    }
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -1277,12 +1456,15 @@ async fn receive_file(
         file.set_len(offset).map_err(|_| "target_unavailable")?;
     }
     let mut hasher = Sha256::new();
-    if offset > 0 {
+    if offset > 0 && !deferred_hash {
         file.seek(SeekFrom::Start(0))
             .map_err(|_| "target_unavailable")?;
         let mut remaining = offset;
         let mut buffer = vec![0u8; 512 * 1024];
         while remaining > 0 {
+            if !coordinator.ticket_is_active(batch_id) {
+                return Err("transfer_canceled");
+            }
             let read_size = remaining.min(buffer.len() as u64) as usize;
             let count = file
                 .read(&mut buffer[..read_size])
@@ -1310,10 +1492,13 @@ async fn receive_file(
             },
         )
         .map_err(|_| "progress_unavailable")?;
-    while let Some(frame) = body.frame().await {
+    while let Some(frame) = tokio::time::timeout(Duration::from_secs(30), body.frame())
+        .await
+        .map_err(|_| "body_idle_timeout")?
+    {
         if !coordinator.ticket_is_active(batch_id) {
-            drop(file);
-            let _ = fs::remove_file(&part);
+            // Expiry/re-pairing is not cancellation. Preserve the acknowledged
+            // prefix; explicit cancellation cleans it after this request exits.
             return Err("transfer_canceled");
         }
         let frame = frame.map_err(|_| "body_read_failed")?;
@@ -1333,11 +1518,13 @@ async fn receive_file(
                 "insufficient_space"
             }
         })?;
-        hasher.update(&data);
+        if !deferred_hash {
+            hasher.update(&data);
+        }
         if received.saturating_sub(persisted) >= 16 * 1024 * 1024
             || last_persist.elapsed() >= Duration::from_secs(1)
         {
-            file.flush().map_err(|_| "write_failed")?;
+            file.sync_data().map_err(|_| "write_failed")?;
             coordinator
                 .store
                 .write_progress(
@@ -1349,7 +1536,7 @@ async fn receive_file(
                     },
                 )
                 .map_err(|_| "progress_unavailable")?;
-            state.notify_ui();
+            notify_progress();
             persisted = received;
             last_persist = std::time::Instant::now();
         }
@@ -1374,11 +1561,16 @@ async fn receive_file(
             sha256: None,
         });
     }
-    let hash = format!("{:x}", hasher.finalize());
-    if entry
-        .sha256
-        .as_ref()
-        .is_some_and(|expected| !expected.eq_ignore_ascii_case(&hash))
+    let hash = if deferred_hash {
+        None
+    } else {
+        Some(format!("{:x}", hasher.finalize()))
+    };
+    if let Some(hash) = &hash
+        && entry
+            .sha256
+            .as_ref()
+            .is_some_and(|expected| !expected.eq_ignore_ascii_case(hash))
     {
         return Err("integrity_failed");
     }
@@ -1393,11 +1585,11 @@ async fn receive_file(
             },
         )
         .map_err(|_| "progress_unavailable")?;
-    state.notify_ui();
+    notify_progress();
     Ok(ReceiveResult {
         committed_offset: received,
         completed: false,
-        sha256: Some(hash),
+        sha256: hash,
     })
 }
 
@@ -1435,6 +1627,53 @@ fn commit_uploaded_file(
         if let Some(modified) = entry.modified_at_epoch_millis {
             preserve_modified_time(&target, modified);
         }
+    }
+    coordinator
+        .store
+        .write_progress(
+            batch_id,
+            entry.ordinal,
+            EntryProgress {
+                state: flowtype_core::file_transfer::EntryState::Completed,
+                committed_offset: entry.size,
+            },
+        )
+        .map_err(|_| "progress_unavailable")
+}
+
+fn verify_entry(
+    coordinator: &FileTransferCoordinator,
+    batch_id: &str,
+    entry: &ManifestEntry,
+    supplied_hash: &str,
+    direction: TransferDirection,
+) -> Result<(), &'static str> {
+    if entry
+        .sha256
+        .as_ref()
+        .is_some_and(|hash| !hash.eq_ignore_ascii_case(supplied_hash))
+    {
+        return Err("integrity_failed");
+    }
+    if direction == TransferDirection::PhoneToComputer {
+        return commit_uploaded_file(coordinator, batch_id, entry, supplied_hash);
+    }
+    let source = coordinator
+        .store
+        .source_path(batch_id, entry.ordinal)
+        .map_err(|_| "source_unavailable")?;
+    if !source_matches_entry(&source, entry) {
+        return Err("source_changed");
+    }
+    let source_hash = hash_file(&source).map_err(|_| "source_unavailable")?;
+    if !source_matches_entry(&source, entry) {
+        return Err("source_changed");
+    }
+    if !source_hash.eq_ignore_ascii_case(supplied_hash) {
+        return Err("integrity_failed");
+    }
+    if !coordinator.ticket_is_active(batch_id) {
+        return Err("transfer_canceled");
     }
     coordinator
         .store
@@ -1534,10 +1773,10 @@ fn constant_time_equal(left: &[u8; 32], right: &[u8; 32]) -> bool {
 }
 
 fn source_matches_entry(path: &std::path::Path, entry: &ManifestEntry) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
         return false;
     };
-    if !metadata.is_file() || metadata.len() != entry.size {
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != entry.size {
         return false;
     }
     let Some(expected) = entry.modified_at_epoch_millis else {
@@ -1598,11 +1837,9 @@ mod tests {
                 .accept_offer(&offer("batch-a"), "phone-1")
                 .unwrap(),
         );
-        let other = ticket_token(
-            coordinator
-                .accept_offer(&offer("batch-b"), "phone-1")
-                .unwrap(),
-        );
+        let mut second_offer = offer("batch-b");
+        second_offer.phone_id = "phone-2".into();
+        let other = ticket_token(coordinator.accept_offer(&second_offer, "phone-2").unwrap());
 
         assert_eq!(
             authorize_request(&coordinator, "batch-a", None),
@@ -1778,6 +2015,230 @@ mod tests {
     }
 
     #[test]
+    fn same_entry_requests_are_exclusive_but_other_entries_can_progress() {
+        let root = test_root("operation-leases");
+        let coordinator = FileTransferCoordinator::new(
+            FileTransferStore::new(root.clone()).unwrap(),
+            root.join("received"),
+        );
+        let lease = coordinator.acquire_operation("batch", "entries/a").unwrap();
+        assert!(coordinator.acquire_operation("batch", "verify/a").is_err());
+        assert!(
+            coordinator
+                .acquire_operation("batch", "failures/a")
+                .is_err()
+        );
+        assert!(coordinator.acquire_operation("batch", "entries/b").is_ok());
+        drop(lease);
+        assert!(coordinator.acquire_operation("batch", "verify/a").is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn incoming_and_outgoing_share_one_batch_slot_and_cancel_cleans_late_writers() {
+        let root = test_root("batch-slot-cancel");
+        let coordinator = FileTransferCoordinator::new(
+            FileTransferStore::new(root.join("state")).unwrap(),
+            root.join("received"),
+        );
+        coordinator
+            .accept_offer(&offer("first"), "phone-1")
+            .unwrap();
+        assert!(
+            coordinator
+                .accept_offer(&offer("second"), "phone-1")
+                .is_err()
+        );
+        fs::write(root.join("source"), b"source").unwrap();
+        assert!(
+            coordinator
+                .create_outbound_offer("phone-1", &[root.join("source")])
+                .is_err()
+        );
+        // Re-offering this batch is still resumable.
+        coordinator
+            .accept_offer(&offer("first"), "phone-1")
+            .unwrap();
+        let mut manifest = coordinator.store.begin_manifest("first").unwrap();
+        manifest
+            .append(&ManifestEntry {
+                ordinal: 0,
+                entry_id: "file".into(),
+                relative_path: "a.txt".into(),
+                kind: EntryKind::File,
+                size: 42,
+                modified_at_epoch_millis: None,
+                mime_type: None,
+                sha256: None,
+            })
+            .unwrap();
+        manifest.finish().unwrap();
+        coordinator.prepare_incoming("first").unwrap();
+        let part = root.join("received/.flowtype-first-file.part");
+        let final_file = root.join("received/keep.txt");
+        fs::write(&final_file, b"completed").unwrap();
+        fs::write(&part, b"partial").unwrap();
+        let lease = coordinator
+            .acquire_operation("first", "entries/file")
+            .unwrap();
+        coordinator.cancel("first", "phone-1").unwrap();
+        assert!(!part.exists());
+        fs::write(&part, b"late writer").unwrap();
+        drop(lease);
+        assert!(!part.exists());
+        assert_eq!(fs::read(final_file).unwrap(), b"completed");
+        assert!(
+            coordinator
+                .accept_offer(&offer("second"), "phone-1")
+                .is_ok()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn verification_poll_waits_for_hash_without_holding_a_data_connection() {
+        let root = test_root("verify-poll");
+        let coordinator = FileTransferCoordinator::new(
+            FileTransferStore::new(root.join("state")).unwrap(),
+            root.join("received"),
+        );
+        fs::write(root.join("source"), b"hello").unwrap();
+        let offer = coordinator
+            .create_outbound_offer("phone-1", &[root.join("source")])
+            .unwrap();
+        coordinator
+            .accept_decision(
+                &FileDecision {
+                    protocol_version: flowtype_core::PROTOCOL_VERSION,
+                    transfer_version: FILE_TRANSFER_VERSION,
+                    batch_id: offer.batch_id.clone(),
+                    accepted: true,
+                },
+                "phone-1",
+            )
+            .unwrap();
+        let entry = coordinator
+            .store
+            .manifest_entry(&offer.batch_id, 0)
+            .unwrap();
+        let hash = hash_file(&root.join("source")).unwrap();
+        assert!(
+            !coordinator
+                .poll_verification(&offer.batch_id, &entry, &hash, offer.direction)
+                .unwrap()
+        );
+        assert!(
+            coordinator
+                .acquire_operation(&offer.batch_id, &format!("entries/{}", entry.entry_id))
+                .is_err()
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !coordinator
+                .poll_verification(&offer.batch_id, &entry, &hash, offer.direction)
+                .unwrap()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            coordinator
+                .store
+                .all_entries_terminal(&offer.batch_id)
+                .unwrap()
+                .0
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn expired_ticket_preserves_resume_prefix_and_deferred_hash_still_requires_verification()
+    {
+        let root = test_root("deferred-resume");
+        let coordinator = FileTransferCoordinator::new(
+            FileTransferStore::new(root.join("state")).unwrap(),
+            root.join("received"),
+        );
+        coordinator
+            .accept_offer(&offer("upload"), "phone-1")
+            .unwrap();
+        let entry = ManifestEntry {
+            ordinal: 0,
+            entry_id: "file".into(),
+            relative_path: "a.txt".into(),
+            kind: EntryKind::File,
+            size: 42,
+            modified_at_epoch_millis: None,
+            mime_type: None,
+            sha256: None,
+        };
+        let mut manifest = coordinator.store.begin_manifest("upload").unwrap();
+        manifest.append(&entry).unwrap();
+        manifest.finish().unwrap();
+        coordinator.prepare_incoming("upload").unwrap();
+        let part = root.join("received/.flowtype-upload-file.part");
+        fs::write(&part, [b'x'; 3]).unwrap();
+        coordinator
+            .store
+            .write_progress(
+                "upload",
+                0,
+                EntryProgress {
+                    state: flowtype_core::file_transfer::EntryState::WaitingNetwork,
+                    committed_offset: 3,
+                },
+            )
+            .unwrap();
+        coordinator
+            .tickets
+            .lock()
+            .unwrap()
+            .get_mut("upload")
+            .unwrap()
+            .expires_at_epoch_seconds = 0;
+        let body = || Full::new(Bytes::from(vec![b'x'; 39]));
+        assert!(
+            receive_file("upload", &entry, 3, true, body(), &coordinator, || {})
+                .await
+                .is_err()
+        );
+        assert_eq!(fs::read(&part).unwrap(), [b'x'; 3]);
+        coordinator
+            .accept_offer(&offer("upload"), "phone-1")
+            .unwrap();
+        let result = receive_file("upload", &entry, 3, true, body(), &coordinator, || {})
+            .await
+            .unwrap();
+        assert_eq!(result.committed_offset, 42);
+        assert!(!result.completed);
+        assert_eq!(result.sha256, None);
+        let target = root.join("received/a.txt");
+        assert!(!target.exists());
+        assert_eq!(
+            verify_entry(
+                &coordinator,
+                "upload",
+                &entry,
+                &"0".repeat(64),
+                TransferDirection::PhoneToComputer
+            ),
+            Err("integrity_failed")
+        );
+        let hash = hash_file(&part).unwrap();
+        verify_entry(
+            &coordinator,
+            "upload",
+            &entry,
+            &hash,
+            TransferDirection::PhoneToComputer,
+        )
+        .unwrap();
+        assert_eq!(fs::read(target).unwrap(), [b'x'; 42]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn control_errors_are_replies_and_do_not_poison_subsequent_requests() {
         let root = test_root("control-errors");
         let coordinator = FileTransferCoordinator::new(
@@ -1807,6 +2268,16 @@ mod tests {
         coordinator
             .accept_offer(&offer("upload"), "phone-1")
             .unwrap();
+        for state in [
+            BatchState::Preparing,
+            BatchState::Transferring,
+            BatchState::Completed,
+        ] {
+            coordinator
+                .store
+                .update_state("upload", state, unix_time())
+                .unwrap();
+        }
         fs::write(root.join("source"), b"hello").unwrap();
         let outbound = coordinator
             .create_outbound_offer("phone-1", &[root.join("source")])
@@ -1818,16 +2289,6 @@ mod tests {
             accepted: true,
         };
         coordinator.accept_decision(&decision, "phone-1").unwrap();
-        for state in [
-            BatchState::Preparing,
-            BatchState::Transferring,
-            BatchState::Completed,
-        ] {
-            coordinator
-                .store
-                .update_state("upload", state, unix_time())
-                .unwrap();
-        }
         coordinator
             .store
             .update_state(&outbound.batch_id, BatchState::PartialFailure, unix_time())

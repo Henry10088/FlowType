@@ -29,7 +29,6 @@ import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.CancellationException
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
@@ -62,7 +61,9 @@ class FileTransferManager(
     @Volatile private var activeBatchId: String? = null
     @Volatile private var activeHttpClient: FileTransferHttpClient? = null
     @Volatile private var pendingReselectionBatchId: String? = null
+    @Volatile private var executionPaused = false
     private val canceledBatches = ConcurrentHashMap.newKeySet<String>()
+    private val targetStore = AndroidTargetStore(context.contentResolver, store)
 
     fun setBinding(value: ComputerBinding?) {
         val changed = binding?.pcId != value?.pcId
@@ -78,6 +79,10 @@ class FileTransferManager(
 
     fun onResult(batchId: String, state: TransferBatchState) {
         val pcId = binding?.pcId ?: return
+        if (state == TransferBatchState.CANCELED && activeBatchId == batchId) {
+            canceledBatches += batchId
+            activeHttpClient?.cancel()
+        }
         worker.execute {
             val batch = store.loadBatch(batchId) ?: return@execute
             if (batch.pcId != pcId || binding?.pcId != pcId || batch.state.terminal) return@execute
@@ -86,6 +91,7 @@ class FileTransferManager(
                 store.cancelIncompleteEntries(batchId)
                 cleanupPartialTargets(batchId)
             }
+            if (activeBatchId != null && activeBatchId != batchId) return@execute
             activeBatchId = null
             onChanged(Snapshot(false, batchId, completedBytes(batchId), batch.totalBytes,
                 when (state) {
@@ -104,6 +110,7 @@ class FileTransferManager(
             if (code != "file_transfer_requires_update") {
                 store.reconcileResult(batchId, TransferBatchState.PARTIAL_FAILURE, System.currentTimeMillis())
             }
+            if (activeBatchId != null && activeBatchId != batchId) return@execute
             activeBatchId = null
             onChanged(Snapshot(false, batchId, totalBytes = batch.totalBytes, error = code))
         }
@@ -114,10 +121,12 @@ class FileTransferManager(
     fun createDirectory(uri: Uri) = create { AndroidManifestBuilder.directory(context.contentResolver, uri) }
 
     fun cancelActive() {
-        val batchId = activeBatchId ?: pendingIncomingOffer?.batchId ?: return
+        val batchId = activeBatchId ?: pendingIncomingOffer?.batchId ?: pendingReselectionBatchId ?: return
+        val canceledPcId = binding?.pcId
         canceledBatches += batchId
         activeHttpClient?.cancel()
         pendingIncomingOffer = null
+        pendingReselectionBatchId = null
         binding?.pcId?.let { sendCancel(it, batchId) }
         worker.execute {
             runCatching {
@@ -128,14 +137,16 @@ class FileTransferManager(
                 store.cancelIncompleteEntries(batchId)
                 cleanupPartialTargets(batchId)
             }
-            activeBatchId = null
-            onChanged(Snapshot(false))
+            if (activeBatchId == batchId) activeBatchId = null
+            if (activeBatchId == null && binding?.pcId == canceledPcId) onChanged(Snapshot(false))
         }
     }
 
     fun onTicket(ticket: FileTicketMessage) {
         val current = binding ?: return
         worker.execute {
+            if (executionPaused || ticket.batchId in canceledBatches ||
+                activeBatchId?.let { it != ticket.batchId } == true) return@execute
             val batch = store.loadBatch(ticket.batchId) ?: return@execute
             if (batch.direction == TransferDirection.PHONE_TO_COMPUTER) {
                 upload(current, ticket)
@@ -148,10 +159,20 @@ class FileTransferManager(
     fun onOffer(offer: FileOfferMessage) {
         val current = binding ?: return
         if (offer.direction != TransferDirection.COMPUTER_TO_PHONE || offer.phoneId != phoneId) return
+        if (activeBatchId?.let { it != offer.batchId } == true ||
+            pendingIncomingOffer?.let { it.batchId != offer.batchId } == true) {
+            sendDecision(current.pcId, offer.batchId, false)
+            return
+        }
         worker.execute {
             runCatching {
                 offer.validate(phoneId)
                 check(current.pcId == binding?.pcId) { "computer changed" }
+                if (activeBatchId?.let { it != offer.batchId } == true ||
+                    pendingIncomingOffer?.let { it.batchId != offer.batchId } == true) {
+                    sendDecision(current.pcId, offer.batchId, false)
+                    return@runCatching
+                }
                 val existing = store.loadBatch(offer.batchId)
                 if (existing == null) {
                     val now = System.currentTimeMillis()
@@ -202,6 +223,7 @@ class FileTransferManager(
             runCatching {
                 val batchId = offer?.batchId ?: requireNotNull(reselectBatchId)
                 val batch = requireNotNull(store.loadBatch(batchId))
+                if (batch.pcId != binding?.pcId || batchId in canceledBatches) return@execute
                 if (batch.targetTreeUri != null && batch.targetTreeUri != treeUri.toString()) {
                     cleanupPartialTargets(batchId)
                 }
@@ -242,14 +264,24 @@ class FileTransferManager(
 
     fun resumeRecoverable() {
         worker.execute {
+            if (executionPaused) return@execute
             cleanupExpired()
             val pcId = binding?.pcId ?: return@execute
+            // Cancellation may have happened while the control socket was down.
+            store.canceledBatches(pcId).forEach { sendCancel(pcId, it.batchId) }
             store.recoverableBatches()
-                .filter { it.pcId == pcId }
+                .filter { it.pcId == pcId && it.batchId !in canceledBatches &&
+                    (activeBatchId == null || activeBatchId == it.batchId) }
+                .take(1)
                 .forEach { batch ->
-                    if (batch.direction == TransferDirection.PHONE_TO_COMPUTER) {
+                    if (batch.state == TransferBatchState.NEEDS_RESELECTION) {
+                        pendingReselectionBatchId = batch.batchId
+                        onChanged(Snapshot(false, batch.batchId, totalBytes = batch.totalBytes, needsReselection = true))
+                    } else if (batch.direction == TransferDirection.PHONE_TO_COMPUTER) {
+                        activeBatchId = batch.batchId
                         offer(batch)
                     } else if (batch.targetTreeUri != null) {
+                        activeBatchId = batch.batchId
                         if (!sendDecision(batch.pcId, batch.batchId, true)) {
                             onChanged(Snapshot(true, batch.batchId, totalBytes = batch.totalBytes, error = "waiting_network"))
                         }
@@ -261,21 +293,7 @@ class FileTransferManager(
     private fun cleanupExpired() {
         val cutoff = System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000
         store.batchesOlderThan(cutoff).forEach { batch ->
-            var ordinal = 0L
-            while (true) {
-                val page = store.entriesPage(batch.batchId, ordinal, 256)
-                if (page.isEmpty()) break
-                page.forEach { entry ->
-                    ordinal = entry.manifest.ordinal + 1
-                    if (entry.state != TransferEntryState.COMPLETED) {
-                        entry.targetUri?.let { value ->
-                            runCatching {
-                                DocumentsContract.deleteDocument(context.contentResolver, Uri.parse(value))
-                            }
-                        }
-                    }
-                }
-            }
+            cleanupPartialTargets(batch.batchId)
             store.deleteBatch(batch.batchId)
         }
     }
@@ -288,6 +306,11 @@ class FileTransferManager(
             page.forEach { entry ->
                 ordinal = entry.manifest.ordinal + 1
                 if (entry.state != TransferEntryState.COMPLETED) {
+                    if (entry.commitSha256 != null &&
+                        runCatching { targetStore.recoverCommit(batchId, entry) {} }.getOrDefault(false)) return@forEach
+                    entry.finalUri?.let { value ->
+                        runCatching { DocumentsContract.deleteDocument(context.contentResolver, Uri.parse(value)) }
+                    }
                     entry.targetUri?.let { value ->
                         runCatching {
                             DocumentsContract.deleteDocument(context.contentResolver, Uri.parse(value))
@@ -298,20 +321,24 @@ class FileTransferManager(
         }
     }
 
-    private fun create(prepare: () -> PreparedTransfer) {
+    @Synchronized private fun create(prepare: () -> PreparedTransfer) {
         if (activeBatchId != null || pendingIncomingOffer != null) return
         val current = binding ?: run {
             onChanged(Snapshot(false, error = "computer_not_connected"))
             return
         }
-        onChanged(Snapshot(true, totalBytes = 0))
+        val reservedBatchId = UUID.randomUUID().toString()
+        activeBatchId = reservedBatchId
+        onChanged(Snapshot(true, batchId = reservedBatchId, totalBytes = 0))
         worker.execute {
             var createdBatchId: String? = null
             runCatching {
                 val prepared = prepare()
+                checkNotCanceled(reservedBatchId)
+                check(current.pcId == binding?.pcId) { "computer changed" }
                 val now = System.currentTimeMillis()
                 val batch = FileTransferBatch(
-                    batchId = UUID.randomUUID().toString(),
+                    batchId = reservedBatchId,
                     pcId = current.pcId,
                     direction = TransferDirection.PHONE_TO_COMPUTER,
                     state = TransferBatchState.QUEUED,
@@ -329,6 +356,7 @@ class FileTransferManager(
                 var actualDirectories = 0L
                 var actualBytes = 0L
                 prepared.entries.chunked(256).forEach { page ->
+                    checkNotCanceled(batch.batchId)
                     page.forEach { entry ->
                         if (entry.manifest.kind == TransferEntryKind.FILE) actualFiles++ else actualDirectories++
                         actualBytes = Math.addExact(actualBytes, entry.manifest.size)
@@ -343,17 +371,20 @@ class FileTransferManager(
                 onChanged(Snapshot(true, batch.batchId, totalBytes = batch.totalBytes))
                 offer(batch, prepared.roots)
             }.onFailure { error ->
+                val stillCurrent = activeBatchId == reservedBatchId
                 createdBatchId?.let { batchId ->
                     runCatching { store.deleteBatch(batchId) }
                     if (activeBatchId == batchId) activeBatchId = null
                 }
-                onChanged(Snapshot(false, error = error.message ?: "prepare_failed"))
+                if (activeBatchId == reservedBatchId) activeBatchId = null
+                if (stillCurrent) onChanged(Snapshot(false, error = error.message ?: "prepare_failed"))
             }
         }
     }
 
     private fun offer(batch: FileTransferBatch, roots: List<String> = roots(batch.batchId)) {
-        if (batch.pcId != binding?.pcId) return
+        if (executionPaused || batch.batchId in canceledBatches ||
+            activeBatchId != batch.batchId || batch.pcId != binding?.pcId) return
         val sent = sendOffer(
             batch.pcId,
             FileOfferMessage(
@@ -416,6 +447,7 @@ class FileTransferManager(
                                     entry,
                                     committed,
                                 ) { bytes ->
+                                    checkNotCanceled(batch.batchId)
                                     reported += bytes
                                     pendingUiBytes += bytes
                                     val now = System.nanoTime()
@@ -444,6 +476,7 @@ class FileTransferManager(
                                     if (completedFile) TransferEntryState.COMPLETED else TransferEntryState.TRANSFERRING,
                                     committed,
                                 )
+                                checkNotCanceled(batch.batchId)
                                 onChanged(Snapshot(true, batch.batchId, transferred.get(), batch.totalBytes))
                             }
                         } catch (error: Throwable) {
@@ -463,6 +496,7 @@ class FileTransferManager(
                 }
                 client.completeBatch(ticket)
             }
+            checkNotCanceled(batch.batchId)
             val partial = store.failedEntryCount(batch.batchId) > 0
             store.updateBatchState(
                 batch.batchId,
@@ -497,7 +531,7 @@ class FileTransferManager(
             }
             withActiveClient(binding) { client ->
                 downloadManifest(client, ticket, batch)
-                AndroidTargetStore(context.contentResolver, store).prepare(batch.batchId, treeUri)
+                targetStore.prepare(batch.batchId, treeUri)
                 reportStoredFailures(client, ticket, batch.batchId)
                 store.updateBatchState(batch.batchId, TransferBatchState.TRANSFERRING, System.currentTimeMillis())
                 val transferred = AtomicLong(transferredBytes(batch.batchId))
@@ -514,6 +548,7 @@ class FileTransferManager(
                         try {
                             checkNotCanceled(batch.batchId)
                             downloadEntry(client, ticket, batch.batchId, stored) { bytes ->
+                                checkNotCanceled(batch.batchId)
                                 val current = transferred.addAndGet(bytes)
                                 onChanged(Snapshot(true, batch.batchId, current, batch.totalBytes))
                             }
@@ -542,6 +577,7 @@ class FileTransferManager(
                 }
                 client.completeBatch(ticket)
             }
+            checkNotCanceled(batch.batchId)
             val partial = store.failedEntryCount(batch.batchId) > 0
             store.updateBatchState(
                 batch.batchId,
@@ -609,10 +645,9 @@ class FileTransferManager(
         onProgress: (Long) -> Unit,
     ) {
         val resolver = context.contentResolver
-        val targetStore = AndroidTargetStore(resolver, store)
-        var stored = store.entry(batchId, original.manifest.ordinal) ?: error("entry disappeared")
+        val stored = store.entry(batchId, original.manifest.ordinal) ?: error("entry disappeared")
+        if (targetStore.recoverCommit(batchId, stored) { checkNotCanceled(batchId) }) return
         val target = Uri.parse(requireNotNull(stored.targetUri) { "target file is unavailable" })
-        val parent = Uri.parse(requireNotNull(stored.targetParentUri) { "target directory is unavailable" })
         var offset = stored.committedOffset
         val digest = MessageDigest.getInstance("SHA-256")
         resolver.openFileDescriptor(target, "rw").use { descriptor ->
@@ -627,6 +662,7 @@ class FileTransferManager(
                         val buffer = ByteArray(512 * 1024)
                         var remaining = offset
                         while (remaining > 0) {
+                            checkNotCanceled(batchId)
                             val count = input.read(buffer, 0, minOf(remaining, buffer.size.toLong()).toInt())
                             if (count < 0) throw EOFException("partial file became shorter")
                             digest.update(buffer, 0, count)
@@ -651,19 +687,7 @@ class FileTransferManager(
         }
         val hash = digest.digest().joinToString("") { "%02x".format(it) }
         client.verifyDownloadedFile(ticket, stored.manifest, hash)
-        val finalUri = targetStore.commit(
-            target,
-            parent,
-            requireNotNull(stored.targetName),
-            stored.manifest.mimeType,
-        )
-        store.updateEntryProgress(
-            batchId,
-            stored.manifest.ordinal,
-            TransferEntryState.COMPLETED,
-            stored.manifest.size,
-            targetUri = finalUri.toString(),
-        )
+        targetStore.commit(batchId, stored, hash) { checkNotCanceled(batchId) }
     }
 
     private fun completedBytes(batchId: String): Long {
@@ -718,21 +742,7 @@ class FileTransferManager(
     }
 
     private fun <T> runParallel(items: List<T>, action: (T) -> Unit) {
-        if (items.isEmpty()) return
-        val executor = Executors.newFixedThreadPool(parallelism().coerceIn(1, 2)) { runnable ->
-            Thread(runnable, "flowtype-file-worker").apply { isDaemon = true }
-        }
-        try {
-            items.map { item -> executor.submit { action(item) } }.forEach { future ->
-                try {
-                    future.get()
-                } catch (error: ExecutionException) {
-                    throw error.cause ?: error
-                }
-            }
-        } finally {
-            executor.shutdownNow()
-        }
+        runTransferWorkers(items, parallelism(), { activeHttpClient?.cancel() }, action)
     }
 
     private fun <T> withActiveClient(
@@ -749,13 +759,13 @@ class FileTransferManager(
     }
 
     private fun checkNotCanceled(batchId: String) {
-        if (batchId in canceledBatches || activeBatchId != batchId) {
+        if (executionPaused || Thread.currentThread().isInterrupted || batchId in canceledBatches || activeBatchId != batchId) {
             throw CancellationException("transfer canceled or computer changed")
         }
     }
 
     private fun handleTransferFailure(batch: FileTransferBatch, error: Throwable) {
-        if (batch.pcId != binding?.pcId) return
+        if (executionPaused || activeBatchId != batch.batchId || batch.pcId != binding?.pcId) return
         Log.e("FlowTypeFiles", "batch ${batch.batchId} transfer failed", error)
         val storageFull = isInsufficientStorage(error)
         val message = if (storageFull) "insufficient_space" else error.message ?: "transfer_failed"
@@ -793,6 +803,7 @@ class FileTransferManager(
             return
         }
         if (permanent) {
+            sendCancel(batch.pcId, batch.batchId)
             if (storageFull && batch.direction == TransferDirection.COMPUTER_TO_PHONE) {
                 cleanupPartialTargets(batch.batchId)
             }
@@ -820,7 +831,7 @@ class FileTransferManager(
             Snapshot(true, batch.batchId, completedBytes(batch.batchId), batch.totalBytes, message),
         )
         worker.schedule({
-            if (batch.batchId in canceledBatches ||
+            if (executionPaused || activeBatchId != batch.batchId || batch.batchId in canceledBatches ||
                 batch.pcId != binding?.pcId ||
                 store.loadBatch(batch.batchId)?.state?.terminal != false
             ) return@schedule
@@ -850,7 +861,18 @@ class FileTransferManager(
         .toList()
 
     override fun close() {
+        activeHttpClient?.cancel()
         worker.shutdownNow()
+    }
+
+    fun pauseExecution() {
+        executionPaused = true
+        activeHttpClient?.cancel()
+    }
+
+    fun resumeExecution() {
+        executionPaused = false
+        resumeRecoverable()
     }
 }
 

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use flowtype_core::file_transfer::{
     BatchState, EntryKind, EntryState, MAX_PHONE_ID_BYTES, MAX_WIRE_INTEGER, ManifestEntry,
@@ -127,6 +128,7 @@ struct SourceRecord {
 
 pub(crate) struct FileTransferStore {
     root: PathBuf,
+    state_updates: Mutex<()>,
 }
 
 impl FileTransferStore {
@@ -137,7 +139,10 @@ impl FileTransferStore {
 
     pub(crate) fn new(root: PathBuf) -> io::Result<Self> {
         fs::create_dir_all(&root)?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            state_updates: Mutex::new(()),
+        })
     }
 
     pub(crate) fn create_batch(&self, batch: &BatchRecord) -> io::Result<()> {
@@ -166,6 +171,10 @@ impl FileTransferStore {
         state: BatchState,
         now_epoch_seconds: u64,
     ) -> io::Result<BatchRecord> {
+        let _state = self
+            .state_updates
+            .lock()
+            .map_err(|_| invalid_data("state lock unavailable"))?;
         let mut batch = self.load_batch(batch_id)?;
         if !batch.state.can_transition_to(state) {
             return Err(invalid_data("invalid file transfer state transition"));
@@ -186,10 +195,17 @@ impl FileTransferStore {
         target_root: &Path,
         now_epoch_seconds: u64,
     ) -> io::Result<()> {
+        if self.load_batch(batch_id)?.target_root.is_some() {
+            return self.finish_target_directories(batch_id);
+        }
         fs::create_dir_all(target_root)?;
         let directory = self.batch_dir(batch_id)?;
         let targets_path = directory.join(TARGETS_FILE);
         let index_path = directory.join(TARGETS_INDEX_FILE);
+        // No target_root means preparation was never committed. No bodies can
+        // have been accepted yet, so only the incomplete mapping is replaced.
+        remove_if_exists(&targets_path)?;
+        remove_if_exists(&index_path)?;
         let mut targets = BufWriter::with_capacity(
             256 * 1024,
             OpenOptions::new()
@@ -272,7 +288,14 @@ impl FileTransferStore {
         index.get_ref().sync_all()?;
         drop(targets);
         drop(index);
+        let state = self
+            .state_updates
+            .lock()
+            .map_err(|_| invalid_data("state lock unavailable"))?;
         let mut batch = self.load_batch(batch_id)?;
+        if batch.state.is_terminal() {
+            return Err(invalid_data("batch already finished"));
+        }
         batch.target_root = Some(target_root.to_string_lossy().into_owned());
         batch.updated_at_epoch_seconds = now_epoch_seconds.max(batch.updated_at_epoch_seconds);
         batch.validate()?;
@@ -280,6 +303,11 @@ impl FileTransferStore {
             &directory.join(BATCH_FILE),
             &serde_json::to_vec(&batch).map_err(json_error)?,
         )?;
+        drop(state);
+        self.finish_target_directories(batch_id)
+    }
+
+    fn finish_target_directories(&self, batch_id: &str) -> io::Result<()> {
         self.for_each_manifest_entry(batch_id, |entry| {
             if entry.kind == EntryKind::Directory {
                 fs::create_dir_all(self.target_path(batch_id, entry.ordinal)?)?;
@@ -304,6 +332,19 @@ impl FileTransferStore {
             .checked_add(batch.directory_count)
             .ok_or_else(|| invalid_data("manifest entry count overflow"))?;
         let directory = self.batch_dir(batch_id)?;
+        if self.manifest_is_complete(batch_id) {
+            return Err(invalid_data("manifest already committed"));
+        }
+        // A killed process cannot run ManifestWriter::drop. Re-offers restart
+        // just the unfinished manifest; completed manifests are immutable.
+        for name in [
+            MANIFEST_FILE,
+            MANIFEST_INDEX_FILE,
+            PROGRESS_FILE,
+            MANIFEST_COMPLETE_FILE,
+        ] {
+            remove_if_exists(&directory.join(name))?;
+        }
         let path = directory.join(MANIFEST_FILE);
         let file = OpenOptions::new().write(true).create_new(true).open(path)?;
         let index = OpenOptions::new()
@@ -316,6 +357,13 @@ impl FileTransferStore {
             index: BufWriter::with_capacity(64 * 1024, index),
             next_ordinal: 0,
             expected_entry_count,
+            expected_files: batch.file_count,
+            expected_directories: batch.directory_count,
+            expected_bytes: batch.total_bytes,
+            files: 0,
+            directories: 0,
+            bytes: 0,
+            entry_ids: HashSet::new(),
             next_offset: 0,
             hasher: Sha256::new(),
             committed: false,
@@ -440,6 +488,8 @@ impl FileTransferStore {
         if record.ordinal != ordinal {
             return Err(invalid_data("target index does not match entry"));
         }
+        flowtype_core::file_transfer::validate_relative_path(&record.relative_path)
+            .map_err(|_| invalid_data("invalid target relative path"))?;
         let relative = record
             .relative_path
             .split('/')
@@ -447,6 +497,20 @@ impl FileTransferStore {
         let result = root.join(relative);
         if !result.starts_with(&root) {
             return Err(invalid_data("target path escaped its root"));
+        }
+        // Never follow a directory replaced by a junction/symlink while a
+        // transfer was disconnected. The configured root itself is user chosen.
+        let mut ancestor = root;
+        for segment in record.relative_path.split('/') {
+            ancestor.push(segment);
+            match fs::symlink_metadata(&ancestor) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(invalid_data("target path contains a symbolic link"));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
         }
         Ok(result)
     }
@@ -678,6 +742,13 @@ pub(crate) struct ManifestWriter {
     index: BufWriter<File>,
     next_ordinal: u64,
     expected_entry_count: u64,
+    expected_files: u64,
+    expected_directories: u64,
+    expected_bytes: u64,
+    files: u64,
+    directories: u64,
+    bytes: u64,
+    entry_ids: HashSet<String>,
     next_offset: u64,
     hasher: Sha256,
     committed: bool,
@@ -688,8 +759,25 @@ impl ManifestWriter {
         entry
             .validate()
             .map_err(|_| invalid_data("invalid manifest entry"))?;
-        if entry.ordinal != self.next_ordinal {
+        if entry.ordinal != self.next_ordinal || self.next_ordinal >= self.expected_entry_count {
             return Err(invalid_data("manifest ordinals must be contiguous"));
+        }
+        if !self.entry_ids.insert(entry.entry_id.clone()) {
+            return Err(invalid_data("duplicate manifest entry id"));
+        }
+        match entry.kind {
+            EntryKind::File => self.files += 1,
+            EntryKind::Directory => self.directories += 1,
+        }
+        self.bytes = self
+            .bytes
+            .checked_add(entry.size)
+            .ok_or_else(|| invalid_data("manifest size overflow"))?;
+        if self.files > self.expected_files
+            || self.directories > self.expected_directories
+            || self.bytes > self.expected_bytes
+        {
+            return Err(invalid_data("manifest summary mismatch"));
         }
         let mut line = serde_json::to_vec(entry).map_err(json_error)?;
         line.push(b'\n');
@@ -705,7 +793,11 @@ impl ManifestWriter {
     }
 
     pub(crate) fn finish(mut self) -> io::Result<u64> {
-        if self.next_ordinal != self.expected_entry_count {
+        if self.next_ordinal != self.expected_entry_count
+            || self.files != self.expected_files
+            || self.directories != self.expected_directories
+            || self.bytes != self.expected_bytes
+        {
             return Err(invalid_data("manifest entry count does not match batch"));
         }
         self.file.flush()?;
@@ -748,6 +840,14 @@ fn initialize_progress(directory: &Path, entry_count: u64) -> io::Result<()> {
         .create_new(true)
         .open(path)?
         .sync_all()
+}
+
+fn remove_if_exists(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn read_manifest_complete(directory: &Path) -> io::Result<ManifestComplete> {
@@ -1081,6 +1181,169 @@ mod tests {
             mime_type: None,
             sha256: None,
         }
+    }
+
+    #[test]
+    fn manifest_recovery_replaces_orphans_and_rejects_false_summaries() {
+        let root = test_root("manifest-crash");
+        let store = FileTransferStore::new(root.clone()).unwrap();
+        let batch = BatchRecord::new(
+            "batch".into(),
+            "phone".into(),
+            TransferDirection::PhoneToComputer,
+            1,
+            1,
+            0,
+            42,
+        )
+        .unwrap();
+        store.create_batch(&batch).unwrap();
+        let directory = root.join("batch");
+        for name in [MANIFEST_FILE, MANIFEST_INDEX_FILE, PROGRESS_FILE] {
+            fs::write(directory.join(name), b"killed process").unwrap();
+        }
+        {
+            let mut writer = store.begin_manifest("batch").unwrap();
+            assert!(
+                writer
+                    .append(&entry(0, "large", EntryKind::File, 43))
+                    .is_err()
+            );
+        }
+        {
+            let mut writer = store.begin_manifest("batch").unwrap();
+            writer
+                .append(&entry(0, "short", EntryKind::File, 41))
+                .unwrap();
+            assert!(writer.finish().is_err());
+        }
+        let mut writer = store.begin_manifest("batch").unwrap();
+        writer
+            .append(&entry(0, "good", EntryKind::File, 42))
+            .unwrap();
+        writer.finish().unwrap();
+        assert!(store.begin_manifest("batch").is_err());
+        assert_eq!(store.manifest_entry("batch", 0).unwrap().size, 42);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_ids_cannot_alias_two_temporary_files() {
+        let root = test_root("duplicate-ids");
+        let store = FileTransferStore::new(root.clone()).unwrap();
+        store
+            .create_batch(
+                &BatchRecord::new(
+                    "batch".into(),
+                    "phone".into(),
+                    TransferDirection::PhoneToComputer,
+                    1,
+                    2,
+                    0,
+                    2,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mut writer = store.begin_manifest("batch").unwrap();
+        let first = entry(0, "first", EntryKind::File, 1);
+        writer.append(&first).unwrap();
+        let mut second = entry(1, "second", EntryKind::File, 1);
+        second.entry_id = first.entry_id;
+        assert!(writer.append(&second).is_err());
+        drop(writer);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn target_preparation_is_restartable_without_renaming_reserved_roots() {
+        let root = test_root("target-crash");
+        let store = FileTransferStore::new(root.clone()).unwrap();
+        store
+            .create_batch(
+                &BatchRecord::new(
+                    "batch".into(),
+                    "phone".into(),
+                    TransferDirection::PhoneToComputer,
+                    1,
+                    0,
+                    1,
+                    0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mut writer = store.begin_manifest("batch").unwrap();
+        writer
+            .append(&entry(0, "folder", EntryKind::Directory, 0))
+            .unwrap();
+        writer.finish().unwrap();
+        fs::write(root.join("batch").join(TARGETS_FILE), b"partial").unwrap();
+        store
+            .prepare_windows_targets("batch", &root.join("received"), 2)
+            .unwrap();
+        let target = store.target_path("batch", 0).unwrap();
+        fs::remove_dir(&target).unwrap();
+        store
+            .prepare_windows_targets("batch", &root.join("new-setting"), 3)
+            .unwrap();
+        assert_eq!(target, store.target_path("batch", 0).unwrap());
+        assert!(target.is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resumed_target_cannot_escape_through_a_replaced_directory_junction() {
+        let root = test_root("junction");
+        let store = FileTransferStore::new(root.join("state")).unwrap();
+        let batch = BatchRecord::new(
+            "batch".into(),
+            "phone".into(),
+            TransferDirection::PhoneToComputer,
+            1,
+            1,
+            1,
+            1,
+        )
+        .unwrap();
+        store.create_batch(&batch).unwrap();
+        let mut manifest = store.begin_manifest("batch").unwrap();
+        manifest
+            .append(&entry(0, "folder", EntryKind::Directory, 0))
+            .unwrap();
+        manifest
+            .append(&entry(1, "folder/file", EntryKind::File, 1))
+            .unwrap();
+        manifest.finish().unwrap();
+        store
+            .prepare_windows_targets("batch", &root.join("receive"), 2)
+            .unwrap();
+        let folder = root.join("receive/folder");
+        let outside = root.join("outside");
+        fs::remove_dir(&folder).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let quote = |path: &Path| path.to_string_lossy().replace('\'', "''");
+        let output = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!(
+                    "New-Item -ItemType Junction -Path '{}' -Target '{}' | Out-Null",
+                    quote(&folder),
+                    quote(&outside)
+                ),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(store.target_path("batch", 1).is_err());
+        fs::remove_dir(&folder).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn test_root(label: &str) -> PathBuf {

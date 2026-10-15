@@ -107,6 +107,7 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
     private var manualStartPending = false
     private var connectivityRunning = false
     private var uiVisible = false
+    private var fileExecutionPaused = false
     private val disconnectInBackground = Runnable {
         if (!connectivityDemand.required) suspendConnectivity()
     }
@@ -161,7 +162,7 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
                 connectivityDemand.setFileTransferActive(snapshot.active)
                 if (snapshot.active) {
                     resumeConnectivity()
-                    FileTransferExecution.start(application)
+                    ensureFileExecution()
                 } else {
                     FileTransferExecution.stop(application)
                     scheduleBackgroundDisconnect()
@@ -199,7 +200,7 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
             storageReady = true
             currentBinding?.let(::restoreSessionFor)
             if (fileTransfer.active) {
-                FileTransferExecution.start(application)
+                ensureFileExecution()
                 resumeConnectivity()
             } else if (connectivityRunning) {
                 activateCurrentConnectivity()
@@ -526,9 +527,32 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
 
     fun onUiStarted() {
         uiVisible = true
+        if (fileExecutionPaused) {
+            fileExecutionPaused = false
+            if (ensureFileExecution()) fileTransfers.resumeExecution()
+        }
         FileTransferNotifications.clearIncoming(application)
         connectivityDemand.activityStarted()
         resumeConnectivity()
+    }
+
+    private fun ensureFileExecution(): Boolean {
+        if (fileExecutionPaused) return false
+        if (FileTransferExecution.start(application)) return true
+        onFileExecutionStopped()
+        return false
+    }
+
+    fun onFileExecutionStopped() {
+        fileExecutionPaused = true
+        fileTransfers.pauseExecution()
+    }
+
+    fun onFileExecutionStarted() {
+        if (fileExecutionPaused) {
+            fileExecutionPaused = false
+            fileTransfers.resumeExecution()
+        }
     }
 
     fun onUiStopped() {

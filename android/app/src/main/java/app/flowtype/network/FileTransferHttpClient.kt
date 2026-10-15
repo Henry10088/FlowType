@@ -27,6 +27,8 @@ import java.security.SecureRandom
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.CancellationException
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
@@ -39,6 +41,11 @@ import javax.net.ssl.X509TrustManager
 class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
     private val controlUrl = fileTransferBaseUrl(binding.endpoint).toHttpUrl()
     private val client = buildClient(binding)
+    private val canceled = AtomicBoolean(false)
+
+    private fun checkCanceled() {
+        if (canceled.get() || Thread.currentThread().isInterrupted) throw CancellationException("transfer canceled")
+    }
 
     fun uploadManifest(
         ticket: FileTicketMessage,
@@ -57,6 +64,7 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
 
             override fun writeTo(sink: BufferedSink) {
                 entries.forEach { entry ->
+                    checkCanceled()
                     entry.validate()
                     sink.writeUtf8(FileTransferCodec.encodeManifestEntry(entry))
                     sink.writeByte('\n'.code)
@@ -106,53 +114,66 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
             verifyDownloadedFile(ticket, entry, hash)
             return FileUploadReceipt(offset, true, hash)
         }
-        val remainingLength = entry.size - offset
-        val body = object : RequestBody() {
-            override fun contentType() = OCTET_STREAM
-            override fun contentLength(): Long = remainingLength
+        // Hash the acknowledged prefix before opening the HTTP request. On a
+        // large resume this can take minutes and must not count as idle network I/O.
+        return resolver.openInputStream(source).use { input ->
+            requireNotNull(input) { "source URI cannot be opened" }
+            val digest = MessageDigest.getInstance("SHA-256")
+            val buffer = ByteArray(512 * 1024)
+            var prefix = offset
+            while (prefix > 0) {
+                checkCanceled()
+                val read = input.read(buffer, 0, minOf(prefix, buffer.size.toLong()).toInt())
+                if (read < 0) throw EOFException("source became shorter")
+                digest.update(buffer, 0, read)
+                prefix -= read
+            }
+            var sentHash: String? = null
+            val body = object : RequestBody() {
+                override fun contentType() = OCTET_STREAM
+                override fun contentLength(): Long = entry.size - offset
+                override fun isOneShot() = true
 
-            override fun writeTo(sink: BufferedSink) {
-                resolver.openInputStream(source).use { input ->
-                    requireNotNull(input) { "source URI cannot be opened" }
-                    val buffer = ByteArray(512 * 1024)
-                    var prefix = offset
-                    while (prefix > 0) {
-                        val read = input.read(buffer, 0, minOf(prefix, buffer.size.toLong()).toInt())
-                        if (read < 0) throw EOFException("source became shorter")
-                        prefix -= read
-                    }
-                    var remaining = remainingLength
+                override fun writeTo(sink: BufferedSink) {
+                    var remaining = entry.size - offset
                     while (remaining > 0) {
+                        checkCanceled()
                         val read = input.read(buffer, 0, minOf(remaining, buffer.size.toLong()).toInt())
                         if (read < 0) throw EOFException("source became shorter")
                         sink.write(buffer, 0, read)
+                        digest.update(buffer, 0, read)
                         onProgress(read.toLong())
                         remaining -= read
                     }
                     check(input.read() == -1) { "source became larger" }
+                    sentHash = digest.digest().joinToString("") { "%02x".format(it) }
                 }
             }
-        }
-        val request = authorizedRequest(ticket, "entries/${entry.entryId}")
-            .header("x-flowtype-ordinal", entry.ordinal.toString())
-            .header("x-flowtype-offset", offset.toString())
-            .post(body)
-            .build()
-        client.newCall(request).execute().use { response ->
-            checkResponse(response, "file upload failed")
-            val value = JSONObject(requireNotNull(response.body).string())
-            val committed = value.getLong("committed_offset")
-            val completed = value.getBoolean("completed")
-            val remoteHash = value.optString("sha256").ifEmpty { null }
-            if (committed == entry.size) {
-                val localHash = hashSource(resolver, source)
-                check(remoteHash != null && remoteHash == localHash) {
-                    "file integrity check failed"
+            val request = authorizedRequest(ticket, "entries/${entry.entryId}")
+                .header("x-flowtype-ordinal", entry.ordinal.toString())
+                .header("x-flowtype-offset", offset.toString())
+                .header("x-flowtype-deferred-hash", "1")
+                .post(body)
+                .build()
+            client.newCall(request).execute().use { response ->
+                checkResponse(response, "file upload failed")
+                val responseSource = requireNotNull(response.body).source()
+                responseSource.request(8193)
+                check(responseSource.buffer.size <= 8192) { "upload receipt too large" }
+                val value = JSONObject(responseSource.buffer.readUtf8())
+                val committed = value.getLong("committed_offset")
+                check(committed in offset..entry.size) { "invalid resume offset" }
+                val remoteHash = if (value.isNull("sha256")) null else value.optString("sha256").ifEmpty { null }
+                if (committed == entry.size) {
+                    val localHash = requireNotNull(sentHash)
+                    check(remoteHash == null || remoteHash == localHash) { "file integrity check failed" }
+                    verifyDownloadedFile(ticket, entry, localHash)
+                    FileUploadReceipt(committed, true, localHash)
+                } else {
+                    check(!value.getBoolean("completed")) { "incomplete upload marked completed" }
+                    FileUploadReceipt(committed, false, remoteHash)
                 }
-                verifyDownloadedFile(ticket, entry, requireNotNull(localHash))
-                return FileUploadReceipt(committed, true, remoteHash)
             }
-            return FileUploadReceipt(committed, completed, remoteHash)
         }
     }
 
@@ -191,7 +212,8 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
             val entries = requireNotNull(response.body).source().use { source ->
                 buildList {
                     while (!source.exhausted()) {
-                        val line = source.readUtf8Line() ?: break
+                        check(size < 256) { "manifest page too large" }
+                        val line = source.readUtf8LineStrict(app.flowtype.protocol.MAX_MANIFEST_LINE_BYTES.toLong())
                         if (line.isNotEmpty()) add(FileTransferCodec.decodeManifestEntry(line))
                     }
                 }
@@ -200,7 +222,7 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
                 ?: error("manifest cursor is unavailable")
             val count = response.header("x-flowtype-count")?.toLongOrNull()
                 ?: error("manifest count is unavailable")
-            check(next >= startOrdinal && next <= count)
+            check(next == startOrdinal + entries.size && next <= count)
             return ManifestPage(entries, next, count)
         }
     }
@@ -218,8 +240,14 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
             .build()
         client.newCall(request).execute().use { response ->
             if (response.code != 206) throw responseError(response, "file download failed")
-            val bytes = requireNotNull(response.body).bytes()
+            val source = requireNotNull(response.body).source()
+            source.request(8L * 1024 * 1024 + 1)
+            check(source.buffer.size <= 8L * 1024 * 1024) { "file chunk too large" }
+            val bytes = source.buffer.readByteArray()
             check(bytes.isNotEmpty() && offset + bytes.size <= entry.size) { "invalid file chunk" }
+            check(response.header("Content-Range") == "bytes $offset-${offset + bytes.size - 1}/${entry.size}") {
+                "invalid file range"
+            }
             return bytes
         }
     }
@@ -231,16 +259,24 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
     ) {
         require(sha256.matches(Regex("[0-9a-f]{64}")))
         val request = authorizedRequest(ticket, "verify/${entry.entryId}")
+            .header("x-flowtype-async-verify", "1")
             .header("x-flowtype-ordinal", entry.ordinal.toString())
             .header("x-flowtype-sha256", sha256)
             .post(EMPTY_BODY)
             .build()
-        client.newCall(request).execute().use { response ->
-            checkResponse(response, "file verification failed")
+        while (true) {
+            checkCanceled()
+            val pending = client.newCall(request).execute().use { response ->
+                checkResponse(response, "file verification failed")
+                response.code == 202
+            }
+            if (!pending) return
+            Thread.sleep(250)
         }
     }
 
     private fun authorizedRequest(ticket: FileTicketMessage, action: String): Request.Builder {
+        checkCanceled()
         ticket.validate(System.currentTimeMillis() / 1_000)
         val url = controlUrl.newBuilder()
             .scheme("https")
@@ -275,6 +311,7 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
     }
 
     fun cancel() {
+        canceled.set(true)
         client.dispatcher.cancelAll()
     }
 
@@ -284,6 +321,7 @@ class FileTransferHttpClient(binding: ComputerBinding) : Closeable {
             requireNotNull(input) { "source URI cannot be opened" }
             val buffer = ByteArray(512 * 1024)
             while (true) {
+                checkCanceled()
                 val read = input.read(buffer)
                 if (read < 0) break
                 digest.update(buffer, 0, read)

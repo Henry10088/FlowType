@@ -56,8 +56,12 @@ class AppDatabase(context: Context, name: String = NAME) : SQLiteOpenHelper(cont
         if (oldVersion in 4 until 5) {
             db.execSQL("ALTER TABLE file_transfer_entries ADD COLUMN target_name TEXT")
         }
-        if (oldVersion < 6) {
+        if (oldVersion in 4 until 6) {
             db.execSQL("ALTER TABLE file_transfer_entries ADD COLUMN target_parent_uri TEXT")
+        }
+        if (oldVersion in 4 until 7) {
+            db.execSQL("ALTER TABLE file_transfer_entries ADD COLUMN commit_sha256 TEXT")
+            db.execSQL("ALTER TABLE file_transfer_entries ADD COLUMN final_uri TEXT")
         }
     }
 
@@ -85,7 +89,7 @@ class AppDatabase(context: Context, name: String = NAME) : SQLiteOpenHelper(cont
 
     companion object {
         private const val NAME = "flowtype-v1.db"
-        private const val VERSION = 6
+        private const val VERSION = 7
 
         private fun createFileTransferTables(db: SQLiteDatabase) {
             db.execSQL(
@@ -117,6 +121,8 @@ class AppDatabase(context: Context, name: String = NAME) : SQLiteOpenHelper(cont
                     target_uri TEXT,
                     target_name TEXT,
                     target_parent_uri TEXT,
+                    commit_sha256 TEXT,
+                    final_uri TEXT,
                     state TEXT NOT NULL,
                     committed_offset INTEGER NOT NULL DEFAULT 0,
                     error_code TEXT,

@@ -51,6 +51,7 @@ class FileTransferJobService : JobService() {
 
     override fun onStartJob(params: JobParameters): Boolean {
         parameters = params
+        controller.onFileExecutionStarted()
         setNotification(
             params,
             NOTIFICATION_ID,
@@ -64,6 +65,7 @@ class FileTransferJobService : JobService() {
     override fun onStopJob(params: JobParameters): Boolean {
         parameters = null
         controller.removeObserver(observer)
+        controller.onFileExecutionStopped()
         // The scheduler may stop a job for resource reasons. The durable
         // transfer state machine must remain recoverable instead of treating
         // that event as an explicit user cancellation.
