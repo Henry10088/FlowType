@@ -39,4 +39,12 @@
 - Windows 升级为 `0.3.1`；Android 保留分支已有的 `0.3.0`，本次不构建或安装 Android 发布包。
 - 合并结果通过 Windows workspace 123 项测试，6 项既有压力/交互测试按条件忽略；格式检查、Clippy `-D warnings`、x64 workspace Release 和 x86 TIP Release 构建通过。使用独立目录 `windows/target/main-merge-install`。
 - 合并后的 Android 78 项 Debug JVM 测试通过。本轮未执行真机联调或仪器测试。
-- 本机安装包使用项目现有开发证书签名，不标记为正式公开发布；真实跨 DPI、RDP 和 Win10 IoT 验收仍待完成。
+- 本机安装包为明确标记的本地未签名构建，不标记为正式公开发布。签名步骤被工具的自动审批策略拒绝，返回原因为 `blocked by policy`，因此没有使用本地签名凭据；真实跨 DPI、RDP 和 Win10 IoT 验收仍待完成。
+
+### 本机覆盖升级结果
+
+- 安装包：`installer/output/FlowType-0.3.1-x64-local-unsigned-setup.exe`，3,367,901 字节（约 3.21 MiB）；SHA-256：`96632762dc689ef7de497954fbff2647ac76db641fa277a365af2088ae35ef89`。未创建公开 Release 或发布标签。
+- 覆盖升级前备份现有程序及用户数据到被 Git 忽略的 `dist-local/`。安装程序退出码为 0，不要求系统重启；卸载信息和主程序文件版本均为 `0.3.1`。
+- 主程序和 Injector 的安装文件哈希与本次构建一致；x64、x86 COM 注册分别指向本次修复后的 TIP DLL，两个已注册文件的哈希与构建一致。
+- 主程序已从安装目录启动，窗口响应正常，WSS 32187 和文件 HTTPS 32188 端口均在监听；Injector 计划任务运行中。这些检查不能替代手机输入或文件传输的现场验收。
+- 身份、绑定手机、悬浮球显示与位置、语言文件均与升级前逐一比对哈希一致。安装器会自动打开开机启动，本次已恢复该电脑原有的关闭状态；未卸载或清空用户数据。
