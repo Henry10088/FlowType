@@ -5,15 +5,18 @@ use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use flowtype_core::ipc::{read_message, write_message};
 use flowtype_core::tip::{TIP_PIPE_NAME, TipCommand, TipHello, TipResponse};
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM};
 use windows::Win32::System::IO::CancelSynchronousIo;
+use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use crate::service::WM_TIP_COMMAND;
+
+const STOP_TIMEOUT: Duration = Duration::from_millis(250);
 
 struct PendingCommand {
     pub command: TipCommand,
@@ -52,8 +55,8 @@ impl PendingCommands {
         }
     }
 
-    fn clear(&self) {
-        if let Ok(mut commands) = self.commands.lock() {
+    fn try_clear(&self) {
+        if let Ok(mut commands) = self.commands.try_lock() {
             commands.clear();
         }
     }
@@ -88,15 +91,42 @@ impl Worker {
     }
 
     pub fn stop(mut self) {
+        if crate::lifetime::process_is_terminating() {
+            // ExitProcess has already terminated the other threads. Their Rust
+            // completion flags and held mutexes may never be released. The OS
+            // will reclaim these resources; do not wait or run their cleanup.
+            std::mem::forget(self);
+            return;
+        }
         self.running.store(false, Ordering::Release);
         if let Some(thread) = self.thread.take() {
-            while !thread.is_finished() {
-                let _ = unsafe { CancelSynchronousIo(HANDLE(thread.as_raw_handle())) };
-                thread::sleep(Duration::from_millis(1));
+            let handle = HANDLE(thread.as_raw_handle());
+            let deadline = Instant::now() + STOP_TIMEOUT;
+            loop {
+                match unsafe { WaitForSingleObject(handle, 0) } {
+                    WAIT_OBJECT_0 => break,
+                    WAIT_TIMEOUT if Instant::now() < deadline => {
+                        // Reissue cancellation to cover a read starting just
+                        // after running=false and the preceding cancel call.
+                        let _ = unsafe { CancelSynchronousIo(handle) };
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        let wait_ms = remaining.as_millis().min(10) as u32;
+                        let _ = unsafe { WaitForSingleObject(handle, wait_ms) };
+                    }
+                    _ => {
+                        // Deactivate can run under the loader lock. A worker
+                        // may need that lock to exit, so joining here would
+                        // deadlock. Returning must not let COM unload its code.
+                        crate::lifetime::keep_loaded_until_process_exit();
+                        break;
+                    }
+                }
             }
-            let _ = thread.join();
+            // The OS thread handle is authoritative, including threads ended
+            // without running Rust destructors. Never join its Rust packet.
+            drop(thread);
         }
-        self.pending.clear();
+        self.pending.try_clear();
     }
 }
 
@@ -166,10 +196,18 @@ fn open_pipe() -> io::Result<File> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::c_void;
+    use std::fs::File;
+    use std::io::Read;
+    use std::os::windows::io::FromRawHandle;
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+    use std::sync::{Arc, mpsc};
     use std::time::{Duration, Instant};
 
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Pipes::CreatePipe;
+    use windows::Win32::System::SystemServices::DLL_PROCESS_DETACH;
 
     use super::{PendingCommand, PendingCommands, Worker};
 
@@ -191,17 +229,129 @@ mod tests {
 
     #[test]
     fn stop_cancels_a_blocking_pipe_read() {
-        let worker = Worker::start(
-            HWND::default(),
-            unsafe { GetCurrentProcessId() },
-            unsafe { GetCurrentThreadId() },
-            PendingCommands::default(),
-        );
-        std::thread::sleep(Duration::from_millis(50));
+        // A private real Windows pipe: never connect tests to the installed
+        // Injector or require a phone/production pipe to be present.
+        let mut read = HANDLE::default();
+        let mut write = HANDLE::default();
+        unsafe { CreatePipe(&mut read, &mut write, None, 0) }.unwrap();
+        let mut read = unsafe { File::from_raw_handle(read.0) };
+        let _write = unsafe { File::from_raw_handle(write.0) };
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let error = read.read_exact(&mut [0_u8]).unwrap_err();
+            done_tx.send(error.raw_os_error()).unwrap();
+        });
+        let worker = Worker {
+            running: Arc::new(AtomicBool::new(true)),
+            pending: PendingCommands::default(),
+            thread: Some(thread),
+        };
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
         let started = Instant::now();
         worker.stop();
 
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Some(995)
+        );
+    }
+
+    fn blocked_worker() -> (Worker, mpsc::Sender<()>, mpsc::Receiver<()>) {
+        let pending = PendingCommands::default();
+        let thread_pending = pending.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _lock = thread_pending.commands.lock().unwrap();
+            ready_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+            let _ = done_tx.send(());
+        });
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        (
+            Worker {
+                running: Arc::new(AtomicBool::new(true)),
+                pending,
+                thread: Some(thread),
+            },
+            release_tx,
+            done_rx,
+        )
+    }
+
+    fn isolated_case(name: &str) {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("FLOWTYPE_TIP_STOP_CHILD", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert_eq!(status.code(), Some(73), "child scenario: {name}");
+                return;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let _ = child.wait();
+                panic!("worker shutdown hung in isolated scenario: {name}");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn stop_has_a_deadline_and_keeps_live_worker_code_loaded() {
+        if std::env::var_os("FLOWTYPE_TIP_STOP_CHILD").is_none() {
+            isolated_case("ipc::tests::stop_has_a_deadline_and_keeps_live_worker_code_loaded");
+            return;
+        }
+        let (worker, release, done) = blocked_worker();
+        let started = Instant::now();
+        worker.stop();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            crate::DllCanUnloadNow(),
+            windows::Win32::Foundation::S_FALSE
+        );
+        release.send(()).unwrap();
+        done.recv_timeout(Duration::from_secs(2)).unwrap();
+        std::process::exit(73);
+    }
+
+    static EXIT_WORKER: AtomicPtr<Worker> = AtomicPtr::new(std::ptr::null_mut());
+
+    // Execute the same cleanup path as TSF during LdrShutdownProcess, after
+    // Windows has killed the worker without running its Rust destructors.
+    #[used]
+    #[unsafe(link_section = ".CRT$XLB")]
+    static EXIT_CALLBACK: unsafe extern "system" fn(*mut c_void, u32, *mut c_void) = exit_callback;
+
+    unsafe extern "system" fn exit_callback(_: *mut c_void, reason: u32, _: *mut c_void) {
+        if reason == DLL_PROCESS_DETACH {
+            let worker = EXIT_WORKER.swap(std::ptr::null_mut(), Ordering::AcqRel);
+            if !worker.is_null() {
+                unsafe { *Box::from_raw(worker) }.stop();
+            }
+        }
+    }
+
+    #[test]
+    fn process_exit_does_not_wait_for_a_terminated_worker() {
+        if std::env::var_os("FLOWTYPE_TIP_STOP_CHILD").is_none() {
+            isolated_case("ipc::tests::process_exit_does_not_wait_for_a_terminated_worker");
+            return;
+        }
+        let (worker, _release, _done) = blocked_worker();
+        EXIT_WORKER.store(Box::into_raw(Box::new(worker)), Ordering::Release);
+        std::process::exit(73);
     }
 }
