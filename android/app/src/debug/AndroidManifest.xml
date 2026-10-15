@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <provider
+            android:name=".debug.TransferTestDocumentsProvider"
+            android:authorities="app.flowtype.transfer-tests"
+            android:exported="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS"
+            android:grantUriPermissions="true" />
+        <receiver
+            android:name=".debug.E2ePairingReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="app.flowtype.E2E_PAIR" />
+            </intent-filter>
+        </receiver>
+        <provider
+            android:name=".debug.E2eFileProvider"
+            android:authorities="app.flowtype.e2e"
+            android:exported="false" />
+    </application>
+</manifest>

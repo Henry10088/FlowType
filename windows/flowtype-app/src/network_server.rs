@@ -70,10 +70,11 @@ async fn serve_connection(
         return Err("authentication message too large".into());
     }
     let auth: AuthMessage = serde_json::from_str(&auth)?;
-    if authenticate_phone_async(&state, auth.clone(), nonce.clone())
-        .await
-        .is_err()
-    {
+    if let Err(error) = authenticate_phone_async(&state, auth.clone(), nonce.clone()).await {
+        eprintln!(
+            "authentication rejected for phone {}: {error}",
+            auth.phone_id
+        );
         send_json(
             &mut websocket,
             &ServerMessage::Error(ProtocolError {
@@ -109,7 +110,7 @@ async fn serve_connection(
             pc_id: &state.identity.pc_id,
             pc_name: &pc_name,
             candidate_endpoints: endpoint_urls(None),
-            capabilities: &["health_check", "switch_ack"],
+            capabilities: &["health_check", "switch_ack", "file_transfer_v2"],
         },
     )
     .await?;
@@ -121,6 +122,7 @@ async fn serve_connection(
         }
     });
     let (switch_tx, mut switch_rx) = channel(4);
+    let (file_offer_tx, mut file_offer_rx) = channel(4);
     state.register_switch_channel(
         connection_id,
         switch_tx,
@@ -128,6 +130,20 @@ async fn serve_connection(
         auth.capabilities.iter().any(|value| value == "switch_ack"),
     );
     let _switch_lease = SwitchChannelLease {
+        state: Arc::clone(&state),
+        connection_id,
+    };
+    let supports_files = auth
+        .capabilities
+        .iter()
+        .any(|value| value == "file_transfer_v2");
+    if !is_control && supports_files {
+        state.register_file_offer_channel(connection_id, file_offer_tx.clone());
+        for offer in state.file_transfers.pending_outbound_offers(&auth.phone_id) {
+            let _ = file_offer_tx.try_send(offer);
+        }
+    }
+    let _file_offer_lease = FileOfferChannelLease {
         state: Arc::clone(&state),
         connection_id,
     };
@@ -167,6 +183,12 @@ async fn serve_connection(
                     }),
                 ).await?;
             }
+            Some(offer) = file_offer_rx.recv() => {
+                send_json(
+                    &mut websocket,
+                    &FileServerMessage::FileOffer(offer),
+                ).await?;
+            }
             inbound = websocket.next() => {
                 let Some(message) = inbound else { break; };
                 match message? {
@@ -179,7 +201,14 @@ async fn serve_connection(
                 let is_probe = message_type == Some("probe");
                 let is_control_message = matches!(
                     message_type,
-                    Some("probe" | "health_check" | "switch_ack")
+                    Some(
+                        "probe"
+                            | "health_check"
+                            | "switch_ack"
+                            | "file_offer"
+                            | "file_decision"
+                            | "file_cancel"
+                    )
                 );
                 if is_probe {
                     state.mark_probe_connection(connection_id);
@@ -197,7 +226,20 @@ async fn serve_connection(
                 {
                     return Err("connection superseded".into());
                 }
-                if value.get("type").and_then(serde_json::Value::as_str) == Some("image_start") {
+                if matches!(
+                    message_type,
+                    Some("file_offer" | "file_decision" | "file_cancel")
+                ) {
+                    if state.paired_phones.public_key(&auth.phone_id).is_none() {
+                        state.file_transfers.revoke_phone(&auth.phone_id);
+                        return Err("phone is not paired".into());
+                    }
+                    let reply = state.file_transfers.handle_control(value, &auth.phone_id);
+                    if let Some(reply) = reply {
+                        send_json(&mut websocket, &reply).await?;
+                    }
+                    state.notify_ui();
+                } else if value.get("type").and_then(serde_json::Value::as_str) == Some("image_start") {
                     let image: ImageStart = serde_json::from_value(value)?;
                     image.validate(&auth.phone_id)?;
                     if pending_image.is_some() {
@@ -217,14 +259,18 @@ async fn serve_connection(
                     if let Some(session_id) = session_transition.session_id() {
                         input_session.track(session_id);
                     }
-                    monitored_session = match &message {
-                        ClientMessage::Start(snapshot) | ClientMessage::Update(snapshot)
-                            if !snapshot.session_id.is_empty() => Some(snapshot.session_id.clone()),
-                        ClientMessage::Resume(resume)
-                            if resume.session_state == ClientSessionState::Active
-                                && !resume.session_id.is_empty() => Some(resume.session_id.clone()),
-                        ClientMessage::Finish(_) | ClientMessage::Resume(_) => None,
-                        _ => monitored_session,
+                    monitored_session = if e2e_ack_without_injection() {
+                        None
+                    } else {
+                        match &message {
+                            ClientMessage::Start(snapshot) | ClientMessage::Update(snapshot)
+                                if !snapshot.session_id.is_empty() => Some(snapshot.session_id.clone()),
+                            ClientMessage::Resume(resume)
+                                if resume.session_state == ClientSessionState::Active
+                                    && !resume.session_id.is_empty() => Some(resume.session_id.clone()),
+                            ClientMessage::Finish(_) | ClientMessage::Resume(_) => None,
+                            _ => monitored_session,
+                        }
                     };
                     handle_client_message(&mut websocket, &state, &auth.phone_id, message).await?;
                     if session_transition.completes_session()
@@ -658,6 +704,11 @@ struct SwitchChannelLease {
     connection_id: u64,
 }
 
+struct FileOfferChannelLease {
+    state: Arc<AppState>,
+    connection_id: u64,
+}
+
 struct OnlineConnectionLease {
     state: Arc<AppState>,
     connection_id: u64,
@@ -672,6 +723,12 @@ impl Drop for OnlineConnectionLease {
 impl Drop for SwitchChannelLease {
     fn drop(&mut self) {
         self.state.clear_switch_channel(self.connection_id);
+    }
+}
+
+impl Drop for FileOfferChannelLease {
+    fn drop(&mut self) {
+        self.state.clear_file_offer_channel(self.connection_id);
     }
 }
 
@@ -801,6 +858,28 @@ where
         .await;
     }
 
+    if e2e_ack_without_injection() {
+        if kind == "start" {
+            send_json(
+                websocket,
+                &ServerMessage::Target(Target {
+                    protocol_version: flowtype_core::PROTOCOL_VERSION,
+                    session_id: snapshot.session_id.clone(),
+                    target_state: TargetState::Active,
+                    target_name: Some("FlowType E2E editor".to_owned()),
+                }),
+            )
+            .await?;
+        }
+        return send_ack(
+            websocket,
+            &snapshot.session_id,
+            snapshot.sequence,
+            kind == "finish",
+        )
+        .await;
+    }
+
     if kind == "start" {
         let response = match injector_request_async(
             state,
@@ -896,6 +975,10 @@ where
         }
         other => send_injector_state(websocket, state, &snapshot.session_id, other).await,
     }
+}
+
+fn e2e_ack_without_injection() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("FLOWTYPE_E2E_ACK_WITHOUT_INJECTION").is_some()
 }
 
 async fn handle_cancel(
@@ -1240,7 +1323,9 @@ where
     }
 }
 
-fn tls_acceptor(identity: &PcIdentity) -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
+pub(super) fn tls_acceptor(
+    identity: &PcIdentity,
+) -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
     let provider = rustls::crypto::ring::default_provider();
     let config = ServerConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS13])?

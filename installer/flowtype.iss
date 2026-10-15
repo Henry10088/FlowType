@@ -1,5 +1,5 @@
 #define AppName "FlowType"
-#define AppVersion "0.2.9"
+#define AppVersion "0.3.1"
 #define AppPublisher "FlowType"
 #ifndef BuildDir
 #define BuildDir "..\windows\target\release"
@@ -60,7 +60,7 @@ Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Parameters: "--show
 
 [Run]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FirewallRule}"""; Flags: runhidden waituntilterminated
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{#FirewallRule}"" dir=in action=allow protocol=TCP localport=32187 program=""{app}\{#AppExeName}"" profile=any remoteip=LocalSubnet,100.64.0.0/10 edge=no"; Flags: runhidden waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{#FirewallRule}"" dir=in action=allow protocol=TCP localport=32187,32188 program=""{app}\{#AppExeName}"" profile=any remoteip=LocalSubnet,100.64.0.0/10 edge=no"; Flags: runhidden waituntilterminated
 Filename: "{app}\{#AppExeName}"; Parameters: "--enable-auto-start"; Flags: runhidden waituntilterminated runasoriginaluser
 Filename: "{app}\{#AppExeName}"; Parameters: "--show"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 

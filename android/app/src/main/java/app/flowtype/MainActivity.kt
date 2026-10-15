@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.DocumentsContract
 import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
@@ -51,6 +52,10 @@ class MainActivity : ComponentActivity() {
     private var scanLaunched = false
     private var waitingForOverlayPermission = false
     private var waitingForUpdatePermission = false
+    private var choosingIncomingTarget = false
+    private var shownIncomingBatchId: String? = null
+    private var shownReselectionBatchId: String? = null
+    private var shownFailedBatchId: String? = null
     private var imeWasVisible = false
     private var ignoreImeDismissUntil = 0L
     private var keepAwakeUntil = 0L
@@ -153,6 +158,28 @@ class MainActivity : ComponentActivity() {
         cameraImage = null
         if (saved && uri != null) showImagePreview(uri) else showKeyboard()
     }
+    private val files = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) {
+            uris.forEach(::persistReadPermission)
+            controller.sendFiles(uris)
+        }
+        showInput(focus = false)
+    }
+    private val directory = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            if (choosingIncomingTarget) {
+                persistTreePermission(uri)
+                rememberIncomingTree(uri)
+                controller.acceptIncomingFiles(uri)
+            } else {
+                persistReadPermission(uri)
+                controller.sendDirectory(uri)
+            }
+        }
+        if (uri == null && choosingIncomingTarget) shownIncomingBatchId = null
+        choosingIncomingTarget = false
+        showInput(focus = false)
+    }
 
     override fun attachBaseContext(base: Context) {
         super.attachBaseContext(LanguageManager.wrap(base))
@@ -173,6 +200,12 @@ class MainActivity : ComponentActivity() {
             showInput(focus = intent.action != ACTION_OPEN_IMAGE)
             if (intent.action == ACTION_OPEN_IMAGE) chooseImageSource()
         }
+        handleSharedFiles(intent)
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -182,6 +215,27 @@ class MainActivity : ComponentActivity() {
             showInput(focus = false)
             chooseImageSource()
         }
+        handleSharedFiles(intent)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun handleSharedFiles(intent: Intent) {
+        val uris = when (intent.action) {
+            Intent.ACTION_SEND -> listOfNotNull(
+                if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                else intent.getParcelableExtra(Intent.EXTRA_STREAM),
+            )
+            Intent.ACTION_SEND_MULTIPLE -> if (Build.VERSION.SDK_INT >= 33) {
+                intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+            } else {
+                intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM).orEmpty()
+            }
+            else -> emptyList()
+        }
+        if (uris.isEmpty()) return
+        uris.forEach(::persistReadPermission)
+        controller.sendFiles(uris)
+        intent.action = null
     }
 
     override fun onDestroy() {
@@ -308,6 +362,18 @@ class MainActivity : ComponentActivity() {
         }
         findViewById<ImageButton>(R.id.openSettings).setOnClickListener { showSettings() }
         findViewById<ImageButton>(R.id.openImage).setOnClickListener { chooseImageSource() }
+        findViewById<ImageButton>(R.id.openFiles).setOnClickListener {
+            if (controller.state().fileTransfer.active) {
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.file_transfer_title)
+                    .setMessage(R.string.cancel_file_transfer_message)
+                    .setNegativeButton(R.string.keep_transferring, null)
+                    .setPositiveButton(R.string.cancel_transfer) { _, _ -> controller.cancelFileTransfer() }
+                    .show()
+            } else {
+                chooseFileSource()
+            }
+        }
         renderInput(controller.state())
         applyInputWindowSettings()
         if (focus) showKeyboard()
@@ -347,6 +413,73 @@ class MainActivity : ComponentActivity() {
             .show()
     }
 
+    private fun chooseFileSource() {
+        hideKeyboard()
+        AlertDialog.Builder(this)
+            .setTitle(R.string.file_transfer_title)
+            .setItems(arrayOf(getString(R.string.choose_files), getString(R.string.choose_folder))) { _, which ->
+                if (which == 0) files.launch(arrayOf("*/*")) else directory.launch(null)
+            }
+            .setNegativeButton(R.string.cancel) { _, _ -> showKeyboard() }
+            .show()
+    }
+
+    private fun persistReadPermission(uri: Uri) {
+        runCatching {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+    }
+
+    private fun persistTreePermission(uri: Uri) {
+        runCatching {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+        }
+    }
+
+    private fun rememberIncomingTree(uri: Uri) {
+        if (contentResolver.persistedUriPermissions.any {
+                it.uri == uri && it.isReadPermission && it.isWritePermission
+            }
+        ) {
+            getSharedPreferences(FILE_TRANSFER_PREFERENCES, MODE_PRIVATE)
+                .edit()
+                .putString(INCOMING_TREE_URI, uri.toString())
+                .apply()
+        }
+    }
+
+    private fun rememberedIncomingTree(): Uri? {
+        val value = getSharedPreferences(FILE_TRANSFER_PREFERENCES, MODE_PRIVATE)
+            .getString(INCOMING_TREE_URI, null)
+            ?: return null
+        val uri = runCatching { Uri.parse(value) }.getOrNull() ?: return null
+        if (contentResolver.persistedUriPermissions.any {
+                it.uri == uri && it.isReadPermission && it.isWritePermission
+            }
+        ) return uri
+        getSharedPreferences(FILE_TRANSFER_PREFERENCES, MODE_PRIVATE)
+            .edit()
+            .remove(INCOMING_TREE_URI)
+            .apply()
+        return null
+    }
+
+    private fun incomingTreeLabel(uri: Uri): String = runCatching {
+        DocumentsContract.getTreeDocumentId(uri).substringAfter(':').ifBlank {
+            getString(R.string.selected_save_location)
+        }
+    }.getOrDefault(getString(R.string.selected_save_location))
+
+    private fun formatBytes(value: Long): String = when {
+        value >= 1024L * 1024 * 1024 -> String.format("%.1f GB", value / (1024.0 * 1024 * 1024))
+        value >= 1024L * 1024 -> String.format("%.1f MB", value / (1024.0 * 1024))
+        value >= 1024L -> String.format("%.1f KB", value / 1024.0)
+        else -> "$value B"
+    }
+
     private fun launchCamera() {
         val directory = File(cacheDir, "camera").apply { mkdirs() }
         val file = File.createTempFile("flowtype-", ".jpg", directory)
@@ -363,6 +496,82 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun renderInput(state: FlowTypeController.UiState) {
+        state.fileTransfer.incomingOffer?.let { offer ->
+            if (shownIncomingBatchId != offer.batchId) {
+                shownIncomingBatchId = offer.batchId
+                val target = rememberedIncomingTree()
+                val message = getString(
+                    R.string.incoming_files_message,
+                    state.binding?.pcName ?: getString(R.string.default_computer),
+                    offer.fileCount,
+                    offer.directoryCount,
+                    formatBytes(offer.totalBytes),
+                    offer.roots.joinToString("、"),
+                ) + if (target == null) "" else getString(
+                    R.string.incoming_files_location,
+                    incomingTreeLabel(target),
+                )
+                val dialog = AlertDialog.Builder(this)
+                    .setTitle(R.string.incoming_files_title)
+                    .setMessage(message)
+                    .setNegativeButton(R.string.reject) { _, _ ->
+                        shownIncomingBatchId = null
+                        controller.rejectIncomingFiles()
+                    }
+                    .setOnCancelListener {
+                        shownIncomingBatchId = null
+                        controller.rejectIncomingFiles()
+                    }
+                if (target == null) {
+                    dialog.setPositiveButton(R.string.choose_save_location) { _, _ ->
+                        choosingIncomingTarget = true
+                        directory.launch(null)
+                    }
+                } else {
+                    dialog
+                        .setNeutralButton(R.string.change_save_location) { _, _ ->
+                            choosingIncomingTarget = true
+                            directory.launch(target)
+                        }
+                        .setPositiveButton(R.string.receive_files) { _, _ ->
+                            controller.acceptIncomingFiles(target)
+                        }
+                }
+                dialog.show()
+            }
+        }
+        if (state.fileTransfer.needsReselection &&
+            shownReselectionBatchId != state.fileTransfer.batchId
+        ) {
+            shownReselectionBatchId = state.fileTransfer.batchId
+            AlertDialog.Builder(this)
+                .setTitle(R.string.choose_save_location)
+                .setMessage(R.string.file_reselect_message)
+                .setNegativeButton(R.string.cancel_transfer) { _, _ ->
+                    controller.cancelFileTransfer()
+                    shownReselectionBatchId = null
+                }
+                .setPositiveButton(R.string.choose_save_location) { _, _ ->
+                    choosingIncomingTarget = true
+                    directory.launch(null)
+                }
+                .setOnCancelListener {
+                    controller.cancelFileTransfer()
+                    shownReselectionBatchId = null
+                }
+                .show()
+        }
+        if (!state.fileTransfer.active && state.fileTransfer.failedPaths.isNotEmpty() &&
+            shownFailedBatchId != state.fileTransfer.batchId
+        ) {
+            shownFailedBatchId = state.fileTransfer.batchId
+            val paths = state.fileTransfer.failedPaths.joinToString("\n") { "• $it" }
+            AlertDialog.Builder(this)
+                .setTitle(R.string.file_transfer_partial_failure)
+                .setMessage(getString(R.string.file_transfer_failed_files, paths))
+                .setPositiveButton(android.R.string.ok, null)
+                .show()
+        }
         computerName.text = state.binding?.pcName ?: getString(R.string.default_computer)
         status.text = state.status
         syncStatus.text = state.syncState
@@ -381,6 +590,33 @@ class MainActivity : ComponentActivity() {
         pair.visibility = if (paired) View.GONE else View.VISIBLE
         findViewById<ImageButton>(R.id.openImage).isEnabled =
             paired && state.imageTransfer != FlowTypeController.ImageTransferState.SENDING
+        findViewById<ImageButton>(R.id.openFiles).isEnabled = paired && !state.fileTransfer.active
+        if (state.fileTransfer.active) {
+            syncStatus.text = state.fileTransfer.error?.let {
+                getString(R.string.file_waiting_network)
+            } ?: getString(
+                R.string.file_transfer_progress,
+                formatBytes(state.fileTransfer.completedBytes),
+                formatBytes(state.fileTransfer.totalBytes),
+            )
+        } else if (state.fileTransfer.failedPaths.isNotEmpty()) {
+            syncStatus.text = getString(
+                R.string.file_transfer_partial_failure_count,
+                state.fileTransfer.failedPaths.size,
+            )
+        } else if (state.fileTransfer.error != null) {
+            syncStatus.setText(
+                if ("file_transfer_requires_update" in state.fileTransfer.error) {
+                    R.string.file_transfer_requires_update
+                } else if ("insufficient_space" in state.fileTransfer.error) {
+                    R.string.file_transfer_insufficient_space
+                } else {
+                    R.string.file_transfer_failed_title
+                },
+            )
+        } else if (state.fileTransfer.batchId != null) {
+            syncStatus.setText(R.string.file_transfer_complete)
+        }
         status.setTextColor(getColor(
             when {
                 state.binding == null -> R.color.status_neutral
@@ -572,6 +808,8 @@ class MainActivity : ComponentActivity() {
         private const val STATE_REOPEN_SETTINGS = "reopen_settings"
         private const val INPUT_RESUME_GRACE_MS = 1_000L
         private const val KEEP_AWAKE_WINDOW_MS = 10L * 60L * 1_000L
+        private const val FILE_TRANSFER_PREFERENCES = "flowtype-file-transfer"
+        private const val INCOMING_TREE_URI = "incoming-tree-uri"
         const val ACTION_OPEN_IMAGE = "app.flowtype.OPEN_IMAGE"
         private const val NOTIFICATION_PERMISSION = 10
     }

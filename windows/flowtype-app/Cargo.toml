@@ -12,7 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 base64.workspace = true
+bytes.workspace = true
 futures-util.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 image = { version = "0.25.8", default-features = false, features = ["jpeg", "png"] }
 p256.workspace = true
 qrcode.workspace = true

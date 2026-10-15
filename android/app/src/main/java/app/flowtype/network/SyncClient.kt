@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Base64
+import android.util.Log
 import app.flowtype.pairing.ComputerBinding
 import app.flowtype.image.ImageTransferReply
 import app.flowtype.image.PreparedImage
@@ -16,6 +17,10 @@ import app.flowtype.protocol.ClientSessionState
 import app.flowtype.protocol.ErrorCode
 import app.flowtype.protocol.ErrorMessage
 import app.flowtype.protocol.HealthCheckMessage
+import app.flowtype.protocol.FileCancelMessage
+import app.flowtype.protocol.FileOfferMessage
+import app.flowtype.protocol.FileTicketMessage
+import app.flowtype.protocol.FileTransferCodec
 import app.flowtype.protocol.ProtocolCodec
 import app.flowtype.protocol.PROTOCOL_VERSION
 import app.flowtype.protocol.ResumeMessage
@@ -60,6 +65,10 @@ class SyncClient(
         fun onPairingInvalid(binding: ComputerBinding)
         fun onImageTransferred(transferId: String)
         fun onImageTransferFailed(transferId: String)
+        fun onFileTicket(ticket: FileTicketMessage) = Unit
+        fun onFileOffer(offer: FileOfferMessage) = Unit
+        fun onFileResult(batchId: String, state: app.flowtype.protocol.TransferBatchState) = Unit
+        fun onFileError(batchId: String, code: String) = Unit
     }
 
     private val lock = Any()
@@ -69,6 +78,7 @@ class SyncClient(
     private var socket: WebSocket? = null
     private var binding: ComputerBinding? = null
     private var ready = false
+    private var fileTransferSupported = false
     private var stopped = false
     private var generation = 0L
     private var reconnectAttempt = 0
@@ -81,6 +91,8 @@ class SyncClient(
     private var healthCheckPending = false
     private var healthCheckSupported = false
     private var pendingImageId: String? = null
+    private val pendingFileOffers = mutableSetOf<String>()
+    private val acceptedIncomingBatches = mutableSetOf<String>()
 
     fun connect(binding: ComputerBinding) {
         synchronized(lock) {
@@ -131,6 +143,37 @@ class SyncClient(
             pendingImageId = null
             restartSocketLocked()
         }
+        sent
+    }
+
+    fun sendFileOffer(pcId: String, offer: FileOfferMessage): Boolean = synchronized(lock) {
+        if (!ready || binding?.pcId != pcId || offer.phoneId != phoneId) return@synchronized false
+        if (!fileTransferSupported) {
+            listener.onFileError(offer.batchId, "file_transfer_requires_update")
+            return@synchronized true
+        }
+        runCatching { offer.validate(phoneId) }.getOrElse { return@synchronized false }
+        val sent = socket?.send(FileTransferCodec.encodeOffer(offer)) == true
+        if (sent) pendingFileOffers += offer.batchId
+        sent
+    }
+
+    fun cancelFileTransfer(pcId: String, batchId: String): Boolean = synchronized(lock) {
+        if (!ready || binding?.pcId != pcId) return@synchronized false
+        pendingFileOffers -= batchId
+        socket?.send(FileTransferCodec.encodeCancel(FileCancelMessage(batchId))) == true
+    }
+
+    fun decideFileOffer(pcId: String, batchId: String, accepted: Boolean): Boolean = synchronized(lock) {
+        if (!ready || binding?.pcId != pcId) return@synchronized false
+        if (!fileTransferSupported) {
+            listener.onFileError(batchId, "file_transfer_requires_update")
+            return@synchronized true
+        }
+        val decision = app.flowtype.protocol.FileDecisionMessage(batchId, accepted)
+        decision.validate()
+        val sent = socket?.send(FileTransferCodec.encodeDecision(decision)) == true
+        if (sent && accepted) acceptedIncomingBatches += batchId else acceptedIncomingBatches -= batchId
         sent
     }
 
@@ -234,7 +277,7 @@ class SyncClient(
             .put("type", if (current.pairingToken == null) "authenticate" else "pair")
             .put("phone_id", phoneId)
             .put("phone_name", Build.MODEL.ifBlank { "Android" })
-            .put("capabilities", JSONArray(listOf("health_check", "switch_ack")))
+            .put("capabilities", JSONArray(listOf("health_check", "switch_ack", "file_transfer_v2")))
             .put(
                 "signature",
                 Base64.encodeToString(phoneIdentity.sign(current.pcId, payload), Base64.NO_WRAP),
@@ -270,6 +313,8 @@ class SyncClient(
         }
         if (socket?.send(payload) != true) {
             restartSocketLocked()
+        } else {
+            SyncE2eMetrics.sent(action.snapshot)
         }
     }
 
@@ -383,6 +428,9 @@ class SyncClient(
                         connectTimeoutRunnable = null
                         ready = true
                         reconnectAttempt = 0
+                        fileTransferSupported = value.optJSONArray("capabilities")?.let { capabilities ->
+                            (0 until capabilities.length()).any { capabilities.optString(it) == "file_transfer_v2" }
+                        } == true
                         healthCheckSupported = value.optJSONArray("capabilities")?.let { capabilities ->
                             (0 until capabilities.length()).any {
                                 capabilities.optString(it) == "health_check"
@@ -408,6 +456,31 @@ class SyncClient(
                             }
                         }
                     }
+                    "file_result", "file_error" -> {
+                        val reply = JSONObject(text)
+                        val batchId = reply.getString("batch_id")
+                        if (!pendingFileOffers.remove(batchId) && !acceptedIncomingBatches.remove(batchId)) return
+                        if (reply.getString("type") == "file_result") {
+                            val state = app.flowtype.protocol.TransferBatchState.entries.single {
+                                it.wireName == reply.getString("state") && it.terminal
+                            }
+                            listener.onFileResult(batchId, state)
+                        } else {
+                            listener.onFileError(batchId, reply.getString("code"))
+                        }
+                    }
+                    "file_ticket" -> {
+                        val ticket = FileTransferCodec.decodeTicket(text).also {
+                            it.validate(System.currentTimeMillis() / 1_000)
+                        }
+                        if (!pendingFileOffers.remove(ticket.batchId) && !acceptedIncomingBatches.remove(ticket.batchId)) return
+                        listener.onFileTicket(ticket)
+                    }
+                    "file_offer" -> {
+                        val offer = FileTransferCodec.decodeOffer(text).also { it.validate(phoneId) }
+                        if (offer.direction != app.flowtype.protocol.TransferDirection.COMPUTER_TO_PHONE) return
+                        listener.onFileOffer(offer)
+                    }
                     else -> when (val message = ProtocolCodec.decodeServer(text)) {
                         is ServerMessage.ProbeResult -> {
                             // Probe sockets are owned by TargetProbeClient. Ignore an
@@ -416,6 +489,7 @@ class SyncClient(
                         is ServerMessage.HealthAck -> Unit
                         is ServerMessage.Ack -> {
                             if (!queue.acceptsSession(message.value.sessionId)) return
+                            SyncE2eMetrics.acknowledged(message.value)
                             queue.acknowledge(message.value)?.let(::sendActionLocked)
                             listener.onAck(message.value)
                         }
@@ -538,5 +612,27 @@ class SyncClient(
         }
 
         override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+    }
+}
+
+internal object SyncE2eMetrics {
+    @Volatile var enabled = false
+
+    fun sent(snapshot: SnapshotMessage) {
+        if (!enabled) return
+        Log.i(
+            "FlowTypeE2E",
+            "snapshot_sent session=${snapshot.sessionId} sequence=${snapshot.sequence} " +
+                "elapsed_ms=${SystemClock.elapsedRealtime()}",
+        )
+    }
+
+    fun acknowledged(ack: AckMessage) {
+        if (!enabled) return
+        Log.i(
+            "FlowTypeE2E",
+            "snapshot_ack session=${ack.sessionId} sequence=${ack.appliedSequence} " +
+                "elapsed_ms=${SystemClock.elapsedRealtime()}",
+        )
     }
 }

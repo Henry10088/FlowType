@@ -3,6 +3,8 @@
 mod atomic_file;
 mod clipboard;
 mod diagnostics;
+mod file_transfer_server;
+mod file_transfer_store;
 mod i18n;
 mod identity;
 mod injector;
@@ -22,6 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use flowtype_core::file_transfer::{FileOffer, FileServerMessage};
 use flowtype_core::ipc::{InjectorRequest, InjectorResponse};
 use flowtype_core::protocol::{
     Ack, Cancel, ClientMessage, ClientSessionState, ErrorCode, HealthAck, ProbeResult, ProbeState,
@@ -47,6 +50,9 @@ use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastE
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 
+use crate::file_transfer_server::{
+    FileTransferCoordinator, FileTransferSnapshot, run_file_transfer_server,
+};
 use crate::i18n::tr;
 use crate::identity::PcIdentity;
 use crate::injector_dispatcher::{InjectorDispatcher, InjectorRequestFailure};
@@ -281,12 +287,14 @@ struct AppState {
     active_connection: Mutex<Option<ActiveConnection>>,
     online_connections: Mutex<HashMap<u64, OnlineConnection>>,
     switch_channels: Mutex<HashMap<u64, SwitchChannel>>,
+    file_offer_channels: Mutex<HashMap<u64, Sender<FileOffer>>>,
     pending_switch: Mutex<Option<PendingSwitch>>,
     runtime_status: Mutex<RuntimeStatus>,
     ui_hwnd: Arc<AtomicIsize>,
     ui_update_pending: AtomicBool,
     update: update::UpdateManager,
     next_connection_id: AtomicU64,
+    file_transfers: Arc<FileTransferCoordinator>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -317,6 +325,7 @@ struct UiSnapshot {
     status: RuntimeStatus,
     injector_ready: bool,
     update: update::UpdateSnapshot,
+    file_transfer: Option<FileTransferSnapshot>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -343,9 +352,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings::set_auto_start(false)?;
         return Ok(());
     }
-    let Some(_instance) = SingleInstance::acquire()? else {
+    let Some(_instance) = SingleInstance::acquire(ui_preview)? else {
         diagnostics::log("startup existing_instance");
-        ui::show_existing_window();
+        if !ui_preview {
+            ui::show_existing_window();
+        }
         return Ok(());
     };
     let identity = PcIdentity::load_or_create()?;
@@ -359,6 +370,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(network_address::preferred_ipv4);
     let ui_hwnd = Arc::new(AtomicIsize::new(0));
     let update = update::UpdateManager::start(Arc::clone(&ui_hwnd))?;
+    let file_transfers = FileTransferCoordinator::load_default()?;
     let state = Arc::new(AppState {
         identity: identity.clone(),
         pc_name: Mutex::new(identity.pc_name.clone()),
@@ -369,6 +381,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         active_connection: Mutex::new(None),
         online_connections: Mutex::new(HashMap::new()),
         switch_channels: Mutex::new(HashMap::new()),
+        file_offer_channels: Mutex::new(HashMap::new()),
         pending_switch: Mutex::new(None),
         runtime_status: Mutex::new(RuntimeStatus {
             summary: tr("等待手机连接", "Waiting for phone").to_owned(),
@@ -380,7 +393,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui_update_pending: AtomicBool::new(false),
         update,
         next_connection_id: AtomicU64::new(1),
+        file_transfers,
     });
+
+    #[cfg(debug_assertions)]
+    if let Ok(path) = std::env::var("FLOWTYPE_E2E_PAIRING_URI_FILE")
+        && let Ok(uri) = state.begin_pairing(endpoint_host)
+    {
+        std::fs::write(path, uri)?;
+    }
+    #[cfg(debug_assertions)]
+    if let Some(path) = std::env::var_os("FLOWTYPE_E2E_SEND_PATH") {
+        let test_state = Arc::clone(&state);
+        let path = std::path::PathBuf::from(path);
+        std::thread::spawn(move || {
+            for _ in 0..2_400 {
+                if test_state.connected_phone_id().is_some() {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if let Err(error) = test_state.queue_files_to_connected_phone(vec![path]) {
+                        eprintln!("E2E outbound transfer could not start: {error}");
+                    }
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            eprintln!("E2E outbound transfer timed out after ten minutes waiting for the phone");
+        });
+    }
 
     if !ui_preview {
         let network_state = Arc::clone(&state);
@@ -390,7 +429,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .spawn(move || {
                 let runtime =
                     tokio::runtime::Runtime::new().expect("cannot create network runtime");
-                if let Err(error) = runtime.block_on(run_network(network_state)) {
+                if let Err(error) = runtime.block_on(async {
+                    tokio::try_join!(
+                        run_network(Arc::clone(&network_state)),
+                        run_file_transfer_server(network_state),
+                    )
+                    .map(|_| ())
+                }) {
                     eprintln!("network stopped: {error}");
                     network_error_state.update_status(|status| {
                         status.summary = tr("连接服务不可用", "Connection unavailable").to_owned();
@@ -421,8 +466,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 struct SingleInstance(HANDLE);
 
 impl SingleInstance {
-    fn acquire() -> std::io::Result<Option<Self>> {
-        let name = wide(r"Local\FlowType.MainApp");
+    fn acquire(preview: bool) -> std::io::Result<Option<Self>> {
+        // UI previews do not start the listener and may coexist with a running install.
+        let name = wide(&if preview {
+            format!(r"Local\FlowType.UiPreview.{}", std::process::id())
+        } else {
+            r"Local\FlowType.MainApp".to_owned()
+        });
         let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
         if handle.is_null() {
             return Err(std::io::Error::last_os_error());
@@ -452,6 +502,7 @@ impl AppState {
     }
 
     fn snapshot(&self) -> UiSnapshot {
+        let connected_phone_id = self.connected_phone_id();
         UiSnapshot {
             pc_name: self
                 .pc_name
@@ -473,7 +524,20 @@ impl AppState {
                 }),
             injector_ready: self.injector.is_ready(),
             update: self.update.snapshot(),
+            file_transfer: connected_phone_id
+                .as_deref()
+                .and_then(|phone_id| self.file_transfers.transfer_snapshot(phone_id)),
         }
+    }
+
+    fn connected_phone_id(&self) -> Option<String> {
+        self.online_connections.lock().ok().and_then(|connections| {
+            connections
+                .iter()
+                .filter(|(_, connection)| !connection.is_probe)
+                .max_by_key(|(connection_id, _)| *connection_id)
+                .map(|(_, connection)| connection.phone_id.clone())
+        })
     }
 
     fn update_status(&self, update: impl FnOnce(&mut RuntimeStatus)) {
@@ -746,7 +810,117 @@ impl AppState {
         }
     }
 
+    fn register_file_offer_channel(&self, connection_id: u64, sender: Sender<FileOffer>) {
+        if let Ok(mut channels) = self.file_offer_channels.lock() {
+            channels.insert(connection_id, sender);
+        }
+    }
+
+    fn clear_file_offer_channel(&self, connection_id: u64) {
+        if let Ok(mut channels) = self.file_offer_channels.lock() {
+            channels.remove(&connection_id);
+        }
+    }
+
+    fn send_files_to_phone(
+        &self,
+        phone_id: &str,
+        paths: &[std::path::PathBuf],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let connection_id = self
+            .online_connections
+            .lock()
+            .ok()
+            .and_then(|connections| {
+                connections
+                    .iter()
+                    .filter(|(_, connection)| {
+                        connection.phone_id == phone_id && !connection.is_probe
+                    })
+                    .map(|(id, _)| *id)
+                    .max()
+            })
+            .ok_or("phone is not connected")?;
+        let sender = self
+            .file_offer_channels
+            .lock()
+            .map_err(|_| "file offer channel unavailable")?
+            .get(&connection_id)
+            .ok_or("phone connection does not support file transfer")?
+            .clone();
+        let offer = self.file_transfers.create_outbound_offer(phone_id, paths)?;
+        sender
+            .try_send(offer)
+            .map_err(|_| "phone file queue is busy")?;
+        Ok(())
+    }
+
+    fn send_files_to_connected_phone(
+        &self,
+        paths: &[std::path::PathBuf],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let phone_id = self.connected_phone_id().ok_or("phone is not connected")?;
+        self.send_files_to_phone(&phone_id, paths)
+    }
+
+    fn queue_files_to_connected_phone(
+        self: &Arc<Self>,
+        paths: Vec<std::path::PathBuf>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if paths.is_empty() {
+            return Err("no files selected".into());
+        }
+        if self.connected_phone_id().is_none() {
+            return Err("phone is not connected".into());
+        }
+        let state = Arc::clone(self);
+        std::thread::spawn(move || {
+            state.update_status(|status| {
+                status.summary = tr("正在准备文件", "Preparing files").to_owned();
+                status.last_error = None;
+            });
+            match state.send_files_to_connected_phone(&paths) {
+                Ok(()) => state.update_status(|status| {
+                    status.summary =
+                        tr("等待手机确认接收", "Waiting for phone approval").to_owned();
+                    status.last_error = None;
+                }),
+                Err(error) => state.update_status(|status| {
+                    status.summary = tr("文件发送失败", "File transfer failed").to_owned();
+                    status.last_error = Some(error.to_string());
+                }),
+            }
+        });
+        Ok(())
+    }
+
+    fn cancel_file_transfer(&self, batch_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let phone_id = self.connected_phone_id().ok_or("phone is not connected")?;
+        self.file_transfers.cancel(batch_id, &phone_id)?;
+        self.notify_ui();
+        Ok(())
+    }
+
+    fn file_receive_root(&self) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+        self.file_transfers.receive_root().map_err(Into::into)
+    }
+
+    fn set_file_receive_root(
+        &self,
+        path: std::path::PathBuf,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        settings::set_receive_folder(&path)?;
+        self.file_transfers.set_receive_root(path)?;
+        Ok(())
+    }
+
     fn begin_pairing(&self, host: IpAddr) -> Result<String, Box<dyn std::error::Error>> {
+        #[cfg(debug_assertions)]
+        if std::env::var_os("FLOWTYPE_E2E_PAIRING_URI_FILE").is_some()
+            && let Some(uri) = self.current_pairing_uri(host)
+        {
+            return Ok(uri);
+        }
         let token = random_token();
         *self
             .pairing_token
@@ -774,6 +948,7 @@ impl AppState {
 
     fn unpair_phone(&self, phone_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         self.paired_phones.remove(phone_id)?;
+        self.file_transfers.revoke_phone(phone_id);
         self.notify_ui();
         Ok(())
     }

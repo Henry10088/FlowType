@@ -1,7 +1,120 @@
 use super::*;
+use std::path::PathBuf;
+use windows::Win32::Foundation::HWND as WinHwnd;
+use windows::Win32::System::Com::{
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+    CoTaskMemFree, CoUninitialize,
+};
+use windows::Win32::UI::Shell::{
+    FOS_ALLOWMULTISELECT, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
+    FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH,
+};
 
 impl UiContext {
+    pub(super) fn set_file_tab(&mut self, tab: FileTab) {
+        if self.file_tab != tab {
+            self.file_tab = tab;
+            self.rebuild_page();
+        }
+    }
+    pub(super) fn choose_and_send_files(&mut self, folder: bool) {
+        let result = choose_paths(self.hwnd, folder).and_then(|paths| {
+            if paths.is_empty() {
+                Ok(())
+            } else {
+                self.state.queue_files_to_connected_phone(paths)
+            }
+        });
+        match result {
+            Ok(()) => self.show_save_notice(true, tr("已发送文件请求", "File transfer requested")),
+            Err(error) if error.to_string() == "canceled" => {}
+            Err(error) => self.show_save_notice(
+                false,
+                &format!("{}: {error}", tr("无法发送文件", "Could not send files")),
+            ),
+        }
+    }
+
+    pub(super) fn send_dropped_paths(&mut self, drop: windows_sys::Win32::UI::Shell::HDROP) {
+        let count = unsafe { DragQueryFileW(drop, u32::MAX, std::ptr::null_mut(), 0) };
+        let mut paths = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let length = unsafe { DragQueryFileW(drop, index, std::ptr::null_mut(), 0) };
+            if length == 0 {
+                continue;
+            }
+            let mut value = vec![0u16; length as usize + 1];
+            let copied =
+                unsafe { DragQueryFileW(drop, index, value.as_mut_ptr(), value.len() as u32) };
+            if copied > 0 {
+                paths.push(PathBuf::from(String::from_utf16_lossy(
+                    &value[..copied as usize],
+                )));
+            }
+        }
+        unsafe { DragFinish(drop) };
+        if self.page != Page::Files {
+            self.show_save_notice(
+                false,
+                tr("请先打开文件传输页面", "Open File transfer first"),
+            );
+            return;
+        }
+        if paths.is_empty() {
+            return;
+        }
+        match self.state.queue_files_to_connected_phone(paths) {
+            Ok(()) => self.show_save_notice(true, tr("已发送文件请求", "File transfer requested")),
+            Err(error) => self.show_save_notice(
+                false,
+                &format!("{}: {error}", tr("无法发送文件", "Could not send files")),
+            ),
+        }
+    }
+
+    pub(super) fn cancel_file_transfer(&mut self) {
+        let Some(batch_id) = self.file_cancel_batch.as_deref() else {
+            return;
+        };
+        match self.state.cancel_file_transfer(batch_id) {
+            Ok(()) => self.show_save_notice(true, tr("文件传输已取消", "File transfer canceled")),
+            Err(error) => self.show_save_notice(false, &error.to_string()),
+        }
+        self.update_file_controls(self.state.snapshot().file_transfer.as_ref());
+    }
+
+    pub(super) fn change_receive_folder(&mut self) {
+        let result = choose_paths(self.hwnd, true).and_then(|paths| {
+            let path = paths.into_iter().next().ok_or("canceled")?;
+            self.state.set_file_receive_root(path)
+        });
+        match result {
+            Ok(()) => {
+                let root = self
+                    .state
+                    .file_receive_root()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| {
+                        tr("接收位置不可用", "Receive folder unavailable").to_owned()
+                    });
+                set_control_text(self.file_receive_root, &root);
+                self.show_save_notice(true, tr("接收位置已更新", "Receive folder updated"));
+            }
+            Err(error) if error.to_string() == "canceled" => {}
+            Err(error) => self.show_save_notice(
+                false,
+                &format!(
+                    "{}: {error}",
+                    tr("无法更改接收位置", "Could not change receive folder")
+                ),
+            ),
+        }
+    }
+
     pub(super) fn set_page(&mut self, page: Page) {
+        if self.page == page {
+            return;
+        }
         if self.page == Page::Pairing && page != Page::Pairing {
             self.state.cancel_pairing();
         }
@@ -227,6 +340,7 @@ impl UiContext {
             return;
         }
         let snapshot = self.state.snapshot();
+        self.notify_transfer_transition(snapshot.file_transfer.as_ref());
         if self.page == Page::Phones && self.phone_statuses.len() != snapshot.phones.len() {
             self.rebuild_page();
             return;
@@ -234,6 +348,7 @@ impl UiContext {
         match self.page {
             Page::Status => {
                 set_control_text(self.status_summary, &snapshot.status.summary);
+                set_control_text(self.status_input, &snapshot.status.summary);
                 set_control_text(
                     self.status_phone,
                     snapshot
@@ -278,6 +393,17 @@ impl UiContext {
                     set_control_text(self.phone_statuses[index], &status);
                 }
             }
+            Page::Files => {
+                set_control_text(
+                    self.file_destination,
+                    snapshot
+                        .status
+                        .connected_phone
+                        .as_deref()
+                        .unwrap_or(tr("手机未连接", "Phone is not connected")),
+                );
+                self.update_file_controls(snapshot.file_transfer.as_ref());
+            }
             Page::Settings => {
                 set_control_text(
                     self.service_status,
@@ -291,9 +417,24 @@ impl UiContext {
             }
             Page::Pairing => {}
         }
-        unsafe { InvalidateRect(self.hwnd, null(), 0) };
+        if matches!(self.page, Page::Phones | Page::Settings) {
+            unsafe { InvalidateRect(self.hwnd, null(), 0) };
+        }
         self.update_tray();
         ui_floating::refresh(self.ball_hwnd);
+    }
+
+    pub(super) fn update_file_controls(
+        &mut self,
+        transfer: Option<&crate::file_transfer_server::FileTransferSnapshot>,
+    ) {
+        let content = FileTabContent::new(self.file_tab, transfer);
+        set_control_text(self.file_status, &content.status);
+        set_control_text(self.file_failures, &content.failures);
+        set_control_visible(self.file_choose, content.can_choose);
+        set_control_visible(self.file_folder, content.can_choose);
+        set_control_visible(self.file_cancel, content.cancel_batch.is_some());
+        self.file_cancel_batch = content.cancel_batch;
     }
 
     pub(super) fn refresh_update_controls(&mut self) {
@@ -309,17 +450,13 @@ impl UiContext {
         } else {
             snapshot.message.clone()
         };
+        set_control_text(self.update_status, &status);
+        set_control_text(self.update_action, &snapshot.action_label);
+        set_control_visible(
+            self.update_action,
+            snapshot.action != update::UpdateAction::None,
+        );
         unsafe {
-            SetWindowTextW(self.update_status, wide(&status).as_ptr());
-            SetWindowTextW(self.update_action, wide(&snapshot.action_label).as_ptr());
-            ShowWindow(
-                self.update_action,
-                if snapshot.action == update::UpdateAction::None {
-                    SW_HIDE
-                } else {
-                    SW_SHOW
-                },
-            );
             if let Some((transferred, total)) = snapshot.progress {
                 let position = if total == 0 {
                     0
@@ -331,16 +468,10 @@ impl UiContext {
                 };
                 SendMessageW(self.update_progress, PBM_SETRANGE32, 0, 1000);
                 SendMessageW(self.update_progress, PBM_SETPOS, position as usize, 0);
-                ShowWindow(self.update_progress, SW_SHOW);
+                set_control_visible(self.update_progress, true);
             } else {
-                ShowWindow(self.update_progress, SW_HIDE);
+                set_control_visible(self.update_progress, false);
             }
-            RedrawWindow(
-                self.hwnd,
-                null(),
-                null_mut(),
-                RDW_INVALIDATE | RDW_NOERASE | RDW_ALLCHILDREN,
-            );
         }
         self.update_tray();
     }
@@ -364,5 +495,43 @@ impl UiContext {
         } else {
             self.state.perform_update_action(action);
         }
+    }
+}
+
+fn choose_paths(hwnd: HWND, folder: bool) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+    let result = (|| -> windows::core::Result<Vec<PathBuf>> {
+        let dialog: IFileOpenDialog =
+            unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)? };
+        let mut options = unsafe { dialog.GetOptions()? };
+        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
+        if folder {
+            options |= FOS_PICKFOLDERS;
+        } else {
+            options |= FOS_ALLOWMULTISELECT | FOS_FILEMUSTEXIST;
+        }
+        unsafe {
+            dialog.SetOptions(options)?;
+            dialog.Show(Some(WinHwnd(hwnd)))?;
+        }
+        let results = unsafe { dialog.GetResults()? };
+        let count = unsafe { results.GetCount()? };
+        let mut paths = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let item = unsafe { results.GetItemAt(index)? };
+            let value = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH)? };
+            let text = unsafe { value.to_string()? };
+            unsafe { CoTaskMemFree(Some(value.0.cast())) };
+            paths.push(PathBuf::from(text));
+        }
+        Ok(paths)
+    })();
+    if initialized {
+        unsafe { CoUninitialize() };
+    }
+    match result {
+        Ok(paths) => Ok(paths),
+        Err(error) if error.code().0 == 0x800704C7u32 as i32 => Err("canceled".into()),
+        Err(error) => Err(error.into()),
     }
 }

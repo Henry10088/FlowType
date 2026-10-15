@@ -6,6 +6,15 @@ import org.junit.Test
 
 class ConnectivityDemandTest {
     @Test
+    fun activeFileTransferKeepsConnectivityRequired() {
+        val demand = ConnectivityDemand()
+        demand.setFileTransferActive(true)
+        assertTrue(demand.required)
+        demand.setFileTransferActive(false)
+        assertFalse(demand.required)
+    }
+
+    @Test
     fun backgroundWithoutFloatingDoesNotRequireConnectivity() {
         val demand = ConnectivityDemand()
 

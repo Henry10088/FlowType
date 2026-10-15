@@ -1,15 +1,20 @@
 package app.flowtype
 
 import android.content.Context
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import app.flowtype.data.AppDatabase
 import app.flowtype.data.HistoryEntry
 import app.flowtype.data.HistoryStore
+import app.flowtype.data.FileTransferStore
 import app.flowtype.data.SettingsStore
 import app.flowtype.data.StorageDispatcher
 import app.flowtype.connectivity.ConnectivityDemand
 import app.flowtype.image.PreparedImage
+import app.flowtype.filetransfer.FileTransferManager
+import app.flowtype.filetransfer.FileTransferExecution
+import app.flowtype.filetransfer.FileTransferNotifications
 import app.flowtype.network.AutoSelectionCoordinator
 import app.flowtype.network.ControlClientPool
 import app.flowtype.network.SyncClient
@@ -18,6 +23,8 @@ import app.flowtype.pairing.ComputerBinding
 import app.flowtype.protocol.AckMessage
 import app.flowtype.protocol.ErrorCode
 import app.flowtype.protocol.ErrorMessage
+import app.flowtype.protocol.FileTicketMessage
+import app.flowtype.protocol.FileOfferMessage
 import app.flowtype.protocol.SnapshotMessage
 import app.flowtype.protocol.SnapshotType
 import app.flowtype.protocol.TargetMessage
@@ -54,12 +61,15 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         val onlinePcIds: Set<String>,
         val recentActivityPcId: String?,
         val imageTransfer: ImageTransferState,
+        val fileTransfer: FileTransferManager.Snapshot,
         val autoSelecting: Boolean,
     )
 
     private lateinit var database: AppDatabase
     private lateinit var bindings: BindingStore
     private lateinit var history: HistoryStore
+    private lateinit var fileTransferStore: FileTransferStore
+    private lateinit var fileTransfers: FileTransferManager
     private lateinit var settings: SettingsStore
     lateinit var updates: UpdateManager
         private set
@@ -86,6 +96,7 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
     private var recentActivityPcId: String? = null
     private val saveDraft = Runnable { saveDraftNow() }
     private var imageTransfer = ImageTransferState.IDLE
+    private var fileTransfer = FileTransferManager.Snapshot(active = false)
     private var autoSelecting = false
     private var autoSelectionTargetPcId: String? = null
     private var pendingAutoStart: SnapshotMessage? = null
@@ -93,6 +104,8 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
     private var autoSelectionError: LocalizedText? = null
     private var manualStartPending = false
     private var connectivityRunning = false
+    private var uiVisible = false
+    private var fileExecutionPaused = false
     private val disconnectInBackground = Runnable {
         if (!connectivityDemand.required) suspendConnectivity()
     }
@@ -101,6 +114,7 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         database = AppDatabase(application)
         bindings = BindingStore(application, database)
         history = HistoryStore(database)
+        fileTransferStore = FileTransferStore(database)
         settings = SettingsStore(database)
         drafts = DraftRepository(SecureDraftStore(application), storage)
         sessions = ComputerSessions(
@@ -114,6 +128,46 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
             session.sessionId != null || imageTransfer == ImageTransferState.SENDING
         }
         syncClient = SyncClient(bindings.phoneId, PhoneIdentity(), this)
+        fileTransfers = FileTransferManager(
+            context = application,
+            store = fileTransferStore,
+            phoneId = bindings.phoneId,
+            sendOffer = syncClient::sendFileOffer,
+            sendDecision = syncClient::decideFileOffer,
+            sendCancel = syncClient::cancelFileTransfer,
+            parallelism = { fileTransferParallelism(session.sessionId != null) },
+            onChanged = { snapshot -> onMain {
+                val previous = fileTransfer
+                fileTransfer = snapshot
+                if (!uiVisible && snapshot.incomingOffer != null &&
+                    snapshot.incomingOffer.batchId != previous.incomingOffer?.batchId
+                ) {
+                    FileTransferNotifications.showIncoming(
+                        application,
+                        currentBinding?.pcName ?: application.getString(R.string.default_computer),
+                    )
+                }
+                if (snapshot.incomingOffer == null && previous.incomingOffer != null) {
+                    FileTransferNotifications.clearIncoming(application)
+                }
+                if (!uiVisible && previous.active && !snapshot.active && snapshot.batchId != null) {
+                    if (snapshot.error == null) {
+                        FileTransferNotifications.showCompleted(application)
+                    } else {
+                        FileTransferNotifications.showFailed(application)
+                    }
+                }
+                connectivityDemand.setFileTransferActive(snapshot.active)
+                if (snapshot.active) {
+                    resumeConnectivity()
+                    ensureFileExecution()
+                } else {
+                    FileTransferExecution.stop(application)
+                    scheduleBackgroundDisconnect()
+                }
+                notifyChanged()
+            } },
+        )
         controlClients = ControlClientPool(
             phoneId = bindings.phoneId,
             onSwitchComputer = { pcId, completion ->
@@ -127,14 +181,27 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
             app.flowtype.network.TargetProbeClient(bindings.phoneId, PhoneIdentity()),
         )
         refreshBindings()
-        currentBinding = computers.firstOrNull()
+        val recoverableBatch = fileTransferStore.recoverableBatches().firstOrNull()
+        currentBinding = recoveryBinding(computers, recoverableBatch?.pcId)
+        if (recoverableBatch != null && currentBinding?.pcId == recoverableBatch.pcId) {
+            fileTransfer = FileTransferManager.Snapshot(
+                active = true,
+                batchId = recoverableBatch.batchId,
+                totalBytes = recoverableBatch.totalBytes,
+                error = "waiting_network",
+            )
+            connectivityDemand.setFileTransferActive(true)
+        }
         currentBinding?.let {
             statusText = text(R.string.status_connecting, it.pcName)
         }
         drafts.preload(computers.map(ComputerBinding::pcId)) {
             storageReady = true
             currentBinding?.let(::restoreSessionFor)
-            if (connectivityRunning) {
+            if (fileTransfer.active) {
+                ensureFileExecution()
+                resumeConnectivity()
+            } else if (connectivityRunning) {
                 activateCurrentConnectivity()
             } else {
                 notifyChanged()
@@ -201,6 +268,7 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         onlinePcIds = onlinePcIds.toSet(),
         recentActivityPcId = recentActivityPcId,
         imageTransfer = imageTransfer,
+        fileTransfer = fileTransfer,
         autoSelecting = autoSelecting,
     )
 
@@ -231,6 +299,26 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         imageTransfer = ImageTransferState.SENDING
         notifyChanged()
         return true
+    }
+
+    fun sendFiles(uris: List<Uri>) {
+        fileTransfers.createFiles(uris)
+    }
+
+    fun sendDirectory(uri: Uri) {
+        fileTransfers.createDirectory(uri)
+    }
+
+    fun acceptIncomingFiles(targetTree: Uri) {
+        fileTransfers.acceptIncoming(targetTree)
+    }
+
+    fun rejectIncomingFiles() {
+        fileTransfers.rejectIncoming()
+    }
+
+    fun cancelFileTransfer() {
+        fileTransfers.cancelActive()
     }
 
     fun textChanged(text: String) {
@@ -437,11 +525,37 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
     }
 
     fun onUiStarted() {
+        uiVisible = true
+        if (fileExecutionPaused) {
+            fileExecutionPaused = false
+            if (ensureFileExecution()) fileTransfers.resumeExecution()
+        }
+        FileTransferNotifications.clearIncoming(application)
         connectivityDemand.activityStarted()
         resumeConnectivity()
     }
 
+    private fun ensureFileExecution(): Boolean {
+        if (fileExecutionPaused) return false
+        if (FileTransferExecution.start(application)) return true
+        onFileExecutionStopped()
+        return false
+    }
+
+    fun onFileExecutionStopped() {
+        fileExecutionPaused = true
+        fileTransfers.pauseExecution()
+    }
+
+    fun onFileExecutionStarted() {
+        if (fileExecutionPaused) {
+            fileExecutionPaused = false
+            fileTransfers.resumeExecution()
+        }
+    }
+
     fun onUiStopped() {
+        uiVisible = false
         connectivityDemand.activityStopped()
         scheduleBackgroundDisconnect()
     }
@@ -508,6 +622,8 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
 
     override fun onReady(binding: ComputerBinding) = onMain {
         currentBinding = bindings.markPaired(binding)
+        fileTransfers.setBinding(currentBinding)
+        fileTransfers.resumeRecoverable()
         refreshBindings()
         refreshControlClients()
         connected = true
@@ -661,8 +777,25 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
         notifyChanged()
     }
 
+    override fun onFileTicket(ticket: FileTicketMessage) {
+        fileTransfers.onTicket(ticket)
+    }
+
+    override fun onFileOffer(offer: FileOfferMessage) {
+        fileTransfers.onOffer(offer)
+    }
+
+    override fun onFileResult(batchId: String, state: app.flowtype.protocol.TransferBatchState) {
+        fileTransfers.onResult(batchId, state)
+    }
+
+    override fun onFileError(batchId: String, code: String) {
+        fileTransfers.onError(batchId, code)
+    }
+
     private fun connect(binding: ComputerBinding) {
         currentBinding = binding
+        fileTransfers.setBinding(binding)
         refreshControlClients()
         connected = false
         showSyncFullText = false
@@ -831,6 +964,9 @@ class FlowTypeController(private val application: FlowTypeApplication) : SyncCli
     }
 }
 
+internal fun fileTransferParallelism(activeTextSession: Boolean): Int =
+    if (activeTextSession) 1 else 2
+
 internal fun shouldBeginAutoSelection(
     enabled: Boolean,
     hasActiveSession: Boolean,
@@ -841,3 +977,8 @@ internal fun restoredDraftRequiresExplicitStart(
     hasActiveSession: Boolean,
     hasText: Boolean,
 ): Boolean = !hasActiveSession && hasText
+
+internal fun recoveryBinding(
+    computers: List<ComputerBinding>,
+    recoverablePcId: String?,
+): ComputerBinding? = computers.firstOrNull { it.pcId == recoverablePcId } ?: computers.firstOrNull()

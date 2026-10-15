@@ -40,6 +40,7 @@ class AppDatabase(context: Context, name: String = NAME) : SQLiteOpenHelper(cont
             )""",
         )
         db.execSQL("CREATE INDEX history_completed_at ON history(completed_at DESC)")
+        createFileTransferTables(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -48,6 +49,19 @@ class AppDatabase(context: Context, name: String = NAME) : SQLiteOpenHelper(cont
         }
         if (oldVersion < 3) {
             db.execSQL("ALTER TABLE computers ADD COLUMN endpoint_candidates TEXT NOT NULL DEFAULT '[]'")
+        }
+        if (oldVersion < 4) {
+            createFileTransferTables(db)
+        }
+        if (oldVersion in 4 until 5) {
+            db.execSQL("ALTER TABLE file_transfer_entries ADD COLUMN target_name TEXT")
+        }
+        if (oldVersion in 4 until 6) {
+            db.execSQL("ALTER TABLE file_transfer_entries ADD COLUMN target_parent_uri TEXT")
+        }
+        if (oldVersion in 4 until 7) {
+            db.execSQL("ALTER TABLE file_transfer_entries ADD COLUMN commit_sha256 TEXT")
+            db.execSQL("ALTER TABLE file_transfer_entries ADD COLUMN final_uri TEXT")
         }
     }
 
@@ -75,6 +89,50 @@ class AppDatabase(context: Context, name: String = NAME) : SQLiteOpenHelper(cont
 
     companion object {
         private const val NAME = "flowtype-v1.db"
-        private const val VERSION = 3
+        private const val VERSION = 7
+
+        private fun createFileTransferTables(db: SQLiteDatabase) {
+            db.execSQL(
+                """CREATE TABLE file_transfer_batches (
+                    batch_id TEXT PRIMARY KEY NOT NULL,
+                    pc_id TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    file_count INTEGER NOT NULL,
+                    directory_count INTEGER NOT NULL,
+                    total_bytes INTEGER NOT NULL,
+                    target_tree_uri TEXT
+                )""",
+            )
+            db.execSQL(
+                """CREATE TABLE file_transfer_entries (
+                    batch_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    entry_id TEXT NOT NULL,
+                    source_uri TEXT,
+                    relative_path TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    modified_at INTEGER,
+                    mime_type TEXT,
+                    sha256 TEXT,
+                    target_uri TEXT,
+                    target_name TEXT,
+                    target_parent_uri TEXT,
+                    commit_sha256 TEXT,
+                    final_uri TEXT,
+                    state TEXT NOT NULL,
+                    committed_offset INTEGER NOT NULL DEFAULT 0,
+                    error_code TEXT,
+                    PRIMARY KEY (batch_id, ordinal),
+                    UNIQUE (batch_id, entry_id),
+                    FOREIGN KEY (batch_id) REFERENCES file_transfer_batches(batch_id) ON DELETE CASCADE
+                )""",
+            )
+            db.execSQL("CREATE INDEX file_transfer_batches_state ON file_transfer_batches(state, created_at)")
+            db.execSQL("CREATE INDEX file_transfer_entries_state ON file_transfer_entries(batch_id, state, ordinal)")
+        }
     }
 }
