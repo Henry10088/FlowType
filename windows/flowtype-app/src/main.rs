@@ -468,10 +468,11 @@ struct SingleInstance(HANDLE);
 
 impl SingleInstance {
     fn acquire(preview: bool) -> std::io::Result<Option<Self>> {
-        let name = wide(if preview {
-            r"Local\FlowType.UiPreview"
+        // UI previews do not start the listener and may coexist with a running install.
+        let name = wide(&if preview {
+            format!(r"Local\FlowType.UiPreview.{}", std::process::id())
         } else {
-            r"Local\FlowType.MainApp"
+            r"Local\FlowType.MainApp".to_owned()
         });
         let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
         if handle.is_null() {
@@ -894,9 +895,9 @@ impl AppState {
         Ok(())
     }
 
-    fn cancel_outbound_file_transfer(&self) -> Result<(), Box<dyn std::error::Error>> {
+    fn cancel_file_transfer(&self, batch_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         let phone_id = self.connected_phone_id().ok_or("phone is not connected")?;
-        self.file_transfers.cancel_active(&phone_id)?;
+        self.file_transfers.cancel(batch_id, &phone_id)?;
         self.notify_ui();
         Ok(())
     }

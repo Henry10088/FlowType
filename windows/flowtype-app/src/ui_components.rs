@@ -7,34 +7,25 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 
-pub(super) const CORNER_RADIUS: i32 = 8;
-pub(super) const NAV_INSET: i32 = 10;
+pub(super) const CORNER_RADIUS: i32 = 7;
+pub(super) const NAV_INSET: i32 = 12;
 
 // One set of section bounds is shared by Direct2D and the GDI recovery renderer.
 pub(super) fn page_panels(page: Page, client_width: f32, phone_count: usize) -> Vec<Rect> {
     let right = ShellLayout::new(client_width).content_right;
     let panel = |top, bottom| Rect {
-        left: 204.0,
+        left: 244.0,
         top,
         right,
         bottom,
     };
     match page {
-        Page::Status => vec![panel(92.0, 296.0)],
-        Page::Phones if phone_count == 0 => vec![panel(100.0, 190.0)],
-        Page::Phones => PhonesLayout::new(client_width, phone_count)
-            .rows
-            .iter()
-            .map(|row| Rect {
-                left: 210.0,
-                top: row.bounds.top + 2.0,
-                right,
-                bottom: row.bounds.bottom - 2.0,
-            })
-            .collect(),
-        Page::Pairing => vec![panel(108.0, 426.0)],
-        Page::Files => vec![panel(88.0, 388.0), panel(402.0, 520.0)],
-        Page::Settings => vec![panel(84.0, 254.0), panel(266.0, 360.0), panel(364.0, 552.0)],
+        Page::Status => vec![panel(132.0, 240.0)],
+        Page::Phones if phone_count == 0 => vec![panel(169.0, 263.0)],
+        Page::Phones => Vec::new(),
+        Page::Pairing => vec![panel(166.0, 465.0)],
+        Page::Files => vec![panel(229.0, 420.0)],
+        Page::Settings => Vec::new(),
     }
 }
 
@@ -66,7 +57,7 @@ pub(super) fn draw_action(
         (ActionStyle::Primary, true, _, _) => COLOR_DISABLED,
         (ActionStyle::Primary, false, true, _) => COLOR_TEAL_PRESSED,
         (ActionStyle::Primary, false, false, true) => COLOR_TEAL_HOVER,
-        (ActionStyle::Primary, false, false, false) => COLOR_TEAL,
+        (ActionStyle::Primary, false, false, false) => COLOR_PRIMARY,
         (_, true, _, _) => COLOR_SIDEBAR,
         (_, false, true, _) => COLOR_PRESSED,
         (_, false, false, true) => COLOR_HOVER,

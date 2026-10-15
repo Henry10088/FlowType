@@ -1,9 +1,10 @@
 pub(super) const COLOR_WHITE: u32 = 0x00ff_ffff;
-pub(super) const COLOR_SIDEBAR: u32 = 0x00fa_f8f7;
+pub(super) const COLOR_SIDEBAR: u32 = 0x00f9_f9f7;
 pub(super) const COLOR_TEXT: u32 = 0x001f_1f1f;
 pub(super) const COLOR_MUTED: u32 = 0x0070_7070;
 pub(super) const COLOR_LINE: u32 = 0x00e9_e5e2;
 pub(super) const COLOR_TEAL: u32 = 0x00b8_ba00;
+pub(super) const COLOR_PRIMARY: u32 = 0x0091_8f00;
 pub(super) const COLOR_TEAL_PALE: u32 = 0x00f8_f9ea;
 pub(super) const COLOR_HOVER: u32 = 0x00f5_f3f1;
 pub(super) const COLOR_PRESSED: u32 = 0x00ee_ebe8;

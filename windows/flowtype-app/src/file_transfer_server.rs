@@ -610,7 +610,8 @@ impl FileTransferCoordinator {
         })
     }
 
-    pub(crate) fn cancel_active(&self, phone_id: &str) -> Result<(), &'static str> {
+    #[cfg(test)]
+    fn cancel_active(&self, phone_id: &str) -> Result<(), &'static str> {
         let batch = self
             .store
             .recoverable_batches()

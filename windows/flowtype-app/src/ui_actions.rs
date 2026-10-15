@@ -1,4 +1,3 @@
-use super::ui_pages::file_transfer_status;
 use super::*;
 use std::path::PathBuf;
 use windows::Win32::Foundation::HWND as WinHwnd;
@@ -12,6 +11,12 @@ use windows::Win32::UI::Shell::{
 };
 
 impl UiContext {
+    pub(super) fn set_file_tab(&mut self, tab: FileTab) {
+        if self.file_tab != tab {
+            self.file_tab = tab;
+            self.rebuild_page();
+        }
+    }
     pub(super) fn choose_and_send_files(&mut self, folder: bool) {
         let result = choose_paths(self.hwnd, folder).and_then(|paths| {
             if paths.is_empty() {
@@ -68,7 +73,10 @@ impl UiContext {
     }
 
     pub(super) fn cancel_file_transfer(&mut self) {
-        match self.state.cancel_outbound_file_transfer() {
+        let Some(batch_id) = self.file_cancel_batch.as_deref() else {
+            return;
+        };
+        match self.state.cancel_file_transfer(batch_id) {
             Ok(()) => self.show_save_notice(true, tr("文件传输已取消", "File transfer canceled")),
             Err(error) => self.show_save_notice(false, &error.to_string()),
         }
@@ -340,6 +348,7 @@ impl UiContext {
         match self.page {
             Page::Status => {
                 set_control_text(self.status_summary, &snapshot.status.summary);
+                set_control_text(self.status_input, &snapshot.status.summary);
                 set_control_text(
                     self.status_phone,
                     snapshot
@@ -416,34 +425,16 @@ impl UiContext {
     }
 
     pub(super) fn update_file_controls(
-        &self,
+        &mut self,
         transfer: Option<&crate::file_transfer_server::FileTransferSnapshot>,
     ) {
-        let active = transfer.is_some_and(|value| value.active());
-        let status = transfer.map_or_else(
-            || {
-                tr(
-                    "选择文件后，手机只需确认一次",
-                    "The phone confirms once per transfer",
-                )
-                .to_owned()
-            },
-            file_transfer_status,
-        );
-        set_control_text(self.file_status, &status);
-        let failures = transfer
-            .filter(|value| !value.failed_paths.is_empty())
-            .map_or_else(String::new, |value| {
-                format!(
-                    "{}：{}",
-                    tr("失败文件", "Failed files"),
-                    value.failed_paths.join(" · ")
-                )
-            });
-        set_control_text(self.file_failures, &failures);
-        set_control_visible(self.file_choose, !active);
-        set_control_visible(self.file_folder, !active);
-        set_control_visible(self.file_cancel, active);
+        let content = FileTabContent::new(self.file_tab, transfer);
+        set_control_text(self.file_status, &content.status);
+        set_control_text(self.file_failures, &content.failures);
+        set_control_visible(self.file_choose, content.can_choose);
+        set_control_visible(self.file_folder, content.can_choose);
+        set_control_visible(self.file_cancel, content.cancel_batch.is_some());
+        self.file_cancel_batch = content.cancel_batch;
     }
 
     pub(super) fn refresh_update_controls(&mut self) {

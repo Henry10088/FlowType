@@ -24,59 +24,66 @@ fn main() {
 }
 
 fn write_icon(path: &Path) {
-    const SIZE: usize = 32;
-    let mut bytes = Vec::with_capacity(22 + 40 + SIZE * SIZE * 4 + 128);
-
+    // Three pixel-perfect sizes keep the titlebar, taskbar and Explorer icon crisp.
+    const SIZES: [usize; 3] = [16, 32, 48];
+    let header_size = 6 + SIZES.len() * 16;
+    let mut bytes = Vec::new();
     bytes.extend_from_slice(&0_u16.to_le_bytes());
     bytes.extend_from_slice(&1_u16.to_le_bytes());
-    bytes.extend_from_slice(&1_u16.to_le_bytes());
-    bytes.extend_from_slice(&[SIZE as u8, SIZE as u8, 0, 0]);
-    bytes.extend_from_slice(&1_u16.to_le_bytes());
-    bytes.extend_from_slice(&32_u16.to_le_bytes());
-    bytes.extend_from_slice(&((40 + SIZE * SIZE * 4 + 128) as u32).to_le_bytes());
-    bytes.extend_from_slice(&22_u32.to_le_bytes());
-
-    bytes.extend_from_slice(&40_u32.to_le_bytes());
-    bytes.extend_from_slice(&(SIZE as i32).to_le_bytes());
-    bytes.extend_from_slice(&((SIZE * 2) as i32).to_le_bytes());
-    bytes.extend_from_slice(&1_u16.to_le_bytes());
-    bytes.extend_from_slice(&32_u16.to_le_bytes());
-    bytes.extend_from_slice(&0_u32.to_le_bytes());
-    bytes.extend_from_slice(&((SIZE * SIZE * 4) as u32).to_le_bytes());
-    bytes.extend_from_slice(&0_i32.to_le_bytes());
-    bytes.extend_from_slice(&0_i32.to_le_bytes());
-    bytes.extend_from_slice(&0_u32.to_le_bytes());
-    bytes.extend_from_slice(&0_u32.to_le_bytes());
-
-    for y in (0..SIZE).rev() {
-        for x in 0..SIZE {
-            let xf = x as f32;
-            let yf = y as f32;
-            let pen = [
-                ((9.0, 23.0), (10.5, 17.0)),
-                ((10.5, 17.0), (21.0, 7.0)),
-                ((21.0, 7.0), (26.0, 12.0)),
-                ((26.0, 12.0), (15.0, 22.0)),
-                ((15.0, 22.0), (9.0, 23.0)),
-                ((19.0, 9.0), (24.0, 14.0)),
-            ]
-            .iter()
-            .any(|&((x1, y1), (x2, y2))| near_segment(xf, yf, x1, y1, x2, y2, 1.3));
-            let dx = xf - 27.0;
-            let dy = yf - 22.0;
-            let dot = dx * dx + dy * dy <= 3.0 * 3.0;
-            let (r, g, b) = if pen {
-                (244, 246, 247)
-            } else if dot {
-                (0, 186, 184)
-            } else {
-                (16, 18, 20)
-            };
-            bytes.extend_from_slice(&[b, g, r, 255]);
-        }
+    bytes.extend_from_slice(&(SIZES.len() as u16).to_le_bytes());
+    let mut offset = header_size;
+    for size in SIZES {
+        let mask_bytes = size.div_ceil(32) * 4 * size;
+        let image_bytes = 40 + size * size * 4 + mask_bytes;
+        bytes.extend_from_slice(&[size as u8, size as u8, 0, 0]);
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&32_u16.to_le_bytes());
+        bytes.extend_from_slice(&(image_bytes as u32).to_le_bytes());
+        bytes.extend_from_slice(&(offset as u32).to_le_bytes());
+        offset += image_bytes;
     }
-    bytes.extend_from_slice(&[0_u8; 128]);
+    for size in SIZES {
+        bytes.extend_from_slice(&40_u32.to_le_bytes());
+        bytes.extend_from_slice(&(size as i32).to_le_bytes());
+        bytes.extend_from_slice(&((size * 2) as i32).to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&32_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&((size * size * 4) as u32).to_le_bytes());
+        bytes.extend_from_slice(&[0_u8; 16]);
+        for y in (0..size).rev() {
+            for x in 0..size {
+                let mut teal = 0;
+                let mut white = 0;
+                // Supersampling avoids jagged edges at 16px without a raster asset.
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        let px = (x as f32 + (sx as f32 + 0.5) / 4.0) * 32.0 / size as f32;
+                        let py = (y as f32 + (sy as f32 + 0.5) / 4.0) * 32.0 / size as f32;
+                        let inside = rounded_square(px, py, 5.2, 26.8, 6.2);
+                        let pen = near_segment(px, py, 11.0, 21.2, 20.8, 10.5, 2.0)
+                            || near_segment(px, py, 9.8, 23.1, 12.2, 17.9, 1.25)
+                            || near_segment(px, py, 19.1, 8.7, 23.1, 12.6, 1.8);
+                        teal += i32::from(inside);
+                        white += i32::from(inside && pen);
+                    }
+                }
+                let a = teal * 255 / 16;
+                let white = white * 255 / 16;
+                // Premultiplication is not used by the ICO DIB format.
+                let blend = |base: i32| ((base * (255 - white) + 255 * white) / 255) as u8;
+                bytes.extend_from_slice(&[blend(184), blend(186), blend(0), a as u8]);
+            }
+        }
+        bytes.extend(std::iter::repeat_n(0_u8, size.div_ceil(32) * 4 * size));
+    }
     fs::write(path, bytes).expect("failed to write FlowType icon");
+}
+
+fn rounded_square(x: f32, y: f32, start: f32, end: f32, radius: f32) -> bool {
+    let cx = x.clamp(start + radius, end - radius);
+    let cy = y.clamp(start + radius, end - radius);
+    (x - cx).powi(2) + (y - cy).powi(2) <= radius.powi(2)
 }
 
 fn near_segment(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32, radius: f32) -> bool {

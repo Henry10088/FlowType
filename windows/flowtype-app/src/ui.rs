@@ -54,6 +54,8 @@ mod ui_pages;
 mod ui_paint;
 #[path = "ui_render.rs"]
 mod ui_render;
+#[path = "ui_state.rs"]
+mod ui_state;
 #[path = "ui_theme.rs"]
 mod ui_theme;
 #[path = "ui_tray.rs"]
@@ -63,9 +65,11 @@ use ui_commands::*;
 use ui_components::*;
 use ui_direct2d::{Direct2dPainter, PhonePaintRow};
 use ui_layout::{
-    FilesLayout, PairingLayout, PhonesLayout, SettingsLayout, ShellLayout, StatusLayout,
+    FilesLayout, MIN_CLIENT_HEIGHT, MIN_CLIENT_WIDTH, PairingLayout, PhonesLayout, SettingsLayout,
+    ShellLayout, StatusLayout,
 };
 use ui_paint::*;
+use ui_state::FileTabContent;
 use ui_theme::*;
 
 const CLASS_NAME: &str = "FlowTypeMainWindow";
@@ -92,6 +96,12 @@ enum Page {
     Pairing,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileTab {
+    Send,
+    Received,
+}
+
 #[derive(Clone, Copy)]
 enum ButtonKind {
     Navigation(Page),
@@ -99,6 +109,9 @@ enum ButtonKind {
     Back,
     Checkbox,
     Language,
+    WindowMinimize,
+    WindowClose,
+    FileTab(FileTab),
 }
 
 struct UiContext {
@@ -106,6 +119,7 @@ struct UiContext {
     host: IpAddr,
     hwnd: HWND,
     page: Page,
+    file_tab: FileTab,
     shell_controls: Vec<HWND>,
     controls: Vec<HWND>,
     buttons: Vec<(HWND, ButtonKind)>,
@@ -115,6 +129,7 @@ struct UiContext {
     name_edit: HWND,
     status_summary: HWND,
     status_phone: HWND,
+    status_input: HWND,
     status_target: HWND,
     status_address: HWND,
     status_error: HWND,
@@ -129,6 +144,7 @@ struct UiContext {
     file_choose: HWND,
     file_folder: HWND,
     file_cancel: HWND,
+    file_cancel_batch: Option<String>,
     pair_open_instruction: HWND,
     pair_scan_instruction: HWND,
     pair_computer: HWND,
@@ -154,6 +170,8 @@ struct UiContext {
     ball_hwnd: HWND,
     save_notice: Option<SaveNotice>,
     direct2d: Option<Direct2dPainter>,
+    #[cfg(debug_assertions)]
+    simulate_paint_error: bool,
     last_transfer_status: Option<(String, flowtype_core::file_transfer::BatchState)>,
 }
 
@@ -168,6 +186,7 @@ impl UiContext {
             host,
             hwnd: null_mut(),
             page,
+            file_tab: FileTab::Send,
             shell_controls: Vec::new(),
             controls: Vec::new(),
             buttons: Vec::new(),
@@ -177,6 +196,7 @@ impl UiContext {
             name_edit: null_mut(),
             status_summary: null_mut(),
             status_phone: null_mut(),
+            status_input: null_mut(),
             status_target: null_mut(),
             status_address: null_mut(),
             status_error: null_mut(),
@@ -191,6 +211,7 @@ impl UiContext {
             file_choose: null_mut(),
             file_folder: null_mut(),
             file_cancel: null_mut(),
+            file_cancel_batch: None,
             pair_open_instruction: null_mut(),
             pair_scan_instruction: null_mut(),
             pair_computer: null_mut(),
@@ -216,6 +237,8 @@ impl UiContext {
             ball_hwnd: null_mut(),
             save_notice: None,
             direct2d: None,
+            #[cfg(debug_assertions)]
+            simulate_paint_error: std::env::var_os("FLOWTYPE_UI_SIMULATE_PAINT_FAILURE").is_some(),
             last_transfer_status,
         }
     }
@@ -270,8 +293,17 @@ pub fn run(
     if unsafe { RegisterClassW(&class) } == 0 {
         return Err(std::io::Error::last_os_error().into());
     }
-    let page = if pairing_preview || visible && state.snapshot().phones.is_empty() {
+    let preview = std::env::args().any(|argument| argument == "--ui-preview");
+    let page = if pairing_preview || visible && state.snapshot().phones.is_empty() && !preview {
         Page::Pairing
+    } else if preview {
+        match std::env::var("FLOWTYPE_UI_PREVIEW_PAGE").as_deref() {
+            Ok("files") => Page::Files,
+            Ok("phones") => Page::Phones,
+            Ok("settings") => Page::Settings,
+            Ok("pairing") => Page::Pairing,
+            _ => Page::Status,
+        }
     } else {
         Page::Status
     };
@@ -279,14 +311,14 @@ pub fn run(
     let context_ptr = Box::into_raw(context);
     let title = wide(product_name());
     let system_dpi = unsafe { GetDpiForSystem() }.max(96) as i32;
-    let initial_width = 800 * system_dpi / 96;
-    let initial_height = 660 * system_dpi / 96;
+    let initial_width = 980 * system_dpi / 96;
+    let initial_height = 620 * system_dpi / 96;
     let hwnd = unsafe {
         CreateWindowExW(
             0,
             class_name.as_ptr(),
             title.as_ptr(),
-            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+            WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             initial_width,
@@ -375,6 +407,52 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
+        WM_NCCALCSIZE | WM_NCPAINT => 0,
+        WM_NCACTIVATE => 1,
+        WM_NCHITTEST => {
+            let result = unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
+            if result != HTCLIENT as isize {
+                return result;
+            }
+            let mut point = POINT {
+                x: lparam as i16 as i32,
+                y: (lparam >> 16) as i16 as i32,
+            };
+            let mut window_rect: RECT = unsafe { zeroed() };
+            unsafe { GetWindowRect(hwnd, &mut window_rect) };
+            point.x -= window_rect.left;
+            point.y -= window_rect.top;
+            let (width, height) = ui.client_size();
+            let edge = ui.scale(6);
+            if point.y >= height - edge {
+                return if point.x < edge {
+                    HTBOTTOMLEFT
+                } else if point.x >= width - edge {
+                    HTBOTTOMRIGHT
+                } else {
+                    HTBOTTOM
+                } as isize;
+            }
+            if point.y < edge {
+                return if point.x < edge {
+                    HTTOPLEFT
+                } else if point.x >= width - edge {
+                    HTTOPRIGHT
+                } else {
+                    HTTOP
+                } as isize;
+            }
+            if point.x < edge {
+                return HTLEFT as isize;
+            }
+            if point.x >= width - edge {
+                return HTRIGHT as isize;
+            }
+            if point.y < ui.scale(52) && point.x < width - ui.scale(100) {
+                return HTCAPTION as isize;
+            }
+            HTCLIENT as isize
+        }
         WM_COMMAND => {
             let id = wparam & 0xffff;
             if id == ID_NAME && matches!((wparam >> 16) as u32, EN_SETFOCUS | EN_KILLFOCUS) {
@@ -413,6 +491,14 @@ unsafe extern "system" fn window_proc(
                 Some(UiCommand::ChooseFolder) => ui.choose_and_send_files(true),
                 Some(UiCommand::CancelFileTransfer) => ui.cancel_file_transfer(),
                 Some(UiCommand::ChangeReceiveFolder) => ui.change_receive_folder(),
+                Some(UiCommand::MinimizeWindow) => {
+                    unsafe { ShowWindow(hwnd, SW_MINIMIZE) };
+                }
+                Some(UiCommand::CloseWindow) => {
+                    unsafe { SendMessageW(hwnd, WM_CLOSE, 0, 0) };
+                }
+                Some(UiCommand::FileSendTab) => ui.set_file_tab(FileTab::Send),
+                Some(UiCommand::FileReceivedTab) => ui.set_file_tab(FileTab::Received),
                 Some(UiCommand::Exit) => {
                     crate::diagnostics::log(format!("window command exit id={id}"));
                     unsafe { DestroyWindow(hwnd) };
@@ -540,8 +626,8 @@ unsafe extern "system" fn window_proc(
         }
         WM_GETMINMAXINFO => {
             let info = unsafe { &mut *(lparam as *mut MINMAXINFO) };
-            info.ptMinTrackSize.x = ui.scale(760);
-            info.ptMinTrackSize.y = ui.scale(640);
+            info.ptMinTrackSize.x = ui.scale(MIN_CLIENT_WIDTH);
+            info.ptMinTrackSize.y = ui.scale(MIN_CLIENT_HEIGHT);
             0
         }
         WM_CLOSE => {
@@ -591,36 +677,36 @@ fn create_navigation(ui: &mut UiContext) {
         tr("状态", "Status"),
         ID_NAV_STATUS,
         0,
-        18,
-        180,
-        48,
+        120,
+        202,
+        42,
         ButtonKind::Navigation(Page::Status),
     );
     ui.owner_button(
         tr("文件传输", "File transfer"),
         ID_NAV_FILES,
         0,
-        66,
-        180,
-        48,
+        166,
+        202,
+        42,
         ButtonKind::Navigation(Page::Files),
     );
     ui.owner_button(
         tr("已绑定手机", "Paired phones"),
         ID_NAV_PHONES,
         0,
-        114,
-        180,
-        48,
+        212,
+        202,
+        42,
         ButtonKind::Navigation(Page::Phones),
     );
     ui.owner_button(
         tr("设置", "Settings"),
         ID_NAV_SETTINGS,
         0,
-        162,
-        180,
-        48,
+        258,
+        202,
+        42,
         ButtonKind::Navigation(Page::Settings),
     );
 }

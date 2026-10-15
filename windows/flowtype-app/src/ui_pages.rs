@@ -4,25 +4,44 @@ impl UiContext {
     pub(super) fn create_shell(&mut self) {
         create_navigation(self);
         self.create_language_button();
+        let (width, _) = self.client_size();
+        self.owner_button(
+            tr("最小化", "Minimize"),
+            ID_WINDOW_MINIMIZE,
+            width * 96 / unsafe { GetDpiForWindow(self.hwnd) }.max(96) as i32 - 94,
+            0,
+            46,
+            52,
+            ButtonKind::WindowMinimize,
+        );
+        self.owner_button(
+            tr("关闭", "Close"),
+            ID_WINDOW_CLOSE,
+            width * 96 / unsafe { GetDpiForWindow(self.hwnd) }.max(96) as i32 - 48,
+            0,
+            48,
+            52,
+            ButtonKind::WindowClose,
+        );
         self.shell_controls = std::mem::take(&mut self.controls);
     }
 
     pub(super) fn refresh_shell(&self) {
         for control in &self.shell_controls {
             let (top, font, label) = match unsafe { GetDlgCtrlID(*control) } as usize {
-                ID_NAV_STATUS => (Some(18), self.navigation_font, Some(tr("状态", "Status"))),
+                ID_NAV_STATUS => (Some(120), self.navigation_font, Some(tr("状态", "Status"))),
                 ID_NAV_FILES => (
-                    Some(66),
+                    Some(166),
                     self.navigation_font,
                     Some(tr("文件传输", "File transfer")),
                 ),
                 ID_NAV_PHONES => (
-                    Some(114),
+                    Some(212),
                     self.navigation_font,
                     Some(tr("已绑定手机", "Paired phones")),
                 ),
                 ID_NAV_SETTINGS => (
-                    Some(162),
+                    Some(258),
                     self.navigation_font,
                     Some(tr("设置", "Settings")),
                 ),
@@ -40,8 +59,8 @@ impl UiContext {
                         null_mut(),
                         0,
                         self.scale(top),
-                        self.scale(180),
-                        self.scale(48),
+                        self.scale(202),
+                        self.scale(42),
                         SWP_NOZORDER | SWP_NOACTIVATE,
                     );
                 }
@@ -60,20 +79,55 @@ impl UiContext {
 
     pub(super) fn reposition_responsive_controls(&self) {
         let phone_layout = self.phones_layout();
-        let files_layout = FilesLayout::new(self.logical_client_width());
+        let files_layout = FilesLayout::new(self.logical_client_width(), self.file_tab);
         let pairing_layout = PairingLayout::new(self.logical_client_width());
         let settings_layout = SettingsLayout::new(self.logical_client_width());
         let shell = ShellLayout::new(self.logical_client_width());
         for (control, _) in &self.buttons {
             let id = unsafe { GetDlgCtrlID(*control) } as usize;
             let bounds = if id == ID_LANGUAGE_MENU {
-                Some(shell.language_action)
+                let (_, height) = self.client_size();
+                Some(ui_layout::Rect::from_xywh(
+                    154.0,
+                    height as f32 * 96.0 / unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32
+                        - 50.0,
+                    34.0,
+                    34.0,
+                ))
+            } else if id == ID_WINDOW_MINIMIZE {
+                Some(ui_layout::Rect::from_xywh(
+                    self.logical_client_width() - 94.0,
+                    0.0,
+                    46.0,
+                    52.0,
+                ))
+            } else if id == ID_WINDOW_CLOSE {
+                Some(ui_layout::Rect::from_xywh(
+                    self.logical_client_width() - 48.0,
+                    0.0,
+                    48.0,
+                    52.0,
+                ))
             } else if self.page == Page::Phones && id == ID_PAIR {
                 Some(phone_layout.pair_action)
             } else if self.page == Page::Status && id == ID_PAIR {
                 Some(StatusLayout::new(self.logical_client_width()).pair_action)
             } else if self.page == Page::Settings && id == ID_SAVE_SETTINGS {
                 Some(settings_layout.save_action)
+            } else if self.page == Page::Settings && id == ID_AUTO_START {
+                Some(ui_layout::Rect::from_xywh(
+                    385.0,
+                    203.0,
+                    shell.content_right - 385.0,
+                    34.0,
+                ))
+            } else if self.page == Page::Settings && id == ID_SHOW_FLOATING {
+                Some(ui_layout::Rect::from_xywh(
+                    385.0,
+                    250.0,
+                    shell.content_right - 385.0,
+                    34.0,
+                ))
             } else if self.page == Page::Settings && id == ID_REPAIR {
                 Some(settings_layout.repair_action)
             } else if self.page == Page::Settings && id == ID_UPDATE_REPOSITORY {
@@ -84,6 +138,10 @@ impl UiContext {
                 Some(settings_layout.update_action)
             } else if self.page == Page::Files && id == ID_CHANGE_RECEIVE_FOLDER {
                 Some(files_layout.receive_action)
+            } else if self.page == Page::Files && id == ID_CANCEL_FILE_TRANSFER {
+                Some(files_layout.cancel_action)
+            } else if self.page == Page::Pairing && id == ID_PAIR_BACK {
+                Some(pairing_layout.back_action)
             } else if self.page == Page::Phones
                 && (ID_UNPAIR_BASE..ID_UNPAIR_BASE + phone_layout.rows.len()).contains(&id)
             {
@@ -96,7 +154,11 @@ impl UiContext {
             }
         }
         match self.page {
-            Page::Settings => self.position_control(self.name_edit, settings_layout.name_edit),
+            Page::Settings => {
+                self.position_control(self.name_edit, settings_layout.name_edit);
+                self.position_control(self.update_status, settings_layout.update_status);
+                self.position_control(self.update_progress, settings_layout.update_progress);
+            }
             Page::Files => {
                 for (control, rect) in [
                     (self.file_destination, files_layout.destination),
@@ -167,10 +229,10 @@ impl UiContext {
                 unsafe { DeleteObject(font) };
             }
         }
-        self.title_font = create_font(self.scale(22), FW_SEMIBOLD as i32, "Segoe UI");
-        self.heading_font = create_font(self.scale(17), FW_SEMIBOLD as i32, "Segoe UI");
-        self.navigation_font = create_font(self.scale(15), FW_SEMIBOLD as i32, "Segoe UI");
-        self.body_font = create_font(self.scale(14), FW_NORMAL as i32, "Segoe UI");
+        self.title_font = create_font(self.scale(25), FW_SEMIBOLD as i32, "Segoe UI");
+        self.heading_font = create_font(self.scale(16), FW_SEMIBOLD as i32, "Segoe UI");
+        self.navigation_font = create_font(self.scale(14), FW_SEMIBOLD as i32, "Segoe UI");
+        self.body_font = create_font(self.scale(13), FW_NORMAL as i32, "Segoe UI");
         self.icon_font = create_font(self.scale(20), FW_NORMAL as i32, "Segoe MDL2 Assets");
     }
 
@@ -187,6 +249,7 @@ impl UiContext {
         self.name_edit = null_mut();
         self.status_summary = null_mut();
         self.status_phone = null_mut();
+        self.status_input = null_mut();
         self.status_target = null_mut();
         self.status_address = null_mut();
         self.status_error = null_mut();
@@ -201,6 +264,7 @@ impl UiContext {
         self.file_choose = null_mut();
         self.file_folder = null_mut();
         self.file_cancel = null_mut();
+        self.file_cancel_batch = None;
         self.pair_open_instruction = null_mut();
         self.pair_scan_instruction = null_mut();
         self.pair_computer = null_mut();
@@ -236,23 +300,90 @@ impl UiContext {
 
     pub(super) fn build_files(&mut self) {
         let snapshot = self.state.snapshot();
-        let layout = FilesLayout::new(self.logical_client_width());
+        let layout = FilesLayout::new(self.logical_client_width(), self.file_tab);
         self.text(
             tr("文件传输", "File transfer"),
-            220,
-            28,
+            244,
+            75,
             300,
             34,
             self.title_font,
         );
-        self.text(
-            tr("发送到手机", "Send to phone"),
-            220,
-            96,
-            260,
-            30,
-            self.heading_font,
+        self.muted_text(
+            tr(
+                "与已绑定手机互传文件和文件夹，断线后自动续传。",
+                "Transfer files and folders with paired phones; resume after interruption.",
+            ),
+            244,
+            117,
+            560,
+            26,
+            self.body_font,
         );
+        self.owner_button(
+            tr("发送到手机", "Send to phone"),
+            ID_FILE_SEND_TAB,
+            244,
+            154,
+            110,
+            36,
+            ButtonKind::FileTab(FileTab::Send),
+        );
+        self.owner_button(
+            tr("收到的文件", "Received files"),
+            ID_FILE_RECEIVED_TAB,
+            378,
+            154,
+            110,
+            36,
+            ButtonKind::FileTab(FileTab::Received),
+        );
+        if self.file_tab == FileTab::Received {
+            self.text(
+                tr(
+                    "手机发来的文件会自动保存",
+                    "Files sent by your phone are saved automatically",
+                ),
+                320,
+                226,
+                390,
+                30,
+                self.heading_font,
+            );
+            self.text(
+                tr("保存位置", "Save location"),
+                265,
+                269,
+                90,
+                27,
+                self.body_font,
+            );
+            let receive_root = self
+                .state
+                .file_receive_root()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| tr("接收位置不可用", "Receive folder unavailable").to_owned());
+            self.file_receive_root = self.muted_text(
+                &receive_root,
+                layout.receive_root.left as i32,
+                layout.receive_root.top as i32,
+                layout.receive_root.width() as i32,
+                28,
+                self.body_font,
+            );
+            self.owner_button(
+                tr("更改位置", "Change"),
+                ID_CHANGE_RECEIVE_FOLDER,
+                layout.receive_action.left as i32,
+                layout.receive_action.top as i32,
+                108,
+                34,
+                ButtonKind::Secondary,
+            );
+            self.build_file_status(&layout, snapshot.file_transfer.as_ref());
+            return;
+        }
+        self.text(tr("发送到", "Send to"), 244, 199, 80, 26, self.body_font);
         let destination = snapshot
             .status
             .connected_phone
@@ -266,77 +397,23 @@ impl UiContext {
             26,
             self.body_font,
         );
-        let transfer_status = snapshot.file_transfer.as_ref().map_or_else(
-            || {
-                tr(
-                    "选择文件后，手机只需确认一次",
-                    "The phone confirms once per transfer",
-                )
-                .to_owned()
-            },
-            file_transfer_status,
-        );
-        self.file_status = self.muted_text(
-            &transfer_status,
-            layout.status.left as i32,
-            layout.status.top as i32,
-            layout.status.width() as i32,
-            42,
-            self.body_font,
-        );
-        let active = snapshot
-            .file_transfer
-            .as_ref()
-            .is_some_and(|transfer| transfer.active());
         self.file_choose = self.owner_button(
             tr("选择文件", "Choose files"),
             ID_CHOOSE_FILES,
-            220,
-            205,
-            128,
-            38,
+            370,
+            354,
+            120,
+            34,
             ButtonKind::Secondary,
         );
         self.file_folder = self.owner_button(
             tr("选择文件夹", "Choose folder"),
             ID_CHOOSE_FOLDER,
-            360,
-            205,
-            128,
-            38,
+            499,
+            354,
+            126,
+            34,
             ButtonKind::Secondary,
-        );
-        self.file_cancel = self.owner_button(
-            tr("取消传输", "Cancel transfer"),
-            ID_CANCEL_FILE_TRANSFER,
-            220,
-            205,
-            112,
-            38,
-            ButtonKind::Secondary,
-        );
-        unsafe {
-            ShowWindow(self.file_choose, if active { SW_HIDE } else { SW_SHOW });
-            ShowWindow(self.file_folder, if active { SW_HIDE } else { SW_SHOW });
-            ShowWindow(self.file_cancel, if active { SW_SHOW } else { SW_HIDE });
-        }
-        self.file_failures = self.muted_text(
-            &snapshot
-                .file_transfer
-                .as_ref()
-                .filter(|transfer| !transfer.failed_paths.is_empty())
-                .map_or_else(String::new, |transfer| {
-                    format!(
-                        "{}：{}",
-                        tr("失败文件", "Failed files"),
-                        transfer.failed_paths.join(" · ")
-                    )
-                }),
-            layout.failures.left as i32,
-            layout.failures.top as i32,
-            layout.failures.width() as i32,
-            42,
-            self.body_font,
         );
         self.file_drop_hint = self.text(
             tr(
@@ -349,6 +426,39 @@ impl UiContext {
             30,
             self.body_font,
         );
+        self.build_file_status(&layout, snapshot.file_transfer.as_ref());
+    }
+
+    fn build_file_status(
+        &mut self,
+        layout: &FilesLayout,
+        transfer: Option<&crate::file_transfer_server::FileTransferSnapshot>,
+    ) {
+        self.file_status = self.muted_text(
+            "",
+            layout.status.left as i32,
+            layout.status.top as i32,
+            layout.status.width() as i32,
+            (layout.status.bottom - layout.status.top) as i32,
+            self.body_font,
+        );
+        self.file_failures = self.muted_text(
+            "",
+            layout.failures.left as i32,
+            layout.failures.top as i32,
+            layout.failures.width() as i32,
+            (layout.failures.bottom - layout.failures.top) as i32,
+            self.body_font,
+        );
+        self.file_cancel = self.owner_button(
+            tr("取消传输", "Cancel transfer"),
+            ID_CANCEL_FILE_TRANSFER,
+            layout.cancel_action.left as i32,
+            layout.cancel_action.top as i32,
+            layout.cancel_action.width() as i32,
+            (layout.cancel_action.bottom - layout.cancel_action.top) as i32,
+            ButtonKind::Secondary,
+        );
         self.file_security_note = self.muted_text(
             tr(
                 "传输经过设备绑定密钥保护，支持断点继续。",
@@ -357,39 +467,10 @@ impl UiContext {
             layout.security_note.left as i32,
             layout.security_note.top as i32,
             layout.security_note.width() as i32,
-            48,
+            28,
             self.body_font,
         );
-        self.text(
-            tr("手机文件保存到", "Files from phone are saved to"),
-            220,
-            420,
-            260,
-            26,
-            self.heading_font,
-        );
-        let receive_root = self
-            .state
-            .file_receive_root()
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| tr("接收位置不可用", "Receive folder unavailable").to_owned());
-        self.file_receive_root = self.muted_text(
-            &receive_root,
-            layout.receive_root.left as i32,
-            layout.receive_root.top as i32,
-            layout.receive_root.width() as i32,
-            44,
-            self.body_font,
-        );
-        self.owner_button(
-            tr("更改位置", "Change"),
-            ID_CHANGE_RECEIVE_FOLDER,
-            layout.receive_action.left as i32,
-            layout.receive_action.top as i32,
-            100,
-            36,
-            ButtonKind::Secondary,
-        );
+        self.update_file_controls(transfer);
     }
 
     pub(super) fn build_status(&mut self) {
@@ -401,40 +482,52 @@ impl UiContext {
             layout.summary.top as i32,
             layout.summary.width() as i32,
             (layout.summary.bottom - layout.summary.top) as i32,
-            self.title_font,
+            self.heading_font,
+        );
+        self.text(tr("状态", "Status"), 244, 75, 220, 36, self.title_font);
+        self.muted_text(
+            tr(
+                "在手机上打开说写，文字会出现在电脑当前光标处。",
+                "Open FlowType on your phone to type at the current cursor.",
+            ),
+            337,
+            193,
+            480,
+            27,
+            self.body_font,
         );
         self.status_phone = self.label_value(
-            tr("手机", "Phone"),
+            tr("连接手机", "Connected phone"),
             snapshot
                 .status
                 .connected_phone
                 .as_deref()
                 .unwrap_or(tr("尚未连接", "Not connected")),
-            105,
+            269,
         );
-        self.label_value(
+        self.status_input = self.label_value(
             tr("输入状态", "Input status"),
-            tr("等待手机输入", "Waiting for phone input"),
-            151,
+            &snapshot.status.summary,
+            324,
         );
         self.status_target = self.label_value(
-            tr("输入位置", "Input location"),
+            tr("当前目标", "Current target"),
             snapshot
                 .status
                 .target_name
                 .as_deref()
                 .unwrap_or(tr("尚未选择", "Not selected")),
-            205,
+            379,
         );
         self.status_address = self.label_value(
-            tr("连接地址", "Address"),
+            tr("局域网地址", "Local address"),
             &format!("{}:{PORT}", self.host),
-            259,
+            434,
         );
         self.status_error = self.muted_text(
             snapshot.status.last_error.as_deref().unwrap_or_default(),
-            220,
-            302,
+            244,
+            465,
             470,
             42,
             self.body_font,
@@ -469,6 +562,17 @@ impl UiContext {
             layout.pair_action.width() as i32,
             (layout.pair_action.bottom - layout.pair_action.top) as i32,
             ButtonKind::Secondary,
+        );
+        self.muted_text(
+            tr(
+                "手机绑定一次即可使用，连接断开后会自动重连。",
+                "Pair once; your phone reconnects automatically.",
+            ),
+            244,
+            119,
+            460,
+            30,
+            self.body_font,
         );
         if snapshot.phones.is_empty() {
             self.muted_text(
@@ -541,11 +645,11 @@ impl UiContext {
             (layout.shell.title.bottom - layout.shell.title.top) as i32,
             self.title_font,
         );
-        self.text(tr("常规", "General"), 220, 92, 120, 26, self.heading_font);
+        self.text(tr("常规", "General"), 244, 125, 120, 26, self.heading_font);
         self.text(
             tr("电脑名称", "Computer name"),
-            220,
-            134,
+            244,
+            164,
             125,
             28,
             self.body_font,
@@ -563,23 +667,35 @@ impl UiContext {
         );
         self.auto_start_checked = settings::auto_start_enabled();
         self.auto_start = self.owner_button(
-            tr("开机启动", "Start with Windows"),
+            tr(
+                "登录 Windows 后自动启动说写",
+                "Start when you sign in to Windows",
+            ),
             ID_AUTO_START,
-            220,
-            174,
-            330,
+            385,
+            203,
+            (layout.shell.content_right - 385.0) as i32,
             34,
             ButtonKind::Checkbox,
         );
+        self.text(tr("开机启动", "Startup"), 244, 206, 125, 28, self.body_font);
         self.floating_enabled_checked = settings::floating_enabled();
         self.show_floating = self.owner_button(
             tr("显示悬浮球", "Show floating ball"),
             ID_SHOW_FLOATING,
-            220,
-            214,
-            220,
+            385,
+            250,
+            (layout.shell.content_right - 385.0) as i32,
             34,
             ButtonKind::Checkbox,
+        );
+        self.text(
+            tr("悬浮球", "Floating ball"),
+            244,
+            253,
+            125,
+            28,
+            self.body_font,
         );
         self.owner_button(
             tr("保存设置", "Save settings"),
@@ -593,8 +709,8 @@ impl UiContext {
 
         self.text(
             tr("输入服务", "Input service"),
-            220,
-            272,
+            244,
+            326,
             140,
             26,
             self.heading_font,
@@ -604,7 +720,8 @@ impl UiContext {
         } else {
             tr("输入服务不可用", "Input unavailable")
         };
-        self.service_status = self.text(service, 246, 308, 180, 28, self.body_font);
+        self.service_status = self.text(service, 403, 360, 180, 28, self.body_font);
+        self.text(tr("运行状态", "Status"), 244, 360, 125, 28, self.body_font);
         self.owner_button(
             tr("修复输入服务", "Repair input"),
             ID_REPAIR,
@@ -616,8 +733,8 @@ impl UiContext {
         );
         self.text(
             tr("版本与更新", "Version & updates"),
-            220,
-            370,
+            244,
+            435,
             180,
             26,
             self.heading_font,
@@ -628,22 +745,29 @@ impl UiContext {
                 tr("当前版本", "Current version"),
                 env!("CARGO_PKG_VERSION")
             ),
-            220,
-            406,
+            244,
+            470,
             350,
             24,
             self.body_font,
         );
-        self.update_status = self.muted_text("", 220, 434, 360, 24, self.body_font);
+        self.update_status = self.muted_text(
+            "",
+            layout.update_status.left as i32,
+            layout.update_status.top as i32,
+            layout.update_status.width() as i32,
+            (layout.update_status.bottom - layout.update_status.top) as i32,
+            self.body_font,
+        );
         self.update_progress = self.control(
             "msctls_progress32",
             "",
             WS_CHILD | PBS_SMOOTH,
             0,
-            220,
-            462,
-            360,
-            6,
+            layout.update_progress.left as i32,
+            layout.update_progress.top as i32,
+            layout.update_progress.width() as i32,
+            (layout.update_progress.bottom - layout.update_progress.top) as i32,
             self.body_font,
         );
         self.update_repository = self.owner_button(
@@ -673,25 +797,15 @@ impl UiContext {
             (layout.update_action.bottom - layout.update_action.top) as i32,
             ButtonKind::Secondary,
         );
-        self.muted_text(
-            tr(
-                "检查更新会连接 GitHub。",
-                "Checking for updates connects to GitHub.",
-            ),
-            220,
-            518,
-            500,
-            34,
-            self.body_font,
-        );
+        self.text(tr("软件更新", "Updates"), 244, 510, 125, 28, self.body_font);
         self.refresh_update_controls();
     }
 
     pub(super) fn build_pairing(&mut self) {
         let layout = PairingLayout::new(self.logical_client_width());
         self.owner_button(
-            "",
-            ID_NAV_PHONES,
+            tr("返回手机列表", "Back to phones"),
+            ID_PAIR_BACK,
             layout.back_action.left as i32,
             layout.back_action.top as i32,
             layout.back_action.width() as i32,
@@ -704,10 +818,21 @@ impl UiContext {
             layout.title.top as i32,
             layout.title.width() as i32,
             (layout.title.bottom - layout.title.top) as i32,
-            self.heading_font,
+            self.title_font,
+        );
+        self.muted_text(
+            tr(
+                "在说写 Android 应用中，打开「添加电脑」扫描二维码。",
+                "On your phone, open Add computer and scan this QR code.",
+            ),
+            244,
+            116,
+            620,
+            28,
+            self.body_font,
         );
         self.pair_open_instruction = self.text(
-            tr("在手机上打开说写，", "Open FlowType on your phone"),
+            tr("打开手机上的说写", "Open FlowType on your phone"),
             layout.open_instruction.left as i32,
             layout.open_instruction.top as i32,
             layout.open_instruction.width() as i32,
@@ -715,7 +840,7 @@ impl UiContext {
             self.heading_font,
         );
         self.pair_scan_instruction = self.text(
-            tr("扫描此二维码", "Scan this QR code"),
+            tr("扫描左侧二维码", "Scan the QR code"),
             layout.scan_instruction.left as i32,
             layout.scan_instruction.top as i32,
             layout.scan_instruction.width() as i32,
@@ -732,7 +857,10 @@ impl UiContext {
             self.body_font,
         );
         self.pair_waiting = self.text(
-            tr("等待手机扫描", "Waiting for scan"),
+            tr(
+                "绑定后就能输入文字和传输文件",
+                "Start typing and transferring after pairing",
+            ),
             layout.waiting.left as i32,
             layout.waiting.top as i32,
             layout.waiting.width() as i32,
@@ -741,8 +869,8 @@ impl UiContext {
         );
         self.pair_note = self.muted_text(
             tr(
-                "二维码仅用于本次绑定，绑定成功后立即失效",
-                "This QR code expires after pairing",
+                "绑定长期有效，可随时手动解除。",
+                "Pairing lasts until you unpair manually.",
             ),
             layout.note.left as i32,
             layout.note.top as i32,
@@ -946,6 +1074,33 @@ pub(super) fn file_transfer_status(
             String::new()
         },
     )
+}
+
+pub(super) fn file_failed_summary(
+    transfer: Option<&crate::file_transfer_server::FileTransferSnapshot>,
+) -> String {
+    let Some(paths) = transfer
+        .map(|value| &value.failed_paths)
+        .filter(|paths| !paths.is_empty())
+    else {
+        return String::new();
+    };
+    let names = paths
+        .iter()
+        .take(2)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if paths.len() > 2 {
+        format!(
+            "{}：{} (+{})",
+            tr("失败文件", "Failed files"),
+            names,
+            paths.len() - 2
+        )
+    } else {
+        format!("{}：{}", tr("失败文件", "Failed files"), names)
+    }
 }
 
 fn format_file_size(bytes: u64) -> String {
